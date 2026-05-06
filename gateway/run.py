@@ -3374,7 +3374,7 @@ class GatewayRunner:
                     _kb.init_db()  # idempotent, handles first-run
                 except Exception:
                     pass
-                return _kb.dispatch_once(conn)
+                return _kb.dispatch_once(conn, max_spawn=int(kanban_cfg.get("max_spawn_per_tick", 2) or 2))
             except Exception:
                 logger.exception("kanban dispatcher: tick failed")
                 return None
