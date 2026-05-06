@@ -1230,6 +1230,22 @@ DEFAULT_CONFIG = {
         # Seconds between dispatcher ticks (idle or not). Lower = snappier
         # pickup of newly-ready tasks; higher = less SQL pressure.
         "dispatch_interval_seconds": 60,
+        # Max concurrent running workers per profile on a single board.
+        # Prevents a single profile (e.g. "backend-eng") from consuming
+        # all system resources. See ADR 002 for the 2026-05-03 fork bomb
+        # incident where 19 backend-eng workers exhausted the process table.
+        "max_concurrent_per_profile": 2,
+        # Max concurrent running workers across ALL profiles on a board.
+        # Hard cap to prevent the process table from filling up.
+        "max_concurrent_board": 6,
+        # Whether to check host resources (PID count, RAM, load average)
+        # before attempting to spawn. Disabling is useful in tests or
+        # containers where /proc is unavailable. Default: True.
+        "resource_check": True,
+        # Whether to apply exponential backoff to tasks with consecutive
+        # failures. Default: True. Backoff schedule is hardcoded in
+        # BACKOFF_DELAYS (30s → 1min → 2min → ... → 4h).
+        "backoff_check": True,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

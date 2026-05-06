@@ -2560,6 +2560,29 @@ DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 # and rotates on spawn if the file is larger than this at spawn time.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
 
+# ---------------------------------------------------------------------------
+# Resource-aware dispatcher limits (ADR 002: fork-bomb prevention)
+# ---------------------------------------------------------------------------
+# Max concurrent running workers per profile. Prevents a single profile
+# (e.g. "backend-eng") from consuming all system resources even if many
+# tasks are assigned to it. See 2026-05-03 incident: 19 backend-eng workers
+# spawned simultaneously, exhausting the process table.
+DEFAULT_MAX_CONCURRENT_PER_PROFILE = 2
+# Max concurrent running workers across ALL profiles on a single board.
+DEFAULT_MAX_CONCURRENT_BOARD = 6
+
+# Exponential backoff delays (seconds) for tasks with consecutive failures.
+# Index = consecutive_failures - 1. After exhausting this list, use the
+# last entry. If the task reaches failure_limit consecutive failures,
+# it is auto-blocked instead of retried.
+BACKOFF_DELAYS = [30, 60, 120, 300, 600, 1800, 3600, 14400]
+
+# Resource health thresholds for can_spawn(). If ANY threshold is exceeded,
+# the dispatcher defers spawning and logs a "resource_pressure" event.
+RESOURCE_MAX_PID_RATIO = 0.80      # spawn blocked if PIDs > 80% of kernel max
+RESOURCE_MIN_MEM_MB = 500          # spawn blocked if available RAM < 500 MB
+RESOURCE_MAX_LOAD_MULTIPLIER = 2.0  # spawn blocked if load1 > N_CPUs * 2
+
 
 @dataclass
 class DispatchResult:
@@ -2585,6 +2608,128 @@ class DispatchResult:
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
+    deferred_resource: list[tuple[str, str]] = field(default_factory=list)
+    """Task ids deferred because host resources are pressured.
+    Each entry is ``(task_id, reason_string)``."""
+    deferred_concurrency: list[tuple[str, str]] = field(default_factory=list)
+    """Task ids deferred because concurrency limits would be exceeded.
+    Each entry is ``(task_id, reason_string)``."""
+    deferred_backoff: list[tuple[str, float]] = field(default_factory=list)
+    """Task ids deferred because they are in an exponential backoff window.
+    Each entry is ``(task_id, seconds_remaining)``."""
+    health_snapshot: Optional[dict] = field(default_factory=dict)
+    """System health metrics captured at the start of this dispatch cycle.
+    Keys: pids_running, mem_available_mb, load_1min, cpu_count."""
+
+
+# ---------------------------------------------------------------------------
+# Resource health checks (ADR 002: fork-bomb prevention)
+# ---------------------------------------------------------------------------
+
+def _capture_health_snapshot() -> dict:
+    """Capture current system resource metrics for diagnostics.
+
+    Returns a dict with pids_running, pid_max, mem_available_mb,
+    load_1min, and cpu_count. Safe to call on any OS; missing
+    metrics default to sentinel values.
+    """
+    snap: dict = {}
+    # PID count and kernel max
+    try:
+        pids = [p for p in os.listdir('/proc') if p.isdigit()]
+        snap['pids_running'] = len(pids)
+        with open('/proc/sys/kernel/pid_max', 'r') as f:
+            snap['pid_max'] = int(f.read().strip())
+    except (OSError, ValueError):
+        # Non-Linux or /proc unmounted — skip PID check
+        snap['pids_running'] = -1
+        snap['pid_max'] = -1
+    # Available memory
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            for line in f:
+                if line.startswith('MemAvailable:'):
+                    snap['mem_available_mb'] = int(line.split()[1]) // 1024
+                    break
+    except (OSError, ValueError):
+        snap['mem_available_mb'] = -1
+    # Load average + CPU count
+    try:
+        snap['load_1min'] = os.getloadavg()[0]
+    except OSError:
+        snap['load_1min'] = -1.0
+    snap['cpu_count'] = os.cpu_count() or -1
+    return snap
+
+
+def can_spawn(health: Optional[dict] = None) -> tuple[bool, str]:
+    """Check whether the host has enough resources to spawn a new worker.
+
+    Returns ``(ok, reason)``. When ``ok`` is False, ``reason`` explains
+    which threshold was exceeded. The dispatcher uses this to defer
+    spawns instead of attempting them and crashing (see 2026-05-03
+    fork bomb: every spawn hit ``[Errno 11] Resource temporarily
+    unavailable`` because the process table was full).
+
+    The check is cheap (~1ms on Linux) and safe to call every tick.
+    """
+    if health is None:
+        health = _capture_health_snapshot()
+    # PID pressure
+    pids = health.get('pids_running', -1)
+    pid_max = health.get('pid_max', -1)
+    if pids > 0 and pid_max > 0:
+        ratio = pids / pid_max
+        if ratio > RESOURCE_MAX_PID_RATIO:
+            return (False, f"pids={pids}/{pid_max} ({ratio:.0%} > {RESOURCE_MAX_PID_RATIO:.0%})")
+    # Memory pressure
+    mem_mb = health.get('mem_available_mb', -1)
+    if mem_mb >= 0 and mem_mb < RESOURCE_MIN_MEM_MB:
+        return (False, f"mem_available={mem_mb}MB < {RESOURCE_MIN_MEM_MB}MB")
+    # CPU pressure
+    load1 = health.get('load_1min', -1.0)
+    cpus = health.get('cpu_count', -1)
+    if load1 >= 0 and cpus > 0:
+        threshold = cpus * RESOURCE_MAX_LOAD_MULTIPLIER
+        if load1 > threshold:
+            return (False, f"load={load1:.1f} > {cpus}×{RESOURCE_MAX_LOAD_MULTIPLIER}={threshold:.1f}")
+    return (True, "ok")
+
+
+def backoff_remaining(consecutive_failures: int, last_failure_at: Optional[float]) -> float:
+    """Calculate seconds remaining in the backoff window for a crashed task.
+
+    Uses the ``BACKOFF_DELAYS`` schedule based on the task's
+    ``consecutive_failures`` count. Returns 0 if the backoff
+    window has already elapsed.
+
+    ``last_failure_at`` is a Unix timestamp (from the task_runs table).
+    """
+    if consecutive_failures <= 0 or not last_failure_at:
+        return 0.0
+    idx = min(consecutive_failures - 1, len(BACKOFF_DELAYS) - 1)
+    delay = BACKOFF_DELAYS[idx]
+    elapsed = time.time() - last_failure_at
+    remaining = delay - elapsed
+    return max(0.0, remaining)
+
+
+def _running_workers_by_profile(conn: sqlite3.Connection) -> dict[str, int]:
+    """Count running workers grouped by assignee profile."""
+    rows = conn.execute(
+        "SELECT assignee, COUNT(*) as cnt FROM tasks "
+        "WHERE status = 'running' AND assignee IS NOT NULL "
+        "GROUP BY assignee"
+    ).fetchall()
+    return {r['assignee']: r['cnt'] for r in rows}
+
+
+def _running_workers_total(conn: sqlite3.Connection) -> int:
+    """Count total running workers across all profiles."""
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM tasks WHERE status = 'running'"
+    ).fetchone()
+    return row['cnt'] if row else 0
 
 
 def _pid_alive(pid: Optional[int]) -> bool:
@@ -3130,6 +3275,10 @@ def dispatch_once(
     max_spawn: Optional[int] = None,
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     board: Optional[str] = None,
+    max_concurrent_per_profile: int = DEFAULT_MAX_CONCURRENT_PER_PROFILE,
+    max_concurrent_board: int = DEFAULT_MAX_CONCURRENT_BOARD,
+    resource_check: bool = True,
+    backoff_check: bool = True,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -3137,14 +3286,26 @@ def dispatch_once(
       1. Reclaim stale running tasks (TTL expired).
       2. Reclaim crashed running tasks (host-local PID no longer alive).
       3. Promote todo -> ready where all parents are done.
-      4. For each ready task with an assignee, atomically claim and call
-         ``spawn_fn(task, workspace_path, board) -> Optional[int]``. The
-         return value (if any) is recorded as ``worker_pid`` so subsequent
-         ticks can detect crashes before the TTL expires.
+      4. Capture system health snapshot for diagnostics.
+      5. For each ready task with an assignee:
+         a. Check resource pressure (PID count, RAM, load). If pressured,
+            defer and skip — do NOT attempt to spawn.
+         b. Check concurrency limits (per-profile and board-wide). If
+            exceeded, defer and skip.
+         c. Check exponential backoff (consecutive_failures). If the task
+            is still in its backoff window, defer and skip.
+         d. Atomically claim and call
+            ``spawn_fn(task, workspace_path, board) -> Optional[int]``.
+            The return value (if any) is recorded as ``worker_pid`` so
+            subsequent ticks can detect crashes before the TTL expires.
 
-    Spawn failures are counted per-task. After ``failure_limit`` consecutive
-    failures the task is auto-blocked with the last error as its reason —
-    prevents the dispatcher from thrashing forever on an unfixable task.
+    Fork-bomb prevention (ADR 002):
+      - Resource checks prevent spawning when the host is overloaded.
+      - Concurrency caps prevent a single profile from monopolizing
+        workers (max 2/profile by default, 6/board total).
+      - Exponential backoff (30s → 1min → 2min → 5min → 10min → 30min
+        → 1h → 4h) prevents crash-retry loops. Tasks that reach
+        ``failure_limit`` consecutive failures are auto-blocked.
 
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
@@ -3156,11 +3317,39 @@ def dispatch_once(
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn)
 
+    # --- ADR 002: Resource-aware dispatch ---
+    # Capture system health once per tick (cheap, ~1ms).
+    health = _capture_health_snapshot() if resource_check else {}
+    result.health_snapshot = health
+
+    # Check overall resource pressure before entering the spawn loop.
+    # If the host is overloaded, we skip ALL spawns this tick rather
+    # than attempting each one only to hit EAGAIN/ENOMEM.
+    resource_ok = True
+    resource_reason = ""
+    if resource_check:
+        resource_ok, resource_reason = can_spawn(health)
+
+    # Count running workers for concurrency enforcement.
+    profile_counts = _running_workers_by_profile(conn) if max_concurrent_per_profile > 0 else {}
+    total_running = _running_workers_total(conn) if max_concurrent_board > 0 else 0
+
+    # Fetch ready rows with consecutive_failures from tasks, plus the
+    # most recent failure timestamp from task_runs for backoff calculation.
     ready_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, consecutive_failures FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+    # Pre-fetch last failure timestamps for backoff (one query, not N+1).
+    _failure_times: dict[str, float] = {}
+    for _fr in conn.execute(
+        "SELECT task_id, MAX(started_at) as last_fail "
+        "FROM task_runs WHERE outcome IN ('crashed','spawn_failed','timed_out') "
+        "GROUP BY task_id"
+    ).fetchall():
+        if _fr["last_fail"] is not None:
+            _failure_times[_fr["task_id"]] = float(_fr["last_fail"])
     spawned = 0
     for row in ready_rows:
         if max_spawn is not None and spawned >= max_spawn:
@@ -3168,6 +3357,36 @@ def dispatch_once(
         if not row["assignee"]:
             result.skipped_unassigned.append(row["id"])
             continue
+
+        # --- Resource check (ADR 002) ---
+        if not resource_ok:
+            result.deferred_resource.append((row["id"], resource_reason))
+            continue
+
+        # --- Per-profile concurrency cap (ADR 002) ---
+        assignee = row["assignee"]
+        profile_running = profile_counts.get(assignee, 0)
+        if max_concurrent_per_profile > 0 and profile_running >= max_concurrent_per_profile:
+            result.deferred_concurrency.append(
+                (row["id"], f"profile={assignee} running={profile_running} cap={max_concurrent_per_profile}")
+            )
+            continue
+
+        # --- Board-wide concurrency cap (ADR 002) ---
+        if max_concurrent_board > 0 and total_running >= max_concurrent_board:
+            result.deferred_concurrency.append(
+                (row["id"], f"board total={total_running} cap={max_concurrent_board}")
+            )
+            continue
+
+        # --- Exponential backoff (ADR 002) ---
+        if backoff_check:
+            cf = int(row["consecutive_failures"] or 0)
+            lfa = _failure_times.get(row["id"])
+            remaining = backoff_remaining(cf, lfa)
+            if remaining > 0:
+                result.deferred_backoff.append((row["id"], remaining))
+                continue
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
         # with "Profile 'X' does not exist" when the assignee names a
@@ -3234,6 +3453,11 @@ def dispatch_once(
             # complete_task).
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
+            # Update in-memory concurrency counters so the next iteration
+            # of the loop sees the new worker (avoids over-spawning within
+            # a single tick).
+            profile_counts[claimed.assignee or ""] = profile_counts.get(claimed.assignee or "", 0) + 1
+            total_running += 1
         except Exception as exc:
             auto = _record_spawn_failure(
                 conn, claimed.id, str(exc),

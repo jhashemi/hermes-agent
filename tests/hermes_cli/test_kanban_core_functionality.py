@@ -91,17 +91,20 @@ def test_spawn_failure_auto_blocks_after_limit(kanban_home, all_assignees_spawna
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         # Three ticks below the default limit (5) → still ready, counter grows.
+        # Disable backoff and resource checks to test the spawn failure
+        # circuit breaker in isolation (ADR 002 checks would defer the task
+        # before it reaches the spawn attempt).
         for i in range(3):
-            res = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5)
+            res = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5, backoff_check=False, resource_check=False)
             assert tid not in res.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "ready"
         assert task.consecutive_failures == 3
 
         # Two more ticks → fifth failure exceeds the limit.
-        res1 = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5)
+        res1 = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5, backoff_check=False, resource_check=False)
         assert tid not in res1.auto_blocked
-        res2 = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5)
+        res2 = kb.dispatch_once(conn, spawn_fn=_bad_spawn, failure_limit=5, backoff_check=False, resource_check=False)
         assert tid in res2.auto_blocked
         task = kb.get_task(conn, tid)
         assert task.status == "blocked"
@@ -890,7 +893,7 @@ def test_spawn_failure_circuit_breaker_emits_gave_up(kanban_home, all_assignees_
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         for _ in range(5):
-            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5)
+            kb.dispatch_once(conn, spawn_fn=_bad, failure_limit=5, backoff_check=False, resource_check=False)
         events = kb.list_events(conn, tid)
         kinds = [e.kind for e in events]
         assert "gave_up" in kinds
