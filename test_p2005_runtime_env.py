@@ -12,6 +12,7 @@ Ensures dynamic config changes work without restart.
 import sys
 import os
 import asyncio
+import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 
 # Add project to path
@@ -142,6 +143,7 @@ def test_get_instance_config_with_empty_hostname():
     print("  ✓ Empty hostname handled gracefully")
 
 
+@pytest.mark.asyncio
 async def test_execute_on_instance_loads_env_at_runtime():
     """Test that execute_on_instance loads env vars at runtime."""
     print("[TEST 7] execute_on_instance() loads env at runtime...")
@@ -166,6 +168,7 @@ async def test_execute_on_instance_loads_env_at_runtime():
     print("  ✓ execute_on_instance loaded env at runtime")
 
 
+@pytest.mark.asyncio
 async def test_get_instance_status_loads_env_at_runtime():
     """Test that get_instance_status loads env vars at runtime."""
     print("[TEST 8] get_instance_status() loads env at runtime...")
@@ -191,6 +194,7 @@ async def test_get_instance_status_loads_env_at_runtime():
     print("  ✓ get_instance_status loaded env at runtime")
 
 
+@pytest.mark.asyncio
 async def test_dynamic_config_changes():
     """Test that config changes are picked up on each call (no caching)."""
     print("[TEST 9] Dynamic config changes without restart...")

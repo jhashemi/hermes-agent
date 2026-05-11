@@ -73,11 +73,15 @@ class TestValidateHostname:
             "invalid!.com",           # Invalid character
             "invalid@.com",           # Invalid character
             "invalid .com",           # Space
-            "",                       # Empty string
-            " ",                      # Just whitespace
         ]
         for fqdn in invalid_fqdns:
             assert validate_hostname(fqdn) is False, f"Should reject invalid FQDN: {fqdn}"
+        
+        # Empty and whitespace should raise ValueError
+        with pytest.raises(ValueError, match="hostname cannot be empty"):
+            validate_hostname("")
+        with pytest.raises(ValueError, match="hostname cannot be empty"):
+            validate_hostname(" ")
 
     def test_ipv6_addresses(self):
         """Test IPv6 addresses (basic validation)."""

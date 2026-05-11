@@ -130,6 +130,19 @@ def validate_hostname(hostname: str) -> bool:
     if hostname == 'localhost':
         return True
     
+    # Reject hostnames that look like partial IPs (e.g., "192.168.1.a")
+    # These have mostly digits and dots with maybe one letter
+    parts = hostname.split('.')
+    if len(parts) >= 3:
+        # Check if each part is either a number or very short
+        digit_parts = 0
+        for part in parts:
+            if part and part.isdigit() and len(part) <= 3:
+                digit_parts += 1
+        # If more than half the parts are digits, it looks like a partial IP
+        if digit_parts > len(parts) / 2:
+            return False
+    
     # Pattern for FQDN: must contain at least one letter (not all digits)
     # and follow DNS naming rules
     fqdn_pattern = r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
