@@ -20,10 +20,17 @@ import os
 import json
 import threading
 import re
-from typing import Set, Optional, Dict, Any
+from typing import Set, Optional, Dict, Any, Union
 from pathlib import Path
 from datetime import datetime
 from gateway.platforms.base import MessageEvent
+from gateway.error_response import (
+    ErrorResponse,
+    ErrorCode,
+    ErrorSeverity,
+    create_access_denied_error,
+    create_validation_error,
+)
 
 
 # ============================================================================
@@ -332,7 +339,7 @@ async def handle_access_grant_command(
     gateway_runner,
     event: MessageEvent,
     user_id: str,
-) -> str:
+) -> Union[str, ErrorResponse]:
     """Handle /access-grant <user_id> command.
 
     Args:
@@ -341,38 +348,57 @@ async def handle_access_grant_command(
         user_id: User ID to grant access to
 
     Returns:
-        Confirmation message
+        Confirmation message or ErrorResponse
     """
     manager = get_access_manager()
 
     # Only allow Taylor Swanson (you) to grant access
     requester_id = manager.get_user_id(event)
     if requester_id not in DEFAULT_WHITELIST:
-        return (
-            f"🚫 Only administrators can grant access.\n"
-            f"Your ID: {requester_id}"
+        error = create_access_denied_error(
+            user_id=requester_id,
+            command="access-grant",
+            reason="Only administrators can grant access",
         )
+        return error.to_emoji_response()
 
     if not user_id or user_id.strip() == "":
-        return "❌ Usage: /access-grant <user_id>"
+        error = ErrorResponse(
+            code=ErrorCode.INVALID_COMMAND,
+            message="Usage: /access-grant <user_id>",
+            severity=ErrorSeverity.LOW.value,
+            user_id=requester_id,
+            command="access-grant",
+        )
+        return error.to_emoji_response()
 
     user_id = user_id.strip().lower()
 
     # Validate user ID format
     is_valid, error_msg = validate_user_id(user_id)
     if not is_valid:
-        return f"❌ Invalid user ID: {error_msg}"
+        error = create_validation_error(
+            field="user_id",
+            reason=error_msg,
+            user_id=requester_id,
+        )
+        return error.to_emoji_response()
 
     # Prevent granting to unknown users without confirmation
     if " " in user_id:
-        return "❌ User ID cannot contain spaces. Use underscores: john_doe"
+        error = create_validation_error(
+            field="user_id",
+            reason="User ID cannot contain spaces. Use underscores: john_doe",
+            user_id=requester_id,
+        )
+        return error.to_emoji_response()
 
     newly_added = manager.grant_access(user_id, grantor_id=requester_id)
 
     if newly_added:
         return (
-            f"✅ Granted access to **{user_id}**\n\n"
-            f"They can now use agent and instance commands.\n\n"
+            f"✅ Granted access to **{user_id}**\\n\\n"
+            f"They can now use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
@@ -383,7 +409,7 @@ async def handle_access_revoke_command(
     gateway_runner,
     event: MessageEvent,
     user_id: str,
-) -> str:
+) -> Union[str, ErrorResponse]:
     """Handle /access-revoke <user_id> command.
 
     Args:
@@ -392,41 +418,63 @@ async def handle_access_revoke_command(
         user_id: User ID to revoke access from
 
     Returns:
-        Confirmation message
+        Confirmation message or ErrorResponse
     """
     manager = get_access_manager()
 
     # Only allow default whitelist members to revoke
     requester_id = manager.get_user_id(event)
     if requester_id not in DEFAULT_WHITELIST:
-        return (
-            f"🚫 Only administrators can revoke access.\n"
-            f"Your ID: {requester_id}"
+        error = create_access_denied_error(
+            user_id=requester_id,
+            command="access-revoke",
+            reason="Only administrators can revoke access",
         )
+        return error.to_emoji_response()
 
     if not user_id or user_id.strip() == "":
-        return "❌ Usage: /access-revoke <user_id>"
+        error = ErrorResponse(
+            code=ErrorCode.INVALID_COMMAND,
+            message="Usage: /access-revoke <user_id>",
+            severity=ErrorSeverity.LOW.value,
+            user_id=requester_id,
+            command="access-revoke",
+        )
+        return error.to_emoji_response()
 
     user_id = user_id.strip().lower()
 
     # Validate user ID format
     is_valid, error_msg = validate_user_id(user_id)
     if not is_valid:
-        return f"❌ Invalid user ID: {error_msg}"
+        error = create_validation_error(
+            field="user_id",
+            reason=error_msg,
+            user_id=requester_id,
+        )
+        return error.to_emoji_response()
 
     # Prevent revoking access from default whitelist
     if user_id in DEFAULT_WHITELIST:
-        return (
-            f"🔒 Cannot revoke access from default administrator: **{user_id}**\n\n"
-            f"To modify core administrators, edit the source code."
+        error = ErrorResponse(
+            code=ErrorCode.ACCESS_DENIED,
+            message=f"Cannot revoke access from default administrator: **{user_id}**. To modify core administrators, edit the source code.",
+            context={
+                "user_id": user_id,
+                "reason": "Default administrator",
+            },
+            severity=ErrorSeverity.MEDIUM.value,
+            user_id=requester_id,
+            command="access-revoke",
         )
+        return error.to_emoji_response()
 
     was_removed = manager.revoke_access(user_id, grantor_id=requester_id)
 
     if was_removed:
         return (
-            f"✅ Revoked access from **{user_id}**\n\n"
-            f"They can no longer use agent and instance commands.\n\n"
+            f"✅ Revoked access from **{user_id}**\\n\\n"
+            f"They can no longer use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
@@ -491,7 +539,7 @@ async def check_access_and_execute(
     handler_func,
     *args,
     **kwargs,
-) -> str:
+) -> Union[str, ErrorResponse]:
     """Check access before executing a restricted command.
 
     Args:
@@ -502,20 +550,18 @@ async def check_access_and_execute(
         *args, **kwargs: Arguments to pass to handler
 
     Returns:
-        Response from handler or access denied message
+        Response from handler or ErrorResponse
     """
     manager = get_access_manager()
 
     if not manager.has_access(event):
         user_id = manager.get_user_id(event)
-        return (
-            f"🚫 Access Denied\n\n"
-            f"User: {user_id}\n"
-            f"Command: /{command_name}\n\n"
-            f"You don't have permission to use this command. "
-            f"Contact an administrator.\n\n"
-            f"Status: /access-status"
+        error = create_access_denied_error(
+            user_id=user_id,
+            command=command_name,
+            reason="You don't have permission to use this command. Contact an administrator.",
         )
+        return error.to_emoji_response()
 
     # User has access, execute the handler
     return await handler_func(gateway_runner, event, *args, **kwargs)

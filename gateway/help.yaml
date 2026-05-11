@@ -1,0 +1,79 @@
+# Help System Configuration
+# Dynamic help menu for Hermes WhatsApp Gateway
+# 
+# Sections: agents, instances, general
+# Updated at runtime for extensibility
+
+agents:
+  title: "🤖 Executive Agent Commands"
+  description: "Connect to expert personas with specialized knowledge."
+  commands:
+    load-demis: "Connect to Demis Hassabis (DeepMind co-founder, AI researcher)"
+    load-jony: "Connect to Jony Ive (Apple design chief, product visionary)"
+    load-jeff: "Connect to Jeff Dean (Google AI/systems researcher)"
+    load-knuth: "Connect to Donald Knuth (Computer science pioneer, TAOCP)"
+    load-tigani: "Connect to Jordan Tigani (BigQuery architect, data warehouse)"
+    load-turing: "Connect to Alan Turing (Computing theory pioneer)"
+    agents-list: "List all available executive agents"
+    agents-disconnect: "Disconnect from current agent and return to default"
+  example: |
+    Example:
+      User: /load-demis
+      System: Switched to Demis Hassabis
+      User: How should we approach AGI safety?
+      Agent: [Responds as Demis Hassabis]
+
+instances:
+  title: "🌐 Multi-Instance Orchestration"
+  description: "Control which Hermes instance executes your requests."
+  commands:
+    switch-local: "Switch to local Hermes instance (WhatsApp gateway)"
+    switch-hermes2: "Switch to remote Hermes instance (agent execution layer)"
+    hermes-list: "List all available Hermes instances and status"
+    hermes-status: "Show current active instance and connection health"
+  example: |
+    Example:
+      User: /hermes-list
+      System: Shows 🟢 LOCAL and 🔵 REMOTE (hermes2) instances
+      User: /switch-hermes2
+      System: Switched to remote instance (hermes2)
+      User: What is the meaning of life?
+      Agent: [Executes on hermes2]
+
+general:
+  title: "📋 General Commands"
+  description: "Common utility commands."
+  commands:
+    help: "Show this help menu (or /help <topic>)"
+    status: "Show current Hermes gateway status"
+    clear: "Clear conversation history"
+    models: "Show available AI models"
+    settings: "View or change user settings"
+  example: |
+    Example:
+      User: /help agents
+      System: Shows all agent loading commands
+      User: /status
+      System: Shows gateway health and model info
+
+# Command categories order for help index
+categories:
+  - agents
+  - instances
+  - general
+
+# Quick reference (shown on welcome)
+quick_reference:
+  - section: "Instance Control"
+    commands:
+      - "/hermes-list → List instances"
+      - "/switch-hermes2 → Route to agent layer"
+  - section: "Agent Personas"
+    commands:
+      - "/load-demis → Chat as Demis Hassabis"
+      - "/load-jony → Chat as Jony Ive"
+      - "/agents-list → All personas"
+  - section: "Help"
+    commands:
+      - "/help → Command help"
+      - "/help agents → Agent commands"

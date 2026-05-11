@@ -7,82 +7,60 @@ Provides hierarchical help organization:
   /help general                   → Show general commands
   /help-agents (alias)
   /help-instances (alias)
+
+Help content is loaded from help.yaml at runtime with validation.
 """
 
 from typing import Optional, Dict, List
 from gateway.platforms.base import MessageEvent
+from gateway.help_config import get_help_config, HelpConfigError
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
-# Help Content Registry
+# Help Content Loading (Dynamic from YAML)
 # ============================================================================
 
-HELP_TOPICS: Dict[str, Dict[str, str]] = {
-    "agents": {
-        "title": "🤖 Executive Agent Commands",
-        "description": "Connect to expert personas with specialized knowledge.",
-        "commands": {
-            "load-demis": "Connect to Demis Hassabis (DeepMind co-founder, AI researcher)",
-            "load-jony": "Connect to Jony Ive (Apple design chief, product visionary)",
-            "load-jeff": "Connect to Jeff Dean (Google AI/systems researcher)",
-            "load-knuth": "Connect to Donald Knuth (Computer science pioneer, TAOCP)",
-            "load-tigani": "Connect to Jordan Tigani (BigQuery architect, data warehouse)",
-            "load-turing": "Connect to Alan Turing (Computing theory pioneer)",
-            "agents-list": "List all available executive agents",
-            "agents-disconnect": "Disconnect from current agent and return to default",
-        },
-        "example": (
-            "Example:\n"
-            "  User: /load-demis\n"
-            "  System: Switched to Demis Hassabis\n"
-            "  User: How should we approach AGI safety?\n"
-            "  Agent: [Responds as Demis Hassabis]"
-        ),
-    },
-    "instances": {
-        "title": "🌐 Multi-Instance Orchestration",
-        "description": "Control which Hermes instance executes your requests.",
-        "commands": {
-            "switch-local": "Switch to local Hermes instance (WhatsApp gateway)",
-            "switch-hermes2": "Switch to remote Hermes instance (agent execution layer)",
-            "hermes-list": "List all available Hermes instances and status",
-            "hermes-status": "Show current active instance and connection health",
-        },
-        "example": (
-            "Example:\n"
-            "  User: /hermes-list\n"
-            "  System: Shows 🟢 LOCAL and 🔵 REMOTE (hermes2) instances\n"
-            "  User: /switch-hermes2\n"
-            "  System: Switched to remote instance (hermes2)\n"
-            "  User: What is the meaning of life?\n"
-            "  Agent: [Executes on hermes2]"
-        ),
-    },
-    "general": {
-        "title": "📋 General Commands",
-        "description": "Common utility commands.",
-        "commands": {
-            "help": "Show this help menu (or /help <topic>)",
-            "status": "Show current Hermes gateway status",
-            "clear": "Clear conversation history",
-            "models": "Show available AI models",
-            "settings": "View or change user settings",
-        },
-        "example": (
-            "Example:\n"
-            "  User: /help agents\n"
-            "  System: Shows all agent loading commands\n"
-            "  User: /status\n"
-            "  System: Shows gateway health and model info"
-        ),
-    },
-}
+def get_help_topics() -> Dict[str, Dict[str, str]]:
+    """Get help topics from loaded configuration.
+    
+    Returns:
+        Dictionary of help topics (agents, instances, general).
+        
+    Raises:
+        HelpConfigError: If configuration cannot be loaded.
+    """
+    try:
+        config = get_help_config()
+        # Extract help topics (all keys except metadata)
+        topics = {
+            key: value
+            for key, value in config.items()
+            if key in ("agents", "instances", "general")
+        }
+        return topics
+    except HelpConfigError as e:
+        logger.error(f"Failed to load help configuration: {e}")
+        raise
 
-COMMAND_CATEGORIES = [
-    "agents",
-    "instances",
-    "general",
-]
+
+def get_command_categories() -> List[str]:
+    """Get ordered list of help categories from config.
+    
+    Returns:
+        List of category names in order.
+        
+    Raises:
+        HelpConfigError: If configuration cannot be loaded.
+    """
+    try:
+        config = get_help_config()
+        return config.get("categories", ["agents", "instances", "general"])
+    except HelpConfigError as e:
+        logger.error(f"Failed to load help configuration: {e}")
+        raise
 
 
 # ============================================================================
@@ -90,11 +68,23 @@ COMMAND_CATEGORIES = [
 # ============================================================================
 
 def format_help_topic(topic: str) -> str:
-    """Format detailed help for a specific topic."""
-    if topic not in HELP_TOPICS:
+    """Format detailed help for a specific topic.
+    
+    Args:
+        topic: Name of the help topic (agents, instances, general).
+        
+    Returns:
+        Formatted help text for the topic.
+    """
+    try:
+        help_topics = get_help_topics()
+    except HelpConfigError as e:
+        return f"❌ Error loading help: {e}"
+
+    if topic not in help_topics:
         return f"❌ Help topic '{topic}' not found. Try: /help"
 
-    data = HELP_TOPICS[topic]
+    data = help_topics[topic]
     lines = [
         f"\n{data['title']}",
         "=" * 50,
@@ -115,15 +105,26 @@ def format_help_topic(topic: str) -> str:
 
 
 def format_help_index() -> str:
-    """Format the help index (top-level menu)."""
+    """Format the help index (top-level menu).
+    
+    Returns:
+        Formatted help index text.
+    """
+    try:
+        help_topics = get_help_topics()
+        categories = get_command_categories()
+    except HelpConfigError as e:
+        return f"❌ Error loading help: {e}"
+
     lines = [
         "📚 **Hermes WhatsApp Gateway — Command Help**\n",
         "Pick a topic to learn more:\n",
     ]
 
-    for topic in COMMAND_CATEGORIES:
-        data = HELP_TOPICS[topic]
-        lines.append(f"  /help {topic:15} → {data['title']}")
+    for topic in categories:
+        if topic in help_topics:
+            data = help_topics[topic]
+            lines.append(f"  /help {topic:15} → {data['title']}")
 
     lines.extend([
         "",
@@ -142,24 +143,30 @@ def format_help_index() -> str:
 
 
 def format_quick_reference() -> str:
-    """Format a quick reference card (for welcome message)."""
-    lines = [
-        "🎯 **Quick Command Reference**",
-        "",
-        "Instance Control:",
-        "  /hermes-list      List instances",
-        "  /switch-hermes2   Route to agent layer",
-        "",
-        "Agent Personas:",
-        "  /load-demis       Chat as Demis Hassabis",
-        "  /load-jony        Chat as Jony Ive",
-        "  /agents-list      All personas",
-        "",
-        "Help:",
-        "  /help             Command help",
-        "  /help agents      Agent commands",
-        "",
-    ]
+    """Format a quick reference card (for welcome message).
+    
+    Returns:
+        Formatted quick reference text.
+    """
+    try:
+        config = get_help_config()
+        quick_ref = config.get("quick_reference", [])
+    except HelpConfigError as e:
+        logger.error(f"Failed to load quick reference: {e}")
+        quick_ref = []
+
+    lines = ["🎯 **Quick Command Reference**", ""]
+
+    for section in quick_ref:
+        section_name = section.get("section", "")
+        commands = section.get("commands", [])
+
+        if section_name:
+            lines.append(f"{section_name}:")
+            for cmd in commands:
+                lines.append(f"  {cmd}")
+            lines.append("")
+
     return "\n".join(lines)
 
 
@@ -235,3 +242,33 @@ def get_help_command_handler(command_name: str):
     """Get handler for a help command."""
     canonical = command_name.lower().lstrip("/")
     return HELP_COMMAND_HANDLERS.get(canonical)
+
+
+# ============================================================================
+# Public API (backward compatible)
+# ============================================================================
+
+def get_help(topic: Optional[str] = None) -> str:
+    """Get help text for a topic or show index.
+    
+    Args:
+        topic: Optional topic name. If None, shows index.
+        
+    Returns:
+        Formatted help text.
+    """
+    if not topic:
+        return format_help_index()
+    return format_help_topic(topic.lower().strip("/"))
+
+
+def get_help_by_topic(topic: str) -> str:
+    """Get help text for a specific topic.
+    
+    Args:
+        topic: Topic name (agents, instances, general).
+        
+    Returns:
+        Formatted help text for the topic.
+    """
+    return format_help_topic(topic.lower().strip("/"))

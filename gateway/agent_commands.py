@@ -11,9 +11,18 @@ These handlers:
 """
 
 from typing import Optional, Union
+import re
 from gateway.platforms.base import MessageEvent, EphemeralReply
 from agent.persona_manager import PersonaManager, EXECUTIVE_PERSONAS
 from gateway.instance_orchestrator import InstanceOrchestrator
+from gateway.error_response import (
+    ErrorResponse,
+    ErrorCode,
+    ErrorSeverity,
+    create_access_denied_error,
+    create_not_found_error,
+    create_validation_error,
+)
 from gateway.access_control import (
     get_access_manager,
     check_access_and_execute,
@@ -32,11 +41,50 @@ from gateway.help_menu import (
 )
 
 
+# ============================================================================
+# Instance Name Validation (P3-002)
+# ============================================================================
+
+def validate_instance_name(instance_name: str) -> tuple[bool, Optional[str]]:
+    """Validate instance name according to P3-002 requirements.
+    
+    Valid instance names:
+    - Contains only alphanumeric characters (a-z, A-Z, 0-9) and hyphens (-)
+    - Maximum 64 characters long
+    - Not empty
+    
+    Args:
+        instance_name: The instance name to validate
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+        - (True, None) if valid
+        - (False, error_message) if invalid
+    """
+    # Check for empty string
+    if not instance_name or not isinstance(instance_name, str):
+        return (False, "Instance name cannot be empty")
+    
+    # Check max length
+    if len(instance_name) > 64:
+        return (False, f"Instance name must not exceed 64 characters (got {len(instance_name)})")
+    
+    # Check for valid characters: alphanumeric and hyphens only
+    if not re.match(r'^[a-zA-Z0-9-]+$', instance_name):
+        return (False, "Instance name can only contain alphanumeric characters (a-z, A-Z, 0-9) and hyphens (-)")
+    
+    # Check that it doesn't start or end with a hyphen
+    if instance_name.startswith('-') or instance_name.endswith('-'):
+        return (False, "Instance name cannot start or end with a hyphen")
+    
+    return (True, None)
+
+
 async def handle_load_agent_command(
     gateway_runner,
     event: MessageEvent,
     persona_key: str,
-) -> Union[str, EphemeralReply]:
+) -> Union[str, EphemeralReply, ErrorResponse]:
     """Generic handler for /load-<agent> commands.
 
     Args:
@@ -45,22 +93,27 @@ async def handle_load_agent_command(
         persona_key: The persona to load (e.g., "demis_hassabis")
 
     Returns:
-        Confirmation message or ephemeral reply
+        Confirmation message, ephemeral reply, or ErrorResponse
     """
     # Check access first
     access_mgr = get_access_manager()
     if not access_mgr.has_access(event):
         user_id = access_mgr.get_user_id(event)
-        return (
-            f"🚫 Access Denied\n\n"
-            f"You don't have permission to load agent personas.\n"
-            f"Your ID: {user_id}\n\n"
-            f"Status: /access-status"
+        error = create_access_denied_error(
+            user_id=user_id,
+            command="load-agent",
+            reason="You don't have permission to load agent personas.",
         )
+        return error.to_emoji_response()
 
     # Validate persona exists
     if persona_key not in EXECUTIVE_PERSONAS:
-        return f"❌ Agent '{persona_key}' not found. Try /agents-list"
+        error = create_not_found_error(
+            resource_type="agent",
+            resource_id=persona_key,
+            user_id=access_mgr.get_user_id(event),
+        )
+        return error.to_emoji_response()
 
     persona_data = EXECUTIVE_PERSONAS[persona_key]
 
@@ -80,12 +133,19 @@ async def handle_load_agent_command(
     # Set the persona
     success = persona_mgr.set_persona(persona_key)
     if not success:
-        return f"❌ Could not load agent: {persona_key}"
+        error = ErrorResponse(
+            code=ErrorCode.OPERATION_FAILED,
+            message=f"Could not load agent: {persona_key}",
+            context={"agent": persona_key},
+            severity=ErrorSeverity.HIGH.value,
+            user_id=access_mgr.get_user_id(event),
+        )
+        return error.to_emoji_response()
 
     persona_name = persona_data["name"]
     return (
-        f"🎤 Switched to **{persona_name}**\n\n"
-        f"{persona_data['title']}\n\n"
+        f"🎤 Switched to **{persona_name}**\\n\\n"
+        f"{persona_data['title']}\\n\\n"
         f"I'm ready to chat. What would you like to know?"
     )
 
@@ -134,29 +194,52 @@ async def handle_agents_disconnect_command(
 async def handle_switch_instance_command(
     gateway_runner,
     event: MessageEvent,
-    instance_name: str,
-) -> str:
+    instance_name: Optional[str] = None,
+) -> Union[str, EphemeralReply, ErrorResponse]:
     """Handle /switch-<instance> commands to change execution target.
     
     Args:
         gateway_runner: The GatewayRunner instance
         event: The message event
-        instance_name: The instance to switch to (e.g., "local", "hermes2")
+        instance_name: The instance to switch to. If None, extracts from event args (P3-002)
     
     Returns:
-        Confirmation message
+        Confirmation message, error response, or ErrorResponse instance
     """
     # Check access first
     access_mgr = get_access_manager()
     if not access_mgr.has_access(event):
         user_id = access_mgr.get_user_id(event)
-        return (
-            f"🚫 Access Denied\n\n"
-            f"You don't have permission to switch instances.\n"
-            f"Your ID: {user_id}\n\n"
-            f"Status: /access-status"
+        error = create_access_denied_error(
+            user_id=user_id,
+            command="switch-instance",
+            reason="You don't have permission to switch instances.",
         )
-
+        return error.to_emoji_response()
+    
+    # If instance_name is None, extract from command arguments (P3-002: dynamic switching)
+    if instance_name is None:
+        args = event.get_command_args().strip()
+        if not args:
+            error = ErrorResponse(
+                code=ErrorCode.INVALID_COMMAND,
+                message="Usage: /switch <instance-name> or use /switch-local, /switch-hermes2",
+                severity=ErrorSeverity.LOW.value,
+                user_id=access_mgr.get_user_id(event),
+            )
+            return error.to_emoji_response()
+        instance_name = args.split()[0]
+    
+    # P3-002: Validate instance name format
+    is_valid, error_msg = validate_instance_name(instance_name)
+    if not is_valid:
+        error = create_validation_error(
+            field="instance_name",
+            reason=error_msg,
+            user_id=access_mgr.get_user_id(event),
+        )
+        return error.to_emoji_response()
+    
     # Initialize orchestrator if needed
     if not hasattr(gateway_runner, "_instance_orchestrator"):
         gateway_runner._instance_orchestrator = InstanceOrchestrator()
@@ -170,14 +253,19 @@ async def handle_switch_instance_command(
     )
     
     if not success:
-        return f"❌ Instance '{instance_name}' not found. Try /hermes-list"
+        error = create_not_found_error(
+            resource_type="instance",
+            resource_id=instance_name,
+            user_id=access_mgr.get_user_id(event),
+        )
+        return error.to_emoji_response()
     
     instance = orchestrator.get_instance(instance_name)
     status = "🟢 LOCAL" if instance.is_local else "🔵 REMOTE"
     
     return (
-        f"{status} Switched to **{instance.name}**\n\n"
-        f"{instance.description}\n\n"
+        f"{status} Switched to **{instance.name}**\\n\\n"
+        f"{instance.description}\\n\\n"
         f"Next message will be routed here."
     )
 
