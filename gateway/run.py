@@ -5923,6 +5923,13 @@ class GatewayRunner:
         if canonical == "agents":
             return await self._handle_agents_command(event)
 
+        # Executive agent loading commands (/load-demis, /list-agents, /disconnect, etc.)
+        from gateway.agent_commands import is_agent_command, get_agent_command_handler
+        if is_agent_command(canonical):
+            handler = get_agent_command_handler(canonical)
+            if handler:
+                return await handler(self, event)
+
         if canonical == "restart":
             return await self._handle_restart_command(event)
         
