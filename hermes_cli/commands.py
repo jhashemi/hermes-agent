@@ -354,8 +354,6 @@ COMMAND_REGISTRY: list[CommandDef] = [
                gateway_only=True, aliases=("status-hermes",)),
 
     # Help & Documentation (WhatsApp integration)
-    CommandDef("help", "Show command help menu (or /help <topic>)", "Help",
-               gateway_only=True, aliases=("?",)),
     CommandDef("help-agents", "Show help for agent commands", "Help",
                gateway_only=True, aliases=("help agents",)),
     CommandDef("help-instances", "Show help for instance switching", "Help",
