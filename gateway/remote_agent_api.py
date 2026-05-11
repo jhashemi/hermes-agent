@@ -123,15 +123,15 @@ async def create_remote_api_blueprint(app, gateway_runner):
                     v = v.strip() or None  # Convert empty string to None
                 return v
             
-            class Config:
-                # Prevent DoS via deeply nested objects
-                json_schema_extra = {
+            model_config = {
+                "json_schema_extra": {
                     "example": {
                         "agent_id": "default",
                         "prompt": "What is AI?",
                         "session_id": "telegram_user_123"
                     }
                 }
+            }
 
         class ExecuteResponse(BaseModel):
             status: str  # "success" or "error"
