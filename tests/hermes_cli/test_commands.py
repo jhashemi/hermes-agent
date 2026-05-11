@@ -67,7 +67,10 @@ class TestCommandRegistry:
                         f"Alias '{alias}' of '{cmd.name}' shadows canonical '{target.name}'"
 
     def test_every_entry_has_valid_category(self):
-        valid_categories = {"Session", "Configuration", "Tools & Skills", "Info", "Exit"}
+        valid_categories = {
+            "Session", "Configuration", "Tools & Skills", "Info", "Exit",
+            "Agents", "Instances", "Help", "Access"
+        }
         for cmd in COMMAND_REGISTRY:
             assert cmd.category in valid_categories, f"{cmd.name} has invalid category '{cmd.category}'"
 
@@ -157,6 +160,41 @@ class TestDerivedDicts:
     def test_every_command_has_nonempty_description(self):
         for cmd, desc in COMMANDS.items():
             assert isinstance(desc, str) and len(desc) > 0, f"{cmd} has empty description"
+
+    def test_all_non_gateway_commands_in_category(self):
+        """Every non-gateway-only command must be in COMMANDS_BY_CATEGORY."""
+        for cmd in COMMAND_REGISTRY:
+            if not cmd.gateway_only:
+                cmd_key = f"/{cmd.name}"
+                assert cmd.category in COMMANDS_BY_CATEGORY, \
+                    f"Category '{cmd.category}' for /{cmd.name} not in COMMANDS_BY_CATEGORY"
+                assert cmd_key in COMMANDS_BY_CATEGORY[cmd.category], \
+                    f"/{cmd.name} not found in COMMANDS_BY_CATEGORY[{cmd.category!r}]"
+
+    def test_category_names_consistent(self):
+        """All category names should be consistent in format (title case or similar)."""
+        for cat in COMMANDS_BY_CATEGORY.keys():
+            # Categories should be non-empty and not all lowercase
+            assert len(cat) > 0, "Empty category name"
+            assert cat[0].isupper(), f"Category '{cat}' should start with uppercase"
+
+    def test_category_contains_expected_commands(self):
+        """Verify some well-known commands are in their expected categories."""
+        expected_placements = {
+            "Session": ["new", "clear", "history", "undo", "status"],
+            "Configuration": ["config", "model", "personality", "verbose"],
+            "Help": ["help"],
+            "Info": ["usage", "debug"],
+            "Tools & Skills": ["tools", "skills", "reload-mcp"],
+            "Exit": ["quit"],
+        }
+        for category, expected_cmds in expected_placements.items():
+            if category not in COMMANDS_BY_CATEGORY:
+                continue  # Skip if category not in CLI-only commands
+            category_cmds = {k.lstrip("/") for k in COMMANDS_BY_CATEGORY[category].keys()}
+            for cmd_name in expected_cmds:
+                assert cmd_name in category_cmds, \
+                    f"Expected /{cmd_name} in category '{category}'"
 
 
 # ---------------------------------------------------------------------------
