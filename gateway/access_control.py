@@ -11,13 +11,18 @@ Provides commands:
 
 Thread-safety: All methods are protected by threading.Lock() to prevent race
 conditions during concurrent access to the whitelist and JSON file operations.
+
+Audit Logging: All access grant/revoke operations are logged to ~/.hermes/audit.log
+with timestamp, user_id, action, and grantor_id for compliance and debugging.
 """
 
 import os
 import json
 import threading
+import re
 from typing import Set, Optional, Dict, Any
 from pathlib import Path
+from datetime import datetime
 from gateway.platforms.base import MessageEvent
 
 
@@ -37,6 +42,43 @@ DEFAULT_WHITELIST: Set[str] = {
 ACCESS_CONTROL_FILE = Path(os.path.expanduser("~/.hermes/access_control.json"))
 ACCESS_CONTROL_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+# Audit log file
+AUDIT_LOG_FILE = Path(os.path.expanduser("~/.hermes/audit.log"))
+AUDIT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+# User ID validation regex: alphanumeric + underscore, max 256 chars
+USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
+MAX_USER_ID_LENGTH = 256
+
+
+# ============================================================================
+# User ID Validation
+# ============================================================================
+
+def validate_user_id(user_id: str) -> tuple[bool, Optional[str]]:
+    """Validate user ID format.
+    
+    Constraints:
+    - Max 256 characters
+    - Only alphanumeric characters and underscores
+    
+    Args:
+        user_id: The user ID to validate
+        
+    Returns:
+        (is_valid, error_message) tuple
+    """
+    if not user_id or not isinstance(user_id, str):
+        return False, "User ID must be a non-empty string"
+    
+    if len(user_id) > MAX_USER_ID_LENGTH:
+        return False, f"User ID exceeds maximum length of {MAX_USER_ID_LENGTH} characters"
+    
+    if not USER_ID_PATTERN.match(user_id):
+        return False, "User ID can only contain alphanumeric characters and underscores"
+    
+    return True, None
+
 
 # ============================================================================
 # Access Control Manager
@@ -48,11 +90,14 @@ class AccessControlManager:
     Thread-safe: Uses threading.Lock() to protect all access to whitelist
     and JSON file operations. All public methods are atomic and safe for
     concurrent access from multiple threads.
+    
+    Includes audit logging for all access grant/revoke operations.
     """
 
     def __init__(self):
         self.whitelist: Set[str] = set(DEFAULT_WHITELIST)
         self._lock = threading.Lock()  # Protects whitelist and file I/O
+        self._audit_lock = threading.Lock()  # Protects audit log I/O
         self._load_from_file()
 
     def _load_from_file(self):
@@ -90,6 +135,35 @@ class AccessControlManager:
             import logging
             logging.error(f"Failed to save access control: {e}")
 
+    def audit_log(self, user_id: str, action: str, grantor_id: str) -> None:
+        """Log an audit trail entry for access control operations.
+        
+        Args:
+            user_id: The user affected by the action
+            action: The action performed ("grant" or "revoke")
+            grantor_id: The user who performed the action
+            
+        Thread-safe: Acquires lock before writing to audit log.
+        """
+        if action not in ("grant", "revoke"):
+            action = "unknown"
+        
+        timestamp = datetime.utcnow().isoformat() + "Z"
+        log_entry = {
+            "timestamp": timestamp,
+            "user_id": user_id,
+            "action": action,
+            "grantor_id": grantor_id,
+        }
+        
+        try:
+            with self._audit_lock:
+                with open(AUDIT_LOG_FILE, "a") as f:
+                    f.write(json.dumps(log_entry) + "\n")
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to write audit log: {e}")
+
     def get_user_id(self, event: MessageEvent) -> str:
         """Extract unique user identifier from message event.
 
@@ -115,8 +189,12 @@ class AccessControlManager:
         with self._lock:
             return user_id in self.whitelist
 
-    def grant_access(self, user_id: str) -> bool:
+    def grant_access(self, user_id: str, grantor_id: str = "system") -> bool:
         """Grant access to a user. Returns True if newly added.
+        
+        Args:
+            user_id: User ID to grant access to
+            grantor_id: User who is granting access (for audit trail)
         
         Thread-safe: Acquires lock before modifying whitelist and saving.
         """
@@ -125,10 +203,17 @@ class AccessControlManager:
                 return False  # Already had access
             self.whitelist.add(user_id)
             self._save_to_file()
-            return True
+        
+        # Log the grant operation (outside lock to avoid deadlock)
+        self.audit_log(user_id, "grant", grantor_id)
+        return True
 
-    def revoke_access(self, user_id: str) -> bool:
+    def revoke_access(self, user_id: str, grantor_id: str = "system") -> bool:
         """Revoke access from a user. Returns True if was removed.
+        
+        Args:
+            user_id: User ID to revoke access from
+            grantor_id: User who is revoking access (for audit trail)
         
         Thread-safe: Acquires lock before modifying whitelist and saving.
         """
@@ -137,7 +222,10 @@ class AccessControlManager:
                 return False  # Didn't have access
             self.whitelist.discard(user_id)
             self._save_to_file()
-            return True
+        
+        # Log the revoke operation (outside lock to avoid deadlock)
+        self.audit_log(user_id, "revoke", grantor_id)
+        return True
 
     def check_access(self, user_id: str) -> bool:
         """Check if a specific user ID has access.
@@ -270,11 +358,16 @@ async def handle_access_grant_command(
 
     user_id = user_id.strip().lower()
 
+    # Validate user ID format
+    is_valid, error_msg = validate_user_id(user_id)
+    if not is_valid:
+        return f"❌ Invalid user ID: {error_msg}"
+
     # Prevent granting to unknown users without confirmation
     if " " in user_id:
         return "❌ User ID cannot contain spaces. Use underscores: john_doe"
 
-    newly_added = manager.grant_access(user_id)
+    newly_added = manager.grant_access(user_id, grantor_id=requester_id)
 
     if newly_added:
         return (
@@ -316,6 +409,11 @@ async def handle_access_revoke_command(
 
     user_id = user_id.strip().lower()
 
+    # Validate user ID format
+    is_valid, error_msg = validate_user_id(user_id)
+    if not is_valid:
+        return f"❌ Invalid user ID: {error_msg}"
+
     # Prevent revoking access from default whitelist
     if user_id in DEFAULT_WHITELIST:
         return (
@@ -323,7 +421,7 @@ async def handle_access_revoke_command(
             f"To modify core administrators, edit the source code."
         )
 
-    was_removed = manager.revoke_access(user_id)
+    was_removed = manager.revoke_access(user_id, grantor_id=requester_id)
 
     if was_removed:
         return (
