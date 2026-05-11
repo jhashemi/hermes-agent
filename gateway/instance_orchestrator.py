@@ -22,6 +22,7 @@ import asyncio
 import httpx
 import logging
 import hashlib
+import re
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,88 @@ logger = logging.getLogger(__name__)
 
 # P1-002: SECURITY — Fix Input Validation
 MAX_CHAT_ID_LENGTH = 256
+
+
+def validate_hostname(hostname: str) -> bool:
+    """Validate that hostname is either a valid IP address or FQDN.
+    
+    Args:
+        hostname: The hostname to validate (IP or FQDN)
+    
+    Returns:
+        True if valid, False otherwise
+    
+    Raises:
+        ValueError: If hostname is not a string or is empty
+    """
+    if not isinstance(hostname, str):
+        raise ValueError(f"hostname must be a string, not {type(hostname).__name__}")
+    
+    if not hostname or len(hostname.strip()) == 0:
+        raise ValueError("hostname cannot be empty")
+    
+    hostname = hostname.strip()
+    
+    # Check for valid IPv4 address (exactly 4 octets)
+    ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+    if re.match(ipv4_pattern, hostname):
+        # Validate each octet is 0-255
+        parts = hostname.split('.')
+        if len(parts) == 4:  # Ensure exactly 4 parts
+            try:
+                for part in parts:
+                    num = int(part)
+                    if num < 0 or num > 255:
+                        return False
+                return True
+            except ValueError:
+                return False
+        return False
+    
+    # Check for valid IPv6 address (simplified check for :: notation and hex digits)
+    if ':' in hostname:
+        # Basic IPv6 validation
+        try:
+            # Check if it looks like IPv6 (contains colons and hex digits)
+            if all(c in '0123456789abcdefABCDEF:.[]' for c in hostname):
+                return True
+        except Exception:
+            pass
+    
+    # Check for valid FQDN (localhost or hostname with letters)
+    # FQDN: labels separated by dots, each label 1-63 chars, alphanumeric and hyphens
+    # To avoid accepting partial IPs like "192.168.1", we require at least one letter
+    if hostname == 'localhost':
+        return True
+    
+    # Pattern for FQDN: must contain at least one letter (not all digits)
+    # and follow DNS naming rules
+    fqdn_pattern = r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$'
+    
+    if re.match(fqdn_pattern, hostname):
+        # Additional check: must contain at least one letter to distinguish from partial IPs
+        if any(c.isalpha() for c in hostname):
+            return True
+    
+    return False
+
+
+def validate_port(port: int) -> bool:
+    """Validate that port is in valid range (1-65535).
+    
+    Args:
+        port: The port number to validate
+    
+    Returns:
+        True if valid, False otherwise
+    
+    Raises:
+        ValueError: If port is not an integer
+    """
+    if not isinstance(port, int):
+        raise ValueError(f"port must be an integer, not {type(port).__name__}")
+    
+    return 1 <= port <= 65535
 
 
 class RemoteHermesInstance:
@@ -133,17 +216,30 @@ class InstanceOrchestrator:
 
         Returns:
             True if switch successful, False if instance not found
+
+        Raises:
+            ValueError: If chat_id exceeds MAX_CHAT_ID_LENGTH (prevents DoS via memory exhaustion)
+                       or if instance hostname/port are invalid
         """
         if instance_name not in HERMES_INSTANCES:
             return False
 
+        # P2-003: Validate instance hostname and port
+        instance = HERMES_INSTANCES[instance_name]
+        if not validate_hostname(instance.hostname):
+            raise ValueError(f"Invalid hostname for instance '{instance_name}': {instance.hostname} is not a valid IP or FQDN")
+        if not validate_port(instance.http_port):
+            raise ValueError(f"Invalid port for instance '{instance_name}': {instance.http_port} must be between 1 and 65535")
+
         if chat_id:
-            # P1-002: Validate chat_id length and format
-            if not isinstance(chat_id, str) or len(chat_id) > MAX_CHAT_ID_LENGTH:
-                logger.warning(f"Invalid chat_id length: {len(chat_id) if isinstance(chat_id, str) else '?'}")
-                return False
+            # P1-002: Validate chat_id length to prevent DoS via unbounded memory allocation
+            if not isinstance(chat_id, str):
+                raise ValueError(f"chat_id must be a string, not {type(chat_id).__name__}")
+            if len(chat_id) > MAX_CHAT_ID_LENGTH:
+                logger.warning(f"Chat ID validation failed: length {len(chat_id)} exceeds maximum {MAX_CHAT_ID_LENGTH}")
+                raise ValueError(f"chat_id length {len(chat_id)} exceeds maximum {MAX_CHAT_ID_LENGTH}")
             
-            # P1-002: Use hash to prevent unbounded growth
+            # P1-002: Use hash to prevent unbounded growth in session_instances dict
             chat_key = hashlib.sha256(chat_id.encode()).hexdigest()[:32]
             self.session_instances[chat_key] = instance_name
         else:
@@ -190,10 +286,19 @@ class InstanceOrchestrator:
 
         Returns:
             Agent response, or None if execution failed
+        
+        Raises:
+            ValueError: If instance hostname/port are invalid
         """
         instance = self.get_instance(instance_name)
         if not instance:
             return f"❌ Instance '{instance_name}' not found"
+
+        # P2-003: Validate instance hostname and port before attempting connection
+        if not validate_hostname(instance.hostname):
+            raise ValueError(f"Invalid hostname for instance '{instance_name}': {instance.hostname} is not a valid IP or FQDN")
+        if not validate_port(instance.http_port):
+            raise ValueError(f"Invalid port for instance '{instance_name}': {instance.http_port} must be between 1 and 65535")
 
         # Local execution: return placeholder (gateway handles this)
         if instance.is_local:
@@ -201,6 +306,7 @@ class InstanceOrchestrator:
 
         # P1-003: Remote execution with proper error handling and retry logic
         for attempt in range(max_retries):
+            resp = None
             try:
                 if not self._http_client:
                     await self.init()
@@ -242,28 +348,48 @@ class InstanceOrchestrator:
                     return f"⚠️ Instance '{instance_name}' error: {resp.status}"
 
             except asyncio.TimeoutError:
-                # P1-003: Handle timeout with retry
+                # P1-003: Handle timeout with retry — close on failure to prevent pool exhaustion
+                logger.warning(f"Timeout on attempt {attempt+1}/{max_retries}")
+                if self._http_client:
+                    await self._http_client.aclose()
+                    self._http_client = None
                 if attempt < max_retries - 1:
-                    logger.warning(f"Timeout, retrying... (attempt {attempt+1}/{max_retries})")
+                    logger.warning(f"Retrying after timeout...")
                     await asyncio.sleep(1 * (2 ** attempt))
                     continue
                 return f"⏱️ Instance '{instance_name}' timed out (>60s)"
 
             except Exception as e:
-                # P1-003: Handle other exceptions with retry
+                # P1-003: Handle other exceptions with retry — close on failure to prevent pool exhaustion
+                logger.warning(f"Execution failed on attempt {attempt+1}/{max_retries}: {e}")
+                if self._http_client:
+                    await self._http_client.aclose()
+                    self._http_client = None
                 if attempt < max_retries - 1:
-                    logger.warning(f"Execution failed: {e}, retrying... (attempt {attempt+1}/{max_retries})")
+                    logger.warning(f"Retrying after failure...")
                     await asyncio.sleep(1 * (2 ** attempt))
                     continue
                 logger.error(f"Failed to execute on {instance_name}: {e}", exc_info=True)
                 return f"❌ Could not reach instance '{instance_name}': {str(e)[:100]}"
+
+            finally:
+                # P1-003: Ensure response is fully read/consumed to prevent connection pool leak
+                # This prevents "connection pool exhaustion" by ensuring httpx properly closes
+                # connections even if we didn't explicitly read the response body
+                if resp is not None:
+                    try:
+                        # Consume response body to release connection back to pool
+                        _ = resp.content if hasattr(resp, 'content') else resp.read()
+                    except Exception as e:
+                        logger.debug(f"Error consuming response body: {e}")
 
         return None
 
     async def health_check(self, instance_name: str) -> bool:
         """Check if a remote instance is healthy.
         
-        P1-004: Add health check caching (30s TTL) and log at WARNING level on failure.
+        P1-004: Add health check caching (30s TTL) and log at ERROR level on failure.
+        All failures are logged at ERROR (not DEBUG) for visibility to users.
         """
         instance = self.get_instance(instance_name)
         if not instance or instance.is_local:
@@ -287,36 +413,120 @@ class InstanceOrchestrator:
             self._health_cache[instance_name] = (healthy, datetime.now())
 
             if not healthy:
-                # P1-004: Log at WARNING level so failures are visible
-                logger.warning(f"Health check failed for {instance_name}: returned {resp.status}")
+                # P1-004: Log at ERROR level so failures are VISIBLE (not hidden in DEBUG)
+                logger.error(f"❌ HEALTH CHECK FAILED: {instance_name} returned HTTP {resp.status} (expected 200)")
 
             return healthy
         except asyncio.TimeoutError:
-            # P1-004: Handle timeout explicitly
-            logger.warning(f"Health check timeout for {instance_name}")
+            # P1-004: Handle timeout explicitly — log at ERROR for visibility
+            logger.error(f"❌ HEALTH CHECK TIMEOUT: {instance_name} did not respond within 5 seconds")
             self._health_cache[instance_name] = (False, datetime.now())
             return False
         except Exception as e:
-            logger.error(f"Health check error for {instance_name}: {e}", exc_info=True)
+            # P1-004: Log at ERROR level with full traceback for debugging
+            logger.error(f"❌ HEALTH CHECK ERROR: {instance_name} — {e}", exc_info=True)
             self._health_cache[instance_name] = (False, datetime.now())
             return False
+
+    async def get_instance_status(self, instance_name: str) -> Dict[str, Any]:
+        """Get detailed status of a specific instance.
+        
+        P1-004: Returns structured status including health check results.
+        Ensures failures are visible to callers (not hidden in debug logs).
+        
+        Returns:
+            Dict with keys:
+            - name: instance name
+            - healthy: bool
+            - status_message: human-readable status
+            - reachable: bool (True if instance is reachable)
+            - error: error message if not reachable
+        """
+        instance = self.get_instance(instance_name)
+        
+        if not instance:
+            return {
+                "name": instance_name,
+                "healthy": False,
+                "status_message": f"❌ Instance '{instance_name}' not found",
+                "reachable": False,
+                "error": "Instance does not exist in registry"
+            }
+        
+        if instance.is_local:
+            return {
+                "name": instance_name,
+                "healthy": True,
+                "status_message": "🟢 LOCAL instance (always healthy)",
+                "reachable": True,
+                "error": None
+            }
+        
+        # Check remote instance health
+        try:
+            healthy = await self.health_check(instance_name)
+            
+            if healthy:
+                return {
+                    "name": instance_name,
+                    "healthy": True,
+                    "status_message": f"🔵 {instance_name} is HEALTHY and reachable",
+                    "reachable": True,
+                    "error": None
+                }
+            else:
+                error_msg = f"⚠️ {instance_name} health check FAILED — instance may be unreachable"
+                # P1-004: Log failure at ERROR level for visibility
+                logger.error(f"HEALTH CHECK FAILED: {instance_name} is not responding to health check")
+                
+                # Notify if hermes2 specifically is unreachable
+                if instance_name == "hermes2":
+                    logger.error(f"🚨 CRITICAL: Remote instance 'hermes2' is unreachable! Users cannot access remote execution.")
+                
+                return {
+                    "name": instance_name,
+                    "healthy": False,
+                    "status_message": error_msg,
+                    "reachable": False,
+                    "error": "Health check failed"
+                }
+        
+        except Exception as e:
+            error_msg = f"❌ Failed to check status of {instance_name}: {str(e)}"
+            # P1-004: Log at ERROR level so failures are visible (not DEBUG)
+            logger.error(f"Exception during health check for {instance_name}: {e}", exc_info=True)
+            
+            # Notify if hermes2 specifically failed
+            if instance_name == "hermes2":
+                logger.error(f"🚨 CRITICAL: Cannot reach remote instance 'hermes2': {e}")
+            
+            return {
+                "name": instance_name,
+                "healthy": False,
+                "status_message": error_msg,
+                "reachable": False,
+                "error": str(e)
+            }
 
     async def get_status(self, chat_id: Optional[str] = None) -> str:
         """Get status of current instance."""
         current = self.get_current_instance(chat_id)
-        instance = self.get_instance(current)
-
-        if not instance:
-            return "❌ Current instance not found"
-
-        status = "🟢 LOCAL" if instance.is_local else "🔵 REMOTE"
-        healthy = await self.health_check(current) if not instance.is_local else True
-        health_icon = "✓" if healthy else "✗"
-
-        return (
-            f"{status} **{instance.name}**\n"
-            f"Hostname: {instance.hostname}\n"
-            f"Health: {health_icon}\n"
-            f"\n"
-            f"Available instances: /hermes-list"
-        )
+        
+        # P1-004: Use new get_instance_status for consistent, user-visible output
+        status_dict = await self.get_instance_status(current)
+        
+        if status_dict["healthy"]:
+            return (
+                f"{status_dict['status_message']}\\n"
+                f"Hostname: {self.get_instance(current).hostname}\\n"
+                f"\\n"
+                f"Available instances: /hermes-list"
+            )
+        else:
+            # P1-004: Make failures prominent to users
+            return (
+                f"{status_dict['status_message']}\\n"
+                f"Error: {status_dict['error']}\\n"
+                f"\\n"
+                f"Try switching instances: /hermes-list"
+            )
