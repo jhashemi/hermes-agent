@@ -16,10 +16,186 @@ import asyncio
 import logging
 import hmac
 import os
+import time
+import threading
 from functools import lru_cache
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+
+# P3-005: RATE LIMITING — Per-API-key rate limiter
+class RateLimiter:
+    """Per-API-key rate limiter with automatic counter reset.
+    
+    Limits: 100 requests per 60 seconds per API key.
+    Returns 429 Too Many Requests when exceeded.
+    Includes Retry-After header.
+    Tracks request counts in memory using a dict.
+    Resets counters every 60 seconds.
+    
+    Thread-safe implementation using a lock.
+    """
+    
+    def __init__(self, max_requests: int = 100, window_seconds: int = 60):
+        """Initialize the rate limiter.
+        
+        Args:
+            max_requests: Maximum requests per window (default: 100)
+            window_seconds: Time window in seconds (default: 60)
+        """
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        
+        # Track request counts: {api_key: [(timestamp, count), ...]}
+        # We keep track of request timestamps for more accurate counting
+        self.request_history: Dict[str, list] = {}
+        
+        # Lock for thread-safe access
+        self._lock = threading.RLock()
+        
+        # Start background cleanup thread
+        self._cleanup_thread = None
+        self._stop_cleanup = False
+        self._start_cleanup_thread()
+        
+        logger.info(
+            f"[RateLimiter] Initialized: {max_requests} requests per {window_seconds} seconds"
+        )
+    
+    def _start_cleanup_thread(self):
+        """Start a background thread to clean up expired entries."""
+        def cleanup_loop():
+            while not self._stop_cleanup:
+                time.sleep(self.window_seconds)
+                self._cleanup_expired()
+        
+        self._cleanup_thread = threading.Thread(daemon=True, target=cleanup_loop)
+        self._cleanup_thread.start()
+    
+    def _cleanup_expired(self):
+        """Remove request entries older than window_seconds."""
+        current_time = time.time()
+        cutoff_time = current_time - self.window_seconds
+        
+        with self._lock:
+            # Remove old entries and keys with no requests
+            to_delete = []
+            for api_key, timestamps in self.request_history.items():
+                # Keep only recent timestamps
+                self.request_history[api_key] = [
+                    ts for ts in timestamps if ts > cutoff_time
+                ]
+                # Remove key if no requests remain
+                if not self.request_history[api_key]:
+                    to_delete.append(api_key)
+            
+            for api_key in to_delete:
+                del self.request_history[api_key]
+    
+    def is_allowed(self, api_key: str) -> tuple[bool, Optional[int]]:
+        """Check if a request is allowed for the given API key.
+        
+        Args:
+            api_key: The API key to check
+            
+        Returns:
+            (allowed, retry_after_seconds)
+            - allowed: True if request is allowed, False if rate limit exceeded
+            - retry_after_seconds: If rate limited, seconds to wait; None otherwise
+        """
+        current_time = time.time()
+        cutoff_time = current_time - self.window_seconds
+        
+        with self._lock:
+            # Initialize if not seen before
+            if api_key not in self.request_history:
+                self.request_history[api_key] = []
+            
+            # Clean up old entries for this key
+            self.request_history[api_key] = [
+                ts for ts in self.request_history[api_key] if ts > cutoff_time
+            ]
+            
+            # Count recent requests
+            request_count = len(self.request_history[api_key])
+            
+            if request_count < self.max_requests:
+                # Allow the request and record it
+                self.request_history[api_key].append(current_time)
+                return (True, None)
+            else:
+                # Rate limit exceeded
+                # Find the oldest request to calculate when next request is allowed
+                oldest_timestamp = self.request_history[api_key][0]
+                next_allowed_time = oldest_timestamp + self.window_seconds
+                retry_after = max(1, int(next_allowed_time - current_time))
+                
+                logger.warning(
+                    f"[RateLimiter] Rate limit exceeded for API key: {api_key[:8]}... "
+                    f"({request_count}/{self.max_requests} requests in {self.window_seconds}s)"
+                )
+                return (False, retry_after)
+    
+    def get_stats(self, api_key: str) -> Dict[str, Any]:
+        """Get current rate limit stats for an API key.
+        
+        Args:
+            api_key: The API key to check
+            
+        Returns:
+            Dictionary with:
+            - requests_made: Number of requests in current window
+            - requests_remaining: Requests allowed before limit
+            - reset_in_seconds: Seconds until window resets
+        """
+        current_time = time.time()
+        cutoff_time = current_time - self.window_seconds
+        
+        with self._lock:
+            if api_key not in self.request_history:
+                self.request_history[api_key] = []
+            
+            # Clean up old entries
+            self.request_history[api_key] = [
+                ts for ts in self.request_history[api_key] if ts > cutoff_time
+            ]
+            
+            request_count = len(self.request_history[api_key])
+            requests_remaining = max(0, self.max_requests - request_count)
+            
+            if self.request_history[api_key]:
+                oldest_timestamp = self.request_history[api_key][0]
+                reset_in = max(0, int(oldest_timestamp + self.window_seconds - current_time))
+            else:
+                reset_in = 0
+            
+            return {
+                "requests_made": request_count,
+                "requests_remaining": requests_remaining,
+                "reset_in_seconds": reset_in,
+                "max_requests": self.max_requests,
+                "window_seconds": self.window_seconds,
+            }
+    
+    def shutdown(self):
+        """Gracefully shutdown the rate limiter."""
+        self._stop_cleanup = True
+        if self._cleanup_thread:
+            self._cleanup_thread.join(timeout=2)
+        logger.info("[RateLimiter] Shut down")
+
+
+# Global rate limiter instance (per-API-key)
+_rate_limiter: Optional[RateLimiter] = None
+
+
+def get_rate_limiter() -> RateLimiter:
+    """Get or create the global rate limiter instance."""
+    global _rate_limiter
+    if _rate_limiter is None:
+        _rate_limiter = RateLimiter(max_requests=100, window_seconds=60)
+    return _rate_limiter
 
 
 # P1-001: SECURITY — Enable Authentication on Remote API
@@ -177,11 +353,32 @@ async def create_remote_api_blueprint(app, gateway_runner):
             Raises:
                 HTTPException(400): Validation error (via Pydantic)
                 HTTPException(401): Authentication failure
+                HTTPException(429): Rate limit exceeded
             """
             # P1-001: Verify API key
             if not verify_api_key(x_hermes_key):
                 logger.warning(f"Unauthorized request from {x_hermes_user or 'unknown'}: invalid API key")
                 raise HTTPException(status_code=401, detail="Unauthorized")
+
+            # P3-005: Check rate limit
+            rate_limiter = get_rate_limiter()
+            allowed, retry_after = rate_limiter.is_allowed(x_hermes_key)
+            
+            if not allowed:
+                logger.warning(
+                    f"[RateLimit] Request denied for key: {x_hermes_key[:8]}... "
+                    f"from {x_hermes_user or 'unknown'} (retry after {retry_after}s)"
+                )
+                response = JSONResponse(
+                    status_code=429,
+                    content={
+                        "status": "error",
+                        "error": "Rate limit exceeded",
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+                response.headers["Retry-After"] = str(retry_after)
+                return response
 
             # P2-001: Request validation is now handled by Pydantic
             # If validation fails, Pydantic automatically returns 422 with error details
@@ -314,6 +511,24 @@ def create_remote_api_flask_blueprint():
             if not verify_api_key(api_key):
                 logger.warning(f"Unauthorized Flask request from {username}: invalid API key")
                 return jsonify({"status": "error", "error": "Unauthorized"}), 401
+
+            # P3-005: Check rate limit
+            rate_limiter = get_rate_limiter()
+            allowed, retry_after = rate_limiter.is_allowed(api_key)
+            
+            if not allowed:
+                logger.warning(
+                    f"[RateLimit] Flask request denied for key: {api_key[:8]}... "
+                    f"from {username} (retry after {retry_after}s)"
+                )
+                response = jsonify({
+                    "status": "error",
+                    "error": "Rate limit exceeded",
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                })
+                response.status_code = 429
+                response.headers["Retry-After"] = str(retry_after)
+                return response
 
             # P1-005: Parse and validate request
             data = request.get_json() or {}
