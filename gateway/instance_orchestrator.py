@@ -23,6 +23,7 @@ import httpx
 import logging
 import hashlib
 import re
+import os
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,51 @@ logger = logging.getLogger(__name__)
 
 # P1-002: SECURITY — Fix Input Validation
 MAX_CHAT_ID_LENGTH = 256
+
+
+# P2-005: Runtime environment variable loading
+def get_instance_config() -> Dict[str, Any]:
+    """Load instance configuration from environment at runtime.
+    
+    P2-005: This allows dynamic config changes without restart.
+    Re-reads os.environ on each call to enable live configuration updates.
+    
+    Returns:
+        Dict with keys:
+        - remote_api_key: API key for remote instance auth (no default)
+        - instance_a_hostname: Hostname for instance A (default: 'localhost')
+        - instance_a_port: Port for instance A (default: 8000)
+    
+    Raises:
+        ValueError: If environment variables have invalid values
+    """
+    config = {}
+    
+    # Load HERMES_REMOTE_API_KEY (optional, no default)
+    config['remote_api_key'] = os.environ.get('HERMES_REMOTE_API_KEY', '').strip()
+    if not config['remote_api_key']:
+        logger.debug('HERMES_REMOTE_API_KEY not set in environment')
+    
+    # Load HERMES_INSTANCE_A_HOSTNAME (optional, default: 'localhost')
+    config['instance_a_hostname'] = os.environ.get(
+        'HERMES_INSTANCE_A_HOSTNAME', 
+        'localhost'
+    ).strip()
+    if not config['instance_a_hostname']:
+        config['instance_a_hostname'] = 'localhost'
+        logger.warning('HERMES_INSTANCE_A_HOSTNAME is empty, using default: localhost')
+    
+    # Load HERMES_INSTANCE_A_PORT (optional, default: 8000)
+    try:
+        port_str = os.environ.get('HERMES_INSTANCE_A_PORT', '8000').strip()
+        config['instance_a_port'] = int(port_str)
+        if not validate_port(config['instance_a_port']):
+            raise ValueError(f'Port {config["instance_a_port"]} is out of valid range (1-65535)')
+    except ValueError as e:
+        logger.warning(f'Invalid HERMES_INSTANCE_A_PORT value: {e}, using default: 8000')
+        config['instance_a_port'] = 8000
+    
+    return config
 
 
 def validate_hostname(hostname: str) -> bool:
@@ -289,7 +335,13 @@ class InstanceOrchestrator:
         
         Raises:
             ValueError: If instance hostname/port are invalid
+        
+        P2-005: Loads environment variables at runtime to allow dynamic config changes.
         """
+        # P2-005: Load runtime configuration from environment
+        config = get_instance_config()
+        logger.debug(f"Loaded instance config at runtime: hostname={config['instance_a_hostname']}, port={config['instance_a_port']}")
+        
         instance = self.get_instance(instance_name)
         if not instance:
             return f"❌ Instance '{instance_name}' not found"
@@ -434,6 +486,8 @@ class InstanceOrchestrator:
         P1-004: Returns structured status including health check results.
         Ensures failures are visible to callers (not hidden in debug logs).
         
+        P2-005: Loads environment variables at runtime to allow dynamic config changes.
+        
         Returns:
             Dict with keys:
             - name: instance name
@@ -442,6 +496,10 @@ class InstanceOrchestrator:
             - reachable: bool (True if instance is reachable)
             - error: error message if not reachable
         """
+        # P2-005: Load runtime configuration from environment
+        config = get_instance_config()
+        logger.debug(f"Loaded instance config at runtime in get_instance_status: hostname={config['instance_a_hostname']}, port={config['instance_a_port']}")
+        
         instance = self.get_instance(instance_name)
         
         if not instance:
@@ -517,16 +575,16 @@ class InstanceOrchestrator:
         
         if status_dict["healthy"]:
             return (
-                f"{status_dict['status_message']}\\n"
-                f"Hostname: {self.get_instance(current).hostname}\\n"
-                f"\\n"
+                f"{status_dict['status_message']}\\\n"
+                f"Hostname: {self.get_instance(current).hostname}\\\n"
+                f"\\\n"
                 f"Available instances: /hermes-list"
             )
         else:
             # P1-004: Make failures prominent to users
             return (
-                f"{status_dict['status_message']}\\n"
-                f"Error: {status_dict['error']}\\n"
-                f"\\n"
+                f"{status_dict['status_message']}\\\n"
+                f"Error: {status_dict['error']}\\\n"
+                f"\\\n"
                 f"Try switching instances: /hermes-list"
             )
