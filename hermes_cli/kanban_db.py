@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -82,6 +83,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -2556,6 +2559,16 @@ DEFAULT_FAILURE_LIMIT = 5
 # Legacy alias — callers / tests still reference the old name.
 DEFAULT_SPAWN_FAILURE_LIMIT = DEFAULT_FAILURE_LIMIT
 
+# ---------------------------------------------------------------------------
+# Circuit-breaker + thread-pool integration (ADR 003)
+# ---------------------------------------------------------------------------
+# These are imported lazily inside dispatch_once / dispatch_loop so that the
+# new modules can be shipped incrementally without breaking callers that only
+# import kanban_db for non-dispatch paths.
+_CIRCUIT_BREAKER_ENABLED: bool = True   # set to False in tests to opt out
+_THREAD_POOL_ENABLED: bool = True       # set to False in tests to opt out
+_GT_SCHEDULER_ENABLED: bool = True      # ADR 004: VCG/Nash/MCTS game-theoretic scheduler
+
 # Max bytes to keep in a single worker log file. The dispatcher truncates
 # and rotates on spawn if the file is larger than this at spawn time.
 DEFAULT_LOG_ROTATE_BYTES = 2 * 1024 * 1024   # 2 MiB
@@ -3279,6 +3292,9 @@ def dispatch_once(
     max_concurrent_board: int = DEFAULT_MAX_CONCURRENT_BOARD,
     resource_check: bool = True,
     backoff_check: bool = True,
+    # ADR 003 — circuit breaker + thread pool
+    circuit_breaker=None,
+    thread_pool=None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -3330,14 +3346,46 @@ def dispatch_once(
     if resource_check:
         resource_ok, resource_reason = can_spawn(health)
 
-    # Count running workers for concurrency enforcement.
-    profile_counts = _running_workers_by_profile(conn) if max_concurrent_per_profile > 0 else {}
-    total_running = _running_workers_total(conn) if max_concurrent_board > 0 else 0
+    # --- ADR 003: Circuit breaker + thread pool init ---
+    # Lazily import so callers that don't dispatch are unaffected.
+    _cb = None
+    _pool = None
+    _board_key = board or "default"
+    if _CIRCUIT_BREAKER_ENABLED and circuit_breaker is not False:
+        if circuit_breaker is not None:
+            _cb = circuit_breaker
+        else:
+            try:
+                from hermes_cli.kanban_circuit_breaker import CircuitBreaker, BreakerOpen
+                _cb = CircuitBreaker(conn, board=_board_key)
+            except Exception:
+                _cb = None  # graceful degradation
+
+    if _THREAD_POOL_ENABLED and thread_pool is not False:
+        if thread_pool is not None:
+            _pool = thread_pool
+        else:
+            try:
+                from hermes_cli.kanban_thread_pool import ThreadPool
+                _pool = ThreadPool.for_board(
+                    _board_key,
+                    board_cap=max_concurrent_board,
+                    per_profile_cap=max_concurrent_per_profile,
+                )
+                _pool.sync_from_db(conn)
+            except Exception:
+                _pool = None  # graceful degradation
+
+    # Count running workers for concurrency enforcement
+    # (used as fallback when thread_pool is unavailable).
+    profile_counts = _running_workers_by_profile(conn) if (max_concurrent_per_profile > 0 and _pool is None) else {}
+    total_running = _running_workers_total(conn) if (max_concurrent_board > 0 and _pool is None) else 0
 
     # Fetch ready rows with consecutive_failures from tasks, plus the
     # most recent failure timestamp from task_runs for backoff calculation.
+    # ADR 004: also fetch priority + created_at for game-theoretic scoring.
     ready_rows = conn.execute(
-        "SELECT id, assignee, consecutive_failures FROM tasks "
+        "SELECT id, assignee, consecutive_failures, priority, created_at FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
@@ -3350,6 +3398,61 @@ def dispatch_once(
     ).fetchall():
         if _fr["last_fail"] is not None:
             _failure_times[_fr["task_id"]] = float(_fr["last_fail"])
+
+    # --- ADR 004: Multi-dimensional VCG auction scheduler ---
+    # Ranks ready_rows by welfare = value(priority+urgency+wait+cascade) / resource_cost(pids+cpu+ram+tokens+tools)
+    # Resource budget auto-detected from cgroup + /proc; dep_counts from task_links table.
+    if _GT_SCHEDULER_ENABLED:
+        try:
+            from hermes_cli.kanban_game_theory_scheduler import (
+                GameTheoryScheduler,
+                ResourceBudget,
+                build_profile_loads,
+                build_dep_counts,
+                rows_to_candidates,
+            )
+            # Read max_system_pids from kanban config (set to 70% of cgroup limit)
+            _cfg_max_pids: int | None = None
+            try:
+                from hermes_cli.config import load_config as _load_config_gt
+                _gt_cfg = _load_config_gt()
+                _cfg_max_pids = int((_gt_cfg.get("kanban", {}) or {}).get("max_system_pids", 0) or 0) or None
+            except Exception:
+                pass
+
+            _profile_loads = build_profile_loads(conn, max_concurrent_per_profile)
+            _dep_counts = build_dep_counts(conn)
+            _budget = ResourceBudget.from_system(max_system_pids=_cfg_max_pids)
+
+            _created_ats: dict[str, float] = {}
+            for _rr in ready_rows:
+                _rr_dict = dict(_rr)
+                if _rr_dict.get("created_at") is not None:
+                    try:
+                        _created_ats[_rr_dict["id"]] = float(_rr_dict["created_at"])
+                    except (TypeError, ValueError):
+                        pass
+
+            _candidates = rows_to_candidates(
+                ready_rows,
+                failure_times=_failure_times,
+                created_ats=_created_ats,
+                dep_counts=_dep_counts,
+            )
+            _scheduler = GameTheoryScheduler(
+                profile_loads=_profile_loads,
+                budget=_budget,
+            )
+            _ranked = _scheduler.rank(
+                _candidates,
+                failure_times=_failure_times,
+                dep_counts=_dep_counts,
+            )
+            # Re-order ready_rows to match ranked candidate order
+            _id_to_row = {dict(r)["id"]: r for r in ready_rows}
+            ready_rows = [_id_to_row[c.task_id] for c in _ranked if c.task_id in _id_to_row]
+        except Exception:
+            pass  # graceful degradation — fall back to DB-sorted order
     spawned = 0
     for row in ready_rows:
         if max_spawn is not None and spawned >= max_spawn:
@@ -3361,23 +3464,47 @@ def dispatch_once(
         # --- Resource check (ADR 002) ---
         if not resource_ok:
             result.deferred_resource.append((row["id"], resource_reason))
+            if _cb is not None:
+                try:
+                    from hermes_cli.kanban_circuit_breaker import _is_resource_error
+                    _cb.record_failure(resource_reason)
+                except Exception:
+                    pass
             continue
 
-        # --- Per-profile concurrency cap (ADR 002) ---
+        # --- Per-profile + board concurrency (ADR 002 fallback / ADR 003 pool) ---
         assignee = row["assignee"]
-        profile_running = profile_counts.get(assignee, 0)
-        if max_concurrent_per_profile > 0 and profile_running >= max_concurrent_per_profile:
-            result.deferred_concurrency.append(
-                (row["id"], f"profile={assignee} running={profile_running} cap={max_concurrent_per_profile}")
-            )
-            continue
-
-        # --- Board-wide concurrency cap (ADR 002) ---
-        if max_concurrent_board > 0 and total_running >= max_concurrent_board:
-            result.deferred_concurrency.append(
-                (row["id"], f"board total={total_running} cap={max_concurrent_board}")
-            )
-            continue
+        if _pool is not None:
+            # ADR 003: use thread pool for slot management.
+            try:
+                from hermes_cli.kanban_thread_pool import slot_priority_for_task, Priority
+                _prio = slot_priority_for_task(
+                    int(row["consecutive_failures"] or 0),
+                    None,  # created_at not fetched in this query; LOW detection disabled
+                )
+            except Exception:
+                from hermes_cli.kanban_thread_pool import Priority
+                _prio = Priority.NORMAL
+            slot = _pool.acquire(assignee=assignee, priority=_prio, timeout=0, task_id=row["id"])
+            if slot is None:
+                result.deferred_concurrency.append(
+                    (row["id"], f"thread_pool full assignee={assignee} priority={_prio.name}")
+                )
+                continue
+        else:
+            # ADR 002 fallback path (no pool).
+            slot = None
+            profile_running = profile_counts.get(assignee, 0)
+            if max_concurrent_per_profile > 0 and profile_running >= max_concurrent_per_profile:
+                result.deferred_concurrency.append(
+                    (row["id"], f"profile={assignee} running={profile_running} cap={max_concurrent_per_profile}")
+                )
+                continue
+            if max_concurrent_board > 0 and total_running >= max_concurrent_board:
+                result.deferred_concurrency.append(
+                    (row["id"], f"board total={total_running} cap={max_concurrent_board}")
+                )
+                continue
 
         # --- Exponential backoff (ADR 002) ---
         if backoff_check:
@@ -3415,10 +3542,14 @@ def dispatch_once(
             continue
         claimed = claim_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
+            if slot is not None:
+                slot.release()
             continue
         try:
             workspace = resolve_workspace(claimed, board=board)
         except Exception as exc:
+            if slot is not None:
+                slot.release()
             auto = _record_spawn_failure(
                 conn, claimed.id, f"workspace: {exc}",
                 failure_limit=failure_limit,
@@ -3429,38 +3560,56 @@ def dispatch_once(
         # Persist the resolved workspace path so the worker can cd there.
         set_workspace_path(conn, claimed.id, str(workspace))
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+        # ADR 003: attempt spawn inside circuit-breaker guard (if available),
+        # wrapped by the Disposable slot (auto-released on exit).
+        _spawn_ctx = slot if slot is not None else contextlib.nullcontext()
+        _cb_guard = _cb.guard() if _cb is not None else contextlib.nullcontext()
         try:
-            # Back-compat: older spawn_fn signatures accept only
-            # (task, workspace). Test stubs in the suite rely on that.
-            # Introspect the callable and pass `board` only when supported.
-            import inspect
-            try:
-                sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
-                    pid = _spawn(claimed, str(workspace), board=board)
-                else:
-                    pid = _spawn(claimed, str(workspace))
-            except (TypeError, ValueError):
-                pid = _spawn(claimed, str(workspace))
-            if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
-            # NOTE: we intentionally do NOT reset consecutive_failures
-            # here. A successful spawn proves the worker can start but
-            # doesn't prove the run will succeed. Under unified
-            # failure counting, resetting on spawn would let a task
-            # that keeps timing out after spawn loop forever. The
-            # counter is cleared only on successful completion (see
-            # complete_task).
-            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
-            spawned += 1
-            # Update in-memory concurrency counters so the next iteration
-            # of the loop sees the new worker (avoids over-spawning within
-            # a single tick).
-            profile_counts[claimed.assignee or ""] = profile_counts.get(claimed.assignee or "", 0) + 1
-            total_running += 1
+            with _cb_guard:
+                with _spawn_ctx:
+                    # Back-compat: older spawn_fn signatures accept only
+                    # (task, workspace). Test stubs in the suite rely on that.
+                    # Introspect the callable and pass `board` only when supported.
+                    import inspect
+                    try:
+                        sig = inspect.signature(_spawn)
+                        if "board" in sig.parameters:
+                            pid = _spawn(claimed, str(workspace), board=board)
+                        else:
+                            pid = _spawn(claimed, str(workspace))
+                    except (TypeError, ValueError):
+                        pid = _spawn(claimed, str(workspace))
+                    if pid:
+                        _set_worker_pid(conn, claimed.id, int(pid))
+                    # NOTE: we intentionally do NOT reset consecutive_failures
+                    # here. A successful spawn proves the worker can start but
+                    # doesn't prove the run will succeed. Under unified
+                    # failure counting, resetting on spawn would let a task
+                    # that keeps timing out after spawn loop forever. The
+                    # counter is cleared only on successful completion (see
+                    # complete_task).
+                    result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+                    spawned += 1
+                    # Update in-memory concurrency counters (ADR 002 fallback path).
+                    if _pool is None:
+                        profile_counts[claimed.assignee or ""] = profile_counts.get(claimed.assignee or "", 0) + 1
+                        total_running += 1
+            # Record success with circuit breaker.
+            if _cb is not None:
+                try:
+                    _cb.record_success()
+                except Exception:
+                    pass
         except Exception as exc:
+            # slot is already released by `with _spawn_ctx` exit above.
+            err_str = str(exc)
+            if _cb is not None:
+                try:
+                    _cb.record_failure(err_str)
+                except Exception:
+                    pass
             auto = _record_spawn_failure(
-                conn, claimed.id, str(exc),
+                conn, claimed.id, err_str,
                 failure_limit=failure_limit,
             )
             if auto:
@@ -3546,8 +3695,27 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    # Resolve hermes executable — prefer PATH lookup, fall back to known locations.
+    # The venv symlink at ~/.local/bin/hermes can break after venv recreations;
+    # the repo launcher at <hermes_root>/hermes is always the authoritative source.
+    _hermes_exe = "hermes"
+    import shutil as _shutil
+    if not _shutil.which("hermes"):
+        _fallbacks = [
+            str(pathlib.Path(__file__).parent.parent / "hermes"),
+            str(pathlib.Path.home() / ".local/bin/hermes"),
+            "/usr/local/bin/hermes",
+        ]
+        for _fb in _fallbacks:
+            if os.path.isfile(_fb) and os.access(_fb, os.X_OK):
+                _hermes_exe = _fb
+                # Also inject its directory into PATH for any child that re-resolves hermes
+                _fb_dir = str(pathlib.Path(_fb).parent)
+                env["PATH"] = _fb_dir + ":" + env.get("PATH", "")
+                break
+
     cmd = [
-        "hermes",
+        _hermes_exe,
         "-p", profile_arg,
         # Auto-load the kanban-worker skill so every dispatched worker
         # has the pattern library (good summary/metadata shapes, retry
@@ -3620,6 +3788,9 @@ def run_daemon(
     failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
     stop_event=None,
     on_tick=None,
+    board: Optional[str] = None,
+    max_concurrent_per_profile: int = DEFAULT_MAX_CONCURRENT_PER_PROFILE,
+    max_concurrent_board: int = DEFAULT_MAX_CONCURRENT_BOARD,
 ) -> None:
     """Run the dispatcher in a loop until interrupted.
 
@@ -3627,6 +3798,11 @@ def run_daemon(
     on SIGINT / SIGTERM so ``hermes kanban daemon`` is systemd-friendly.
     ``stop_event`` (a :class:`threading.Event`) and ``on_tick`` (a
     callable receiving the :class:`DispatchResult`) are test hooks.
+
+    ADR 003: A single :class:`ThreadPool` and :class:`CircuitBreaker` are
+    created once at daemon startup and reused across ticks.  This keeps
+    in-memory state (slot counts, breaker state) accurate across ticks
+    while persisting breaker state to SQLite for restart resilience.
     """
     import signal
     import threading
@@ -3648,13 +3824,54 @@ def run_daemon(
                 except (ValueError, OSError):
                     pass
 
+    # ADR 003: build pool + breaker once; pass into each tick.
+    _board_key = board or "default"
+    _pool = None
+    _cb = None
+    if _THREAD_POOL_ENABLED:
+        try:
+            from hermes_cli.kanban_thread_pool import ThreadPool
+            _pool = ThreadPool.for_board(
+                _board_key,
+                board_cap=max_concurrent_board,
+                per_profile_cap=max_concurrent_per_profile,
+            )
+            log.info("run_daemon thread_pool created board=%s cap=%d", _board_key, max_concurrent_board)
+        except Exception as e:
+            log.warning("run_daemon could not create ThreadPool: %s", e)
+
+    if _CIRCUIT_BREAKER_ENABLED:
+        try:
+            # CircuitBreaker needs a connection — open one for init, then
+            # pass the object; each tick re-uses the object with a fresh conn.
+            with contextlib.closing(connect()) as _init_conn:
+                from hermes_cli.kanban_circuit_breaker import CircuitBreaker
+                _cb = CircuitBreaker(_init_conn, board=_board_key)
+            log.info("run_daemon circuit_breaker created board=%s", _board_key)
+        except Exception as e:
+            log.warning("run_daemon could not create CircuitBreaker: %s", e)
+
     while not stop_event.is_set():
         try:
             with contextlib.closing(connect()) as conn:
+                # Re-bind the circuit breaker's connection each tick so it
+                # uses the fresh connection (SQLite connections are not
+                # thread-safe across closes).
+                if _cb is not None:
+                    _cb._conn = conn  # type: ignore[attr-defined]
+                # Sync pool from DB at start of each tick (handles orphans
+                # from daemon restarts).
+                if _pool is not None:
+                    _pool.sync_from_db(conn)
                 res = dispatch_once(
                     conn,
                     max_spawn=max_spawn,
                     failure_limit=failure_limit,
+                    board=board,
+                    max_concurrent_per_profile=max_concurrent_per_profile,
+                    max_concurrent_board=max_concurrent_board,
+                    circuit_breaker=_cb,
+                    thread_pool=_pool,
                 )
             if on_tick is not None:
                 try:
