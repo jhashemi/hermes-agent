@@ -44,11 +44,14 @@ class OKREngine:
         )
 
         # Create EAF Objective (gets DuckDB persistence, RACI, evidence gates)
+        organization = Organization(id="nebula-capital", name="Nebula Capital")
+        team = Team(id="exec-agents", org_id="nebula-capital", name="Executive Agents", lead="okr_orchestrator")
         objective = Objective(
             id=f"okr-{hash(okr_input) % 10000:04d}",
+            team_id=team.id,
+            owner_id="okr_orchestrator",
+            title=parsed["objective"],
             description=parsed["objective"],
-            organization=Organization(name="Nebula Capital"),
-            team=Team(name="Executive Agents"),
         )
 
         # Create EAF KeyResults
@@ -56,7 +59,7 @@ class OKREngine:
             KeyResult(
                 id=f"kr-{i}",
                 objective_id=objective.id,
-                description=kr,
+                title=kr,
                 target_value=1.0,
                 current_value=0.0,
             )

@@ -5,7 +5,7 @@ Manages the queue of GitHub issues with dependency awareness
 """
 
 from typing import List, Dict
-from okr_executive.engines.dependency_scheduler import DependencyAwareScheduler
+from okr_executive.engines.scheduling import OKRScheduler
 
 
 class GitHubIssueQueueManager:

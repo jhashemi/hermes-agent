@@ -81,8 +81,6 @@ class MakespanMinimizer:
 
     def compute_schedule(self) -> List[ScheduledIssue]:
         """Compute schedule that minimizes makespan"""
-        from .github_issue_queue import Issue
-
         schedule = []
         completed = set()
         issue_end_times = {}

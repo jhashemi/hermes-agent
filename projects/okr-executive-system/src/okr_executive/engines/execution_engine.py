@@ -11,10 +11,7 @@ from typing import Dict, Any, List
 sys.path.insert(0, "/home/ubuntu/executive_agents_framework/src")
 
 from executive_agents.infrastructure.systems.vcg_scheduler import VCGTaskScheduler
-from executive_agents.infrastructure.systems.vcg_dispatcher import (
-    VCGDispatcher,
-    NodeRegistry,
-)
+from executive_agents.infrastructure.systems.vcg_dispatcher import VCGDispatcher
 from okr_executive.engines.scheduling import OKRScheduler
 
 
@@ -33,21 +30,24 @@ class ExecutionEngine:
         """Assign tasks to agents using VCG + dispatch to cluster nodes"""
         tasks = context.get("tasks", [])
 
-        # Use EAF's VCGTaskScheduler for allocation
-        allocations = self.scheduler.vcg_scheduler.compute_allocation(
-            [{"id": t.id, "description": t.description} for t in tasks]
-        ) if tasks else []
-
-        # Use EAF's VCGDispatcher for node dispatch
-        dispatches = []
+        # Submit tasks to EAF's VCGTaskScheduler via board
         for task in tasks:
-            dispatch = self.scheduler.dispatcher.dispatch_task(
-                {"id": task.id, "description": task.description}
+            task_title = getattr(task, 'title', str(task))
+            task_id = getattr(task, 'id', f"task-{hash(task_title) % 10000}")
+            rice = getattr(task, 'rice_score', 0.0)
+            self.scheduler.vcg_scheduler.submit_task(
+                task_id=task_id,
+                title=task_title,
+                rice_score=rice,
             )
-            dispatches.append(dispatch)
+
+        # Use EAF's VCGTaskScheduler to compute allocation (uses board state)
+        allocations = self.scheduler.vcg_scheduler.compute_allocation()
+
+        # Resolve dependencies via EAF
+        self.scheduler.vcg_scheduler.resolve_dependencies()
 
         return {
             "allocations": allocations,
-            "dispatches": dispatches,
             "scheduler": self.scheduler,
         }

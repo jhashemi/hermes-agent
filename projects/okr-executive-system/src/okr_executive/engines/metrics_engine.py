@@ -18,7 +18,7 @@ from executive_agents.infrastructure.systems.decision_audit import DecisionAudit
 
 class MetricsEngine:
     """
-    KPI tracking + accountability + post-mortem generation.
+    KPI tracking + accountability + decision audit.
     
     Delegates to EAF's OKRAccountabilitySystem for OKR progress tracking,
     KPITracker for metric computation, and DecisionAuditTrail for
@@ -36,22 +36,41 @@ class MetricsEngine:
         tasks = context.get("tasks", [])
         reviews = context.get("reviews", [])
 
-        # Use EAF's KPITracker for metric computation
-        kpis = self.kpi_tracker.compute_kpis(
-            objective_id=getattr(objective, 'id', 'unknown'),
-            tasks_completed=len([t for t in tasks if getattr(t, 'status', '') == 'complete']),
-            total_tasks=len(tasks),
+        # Use EAF's KPITracker — register + update KPIs
+        obj_id = getattr(objective, 'id', 'unknown')
+        obj_title = getattr(objective, 'title', 'unknown')
+
+        self.kpi_tracker.register_kpi(
+            kpi_id=f"kpi-{obj_id}-completion",
+            name=f"Completion: {obj_title}",
+            description="Task completion rate",
+            target=1.0,
+            unit="fraction",
+        )
+
+        completed = len([t for t in tasks if getattr(t, 'status', '') == 'complete'])
+        total = len(tasks)
+        completion_rate = completed / total if total > 0 else 0.0
+
+        self.kpi_tracker.update_kpi(
+            kpi_id=f"kpi-{obj_id}-completion",
+            value=completion_rate,
         )
 
         # Use EAF's DecisionAuditTrail for accountability
-        audit_record = self.audit_trail.record(
-            decision_type="okr_execution",
-            description=f"Executed OKR: {getattr(objective, 'description', 'unknown')}",
+        audit_id = self.audit_trail.record_decision(
             agent_id="okr_orchestrator",
+            decision_type="okr_execution",
+            reasoning=f"Executed OKR: {obj_title}",
+            confidence=0.8,
         )
 
+        # Get dashboard summary
+        dashboard = self.kpi_tracker.get_dashboard()
+
         return {
-            "kpis": kpis,
-            "audit_record": audit_record,
+            "kpi_dashboard": dashboard,
+            "completion_rate": completion_rate,
+            "audit_id": audit_id,
             "okr_system": self.okr_system,
         }

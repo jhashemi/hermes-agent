@@ -44,9 +44,9 @@ class PlanningEngine:
         for goal in goals:
             rice_score = self.rice_scorer.score(
                 reach=getattr(goal, 'reach', 5),
-                impact=getattr(goal, 'impact', 5),
+                impact=getattr(goal, 'impact', 5.0),
                 confidence=getattr(goal, 'confidence', 0.5),
-                effort=getattr(goal, 'effort', 3),
+                effort=getattr(goal, 'effort', 3.0),
             )
             goal.rice_score = rice_score
 
@@ -60,26 +60,28 @@ class PlanningEngine:
         }
 
     def _decompose_goals(self, objective, key_results) -> List[GoalNode]:
-        """Create goal hierarchy from objective + key results"""
+        """Create goal hierarchy from objective + key results using EAF GoalNode"""
         goals = []
         for i, kr in enumerate(key_results):
+            kr_title = kr.title if hasattr(kr, 'title') else str(kr)
             goal = GoalNode(
                 id=f"goal-{i}",
-                description=str(kr) if hasattr(kr, 'description') else str(kr),
-                hierarchy_level=i + 1,
-                parent_id="root" if i == 0 else f"goal-{i-1}",
+                title=kr_title,
+                priority=float(len(key_results) - i),  # First KR = highest priority
+                okr_objective_id=getattr(objective, 'id', 'unknown'),
             )
             goals.append(goal)
         return goals
 
     def _break_down_tasks(self, goals) -> List[AtomicTask]:
-        """Break goals into atomic tasks"""
+        """Break goals into atomic tasks using EAF AtomicTask"""
         tasks = []
         for i, goal in enumerate(goals):
             task = AtomicTask(
                 id=f"task-{i}",
-                description=f"Implement: {goal.description}",
-                goal_id=goal.id,
+                title=f"Implement: {goal.title}",
+                plan_id=goal.id,
+                hierarchical_level="individual",
             )
             tasks.append(task)
         return tasks
