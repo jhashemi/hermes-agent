@@ -12,9 +12,8 @@ from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
 import asyncio
 from datetime import datetime
-from okr_executive.engines.dependency_scheduler import DependencyAwareScheduler
+from okr_executive.engines.scheduling import OKRScheduler, MakespanMinimizer
 from okr_executive.orchestrator.github_issue_queue import GitHubIssueQueueManager
-from okr_executive.engines.advanced_scheduler import HybridScheduler
 
 
 class Phase(Enum):
@@ -73,12 +72,10 @@ class AutonomousOKROrchestrator:
         self.execution_mode = execution_mode
         self.contexts: Dict[str, ExecutionContext] = {}
         self.success_criteria = self._define_success_criteria()
-        # Initialize dependency-aware scheduler for GitHub issues
-        self.issue_scheduler = DependencyAwareScheduler()
-        self._initialize_issue_dependencies()
-        # Initialize hybrid scheduler (MCTS + Game Theory + Makespan)
-        self.hybrid_scheduler = HybridScheduler()
-        self.optimal_schedule = self.hybrid_scheduler.compute_optimal_schedule()
+        # Use EAF-backed scheduler (VCGTaskScheduler + VCGMCTSIntegration + VCGDispatcher)
+        self.issue_scheduler = OKRScheduler()
+        self.issue_queue = GitHubIssueQueueManager()
+        self.makespan_minimizer = None  # Initialized per execution with issue data
     
     def _define_success_criteria(self) -> Dict[Phase, callable]:
         """Define what constitutes success for each phase"""
