@@ -80,11 +80,11 @@ class OKREngine:
             lower = line.lower()
             if lower.startswith("objective:") or lower.startswith("o:"):
                 objective = line.split(":", 1)[1].strip()
-            elif lower.startswith("key result") or lower.startswith("kr") or lower.startswith("-"):
-                kr_text = line.split(":", 1)[-1].strip() if ":" in line else line.lstrip("- ").strip()
+            elif any(lower.startswith(p) for p in ["key result", "kr", "- ", "* "]):
+                kr_text = line.split(":", 1)[-1].strip() if ":" in line else line.lstrip("-* ").strip()
                 if kr_text:
                     key_results.append(kr_text)
-            elif not objective:
+            elif not objective and line and not lower.startswith(("kr", "-")):
                 objective = line
 
         if not objective:

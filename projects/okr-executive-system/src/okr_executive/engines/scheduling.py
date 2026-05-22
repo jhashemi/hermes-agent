@@ -24,7 +24,6 @@ from executive_agents.infrastructure.systems.vcg_mcts_integration import VCGMCTS
 from executive_agents.infrastructure.systems.fractal_mcts import FractalMCTS, MCTSNode
 from executive_agents.infrastructure.systems.vcg_dispatcher import (
     VCGDispatcher,
-    NodeRegistry,
     ComputeNode,
     NodeStatus,
 )
@@ -169,10 +168,10 @@ class OKRScheduler:
     4. MakespanMinimizer (novel) → critical-path + machine heterogeneity
     """
 
-    def __init__(self):
+    def __init__(self, db_path: str = "/tmp/okr_vcg_registry.db"):
         self.vcg_scheduler = VCGTaskScheduler()
         self.mcts_integration = VCGMCTSIntegration(VCGMCTSConfig())
-        self.dispatcher = VCGDispatcher(NodeRegistry())
+        self.dispatcher = VCGDispatcher(registry_db=db_path)
         self.makespan_minimizer = None  # Initialized with issue data
 
     def initialize_makespan(self, issues: Dict, machines: List[Machine]):
@@ -195,7 +194,7 @@ __all__ = [
     # From EAF (canonical)
     "VCGTaskScheduler", "VCGMCTSIntegration", "VCGMCTSConfig",
     "FractalMCTS", "MCTSNode", "VCGDispatcher",
-    "NodeRegistry", "ComputeNode", "NodeStatus",
+    "ComputeNode", "NodeStatus",
     # Novel
     "MakespanMinimizer", "OKRScheduler", "MachineType",
     "Machine", "ScheduledIssue",
