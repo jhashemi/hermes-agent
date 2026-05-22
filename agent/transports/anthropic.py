@@ -4,17 +4,20 @@ Delegates to the existing adapter functions in agent/anthropic_adapter.py.
 This transport owns format conversion and normalization — NOT client lifecycle.
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from agent.transports.base import ProviderTransport
 from agent.transports.types import NormalizedResponse
+
+_log = logging.getLogger(__name__)
 
 
 class AnthropicTransport(ProviderTransport):
     """Transport for api_mode='anthropic_messages'.
 
     Wraps the existing functions in anthropic_adapter.py behind the
-    ProviderTransport ABC.  Each method delegates — no logic is duplicated.
+    ProviderTransport ABC. Each method delegates — no logic is duplicated.
     """
 
     @property
@@ -84,6 +87,7 @@ class AnthropicTransport(ProviderTransport):
         to OpenAI finish_reason, and collects reasoning_details in provider_data.
         """
         import json
+
         from agent.anthropic_adapter import _to_plain_data
         from agent.transports.types import ToolCall
 
@@ -107,6 +111,18 @@ class AnthropicTransport(ProviderTransport):
                 name = block.name
                 if strip_tool_prefix and name.startswith(_MCP_PREFIX):
                     name = name[len(_MCP_PREFIX):]
+                # Guard: drop tool_use blocks with empty/missing name.
+                # Anthropic Bedrock rejects requests containing tool_use
+                # blocks where name is an empty string (HTTP 400).
+                # See openclaw/openclaw#15485 for the same bug pattern.
+                if not name:
+                    _log.warning(
+                        "Dropping tool_use block with empty name "
+                        "(id=%s), likely from malformed MCP prefix "
+                        "stripping or corrupt transcript. Skipping.",
+                        getattr(block, "id", "unknown"),
+                    )
+                    continue
                 tool_calls.append(
                     ToolCall(
                         id=block.id,

@@ -272,9 +272,24 @@ _COMMAND_LOOKUP: dict[str, CommandDef] = _build_command_lookup()
 def resolve_command(name: str) -> CommandDef | None:
     """Resolve a command name or alias to its CommandDef.
 
-    Accepts names with or without the leading slash.
+    Accepts names with or without the leading slash. Hyphens and
+    underscores are interchangeable, so /load-jeff and /load_jeff
+    both resolve to the same command.
     """
-    return _COMMAND_LOOKUP.get(name.lower().lstrip("/"))
+    key = name.lower().lstrip("/")
+    cmd = _COMMAND_LOOKUP.get(key)
+    if cmd is not None:
+        return cmd
+    # Try the other separator variant (hyphen <-> underscore)
+    if "_" in key:
+        cmd = _COMMAND_LOOKUP.get(key.replace("_", "-"))
+        if cmd is not None:
+            return cmd
+    if "-" in key:
+        cmd = _COMMAND_LOOKUP.get(key.replace("-", "_"))
+        if cmd is not None:
+            return cmd
+    return None
 
 
 def _build_description(cmd: CommandDef) -> str:

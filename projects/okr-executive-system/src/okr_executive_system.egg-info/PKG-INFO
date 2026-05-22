@@ -1,0 +1,362 @@
+Metadata-Version: 2.4
+Name: okr-executive-system
+Version: 0.1.0
+Summary: OKR-Driven Executive Implementation System - Enterprise Architecture
+Author-email: Hermes Agent <hermes@nousresearch.com>
+License: MIT
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: duckdb>=1.5.2
+Requires-Dist: nats-py>=2.0.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pydantic-settings>=2.0.0
+Requires-Dist: python-dateutil>=2.8.2
+Requires-Dist: typing-extensions>=4.7.1
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4.0; extra == "dev"
+Requires-Dist: pytest-cov>=4.1.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.21.0; extra == "dev"
+Requires-Dist: black>=23.0.0; extra == "dev"
+Requires-Dist: ruff>=0.1.0; extra == "dev"
+Requires-Dist: mypy>=1.5.0; extra == "dev"
+Requires-Dist: pre-commit>=3.3.0; extra == "dev"
+
+# OKR-Driven Executive System
+
+**Enterprise-Grade Autonomous OKR Execution Platform**
+
+- **Status**: Phase 0 (Strategic Planning Complete) ✅
+- **Architecture**: Hexagonal + SOLID + Event-Driven
+- **Ready for**: Phase 1 (Abstractions Implementation)
+- **Language**: Python 3.11+
+- **License**: MIT
+
+---
+
+## Quick Start (Developers)
+
+```bash
+# 1. Clone and navigate
+cd ~/hermes-agent/projects/okr-executive-system
+
+# 2. Setup development environment
+make setup-dev
+
+# 3. Run tests
+make test
+
+# 4. Run linters
+make lint
+```
+
+---
+
+## What This System Does
+
+```
+OKR Input (JSON)
+  ↓
+Parse & Validate (OKREngine)
+  ↓
+Research Solutions (ResearchEngine) [Expert Agents]
+  ↓
+Create Hierarchical Plan (PlanningEngine) [Pluggable Mental Models]
+  ↓
+Allocate Tasks Optimally (ExecutionEngine) [VCG Algorithm]
+  ↓
+Execute with Full Cognitive System (Accountable Agents)
+  ↓
+Generate & Submit PR (ReviewEngine)
+  ↓
+Calculate KPIs (MetricsEngine)
+  ↓
+Output: PR + Complete Audit Trail + KPIs
+```
+
+---
+
+## Architecture
+
+**See**: `docs/ARCHITECTURE.md`
+
+### Key Decisions (ADRs)
+
+- **ADR-O-001**: DuckDB for data store (columnar, analytics)
+- **ADR-O-002**: NATS JetStream for events (persistence, replay)
+- **ADR-O-003**: Hexagonal architecture (ports & adapters)
+- **ADR-O-004**: SOLID principles (all components)
+- **ADR-O-005**: VCG allocation (game-theoretic optimal)
+
+**See**: `docs/adr/INDEX.md`
+
+---
+
+## Project Structure
+
+```
+okr-executive-system/
+├── README.md (this file)
+├── pyproject.toml (Python package config)
+├── requirements.txt (dependencies)
+├── requirements-dev.txt (dev dependencies)
+├── Makefile (developer commands)
+├── .github/workflows/ (CI/CD)
+│
+├── src/okr_executive/ (Main package)
+│   ├── __init__.py
+│   ├── domain/ (Domain models)
+│   │   ├── models.py (OKRModel, GoalModel, etc.)
+│   │   ├── events.py (All event types)
+│   │   └── exceptions.py (Domain exceptions)
+│   ├── engines/ (Core 6 engines)
+│   │   ├── base.py (ExecutionEngine interface)
+│   │   ├── okr_engine.py (Phase 1: Parse OKRs)
+│   │   ├── research_engine.py (Phase 2: Research)
+│   │   ├── planning_engine.py (Phase 3: Plan)
+│   │   ├── execution_engine.py (Phase 4: Execute)
+│   │   ├── review_engine.py (Phase 5: PR)
+│   │   └── metrics_engine.py (Phase 6: KPIs)
+│   ├── adapters/ (Infrastructure)
+│   │   ├── event_broker.py (NATS JetStream)
+│   │   ├── repository.py (DuckDB)
+│   │   ├── github_adapter.py (PR submission)
+│   │   └── kanban_adapter.py (Task tracking)
+│   └── orchestrator/ (Coordination)
+│       ├── okr_orchestrator.py (Main orchestrator)
+│       └── state_machine.py (OKR lifecycle)
+│
+├── tests/
+│   ├── unit/ (Unit tests - 1 test file per module)
+│   │   ├── test_models.py
+│   │   ├── test_okr_engine.py
+│   │   └── ...
+│   ├── integration/ (End-to-end tests)
+│   │   └── test_e2e_pipeline.py
+│   └── fixtures.py (Shared test fixtures)
+│
+├── docs/
+│   ├── ARCHITECTURE.md (System design)
+│   ├── DEVELOPMENT.md (How to build each phase)
+│   ├── API.md (API reference - when ready)
+│   └── adr/ (Architecture Decision Records)
+│       ├── INDEX.md (ADR registry)
+│       ├── ADR-001-*.md
+│       └── ...
+│
+└── scripts/
+    ├── setup_dev.sh (Development setup)
+    ├── run_tests.sh (Test runner)
+    └── lint.sh (Code quality)
+```
+
+---
+
+## Development Workflow
+
+### Phase 1: Abstractions (2 hours)
+```bash
+cd src/okr_executive/
+
+# Build these files:
+# - engines/base.py (ExecutionEngine interface)
+# - adapters/event_broker.py (EventBroker interface)
+# - adapters/repository.py (Repository interface)
+
+make test-phase-1
+```
+
+### Phase 2: Domain Models (2 hours)
+```bash
+cd src/okr_executive/
+
+# Build these files:
+# - domain/models.py (OKRModel, GoalModel, etc.)
+# - domain/events.py (All 7 event types)
+
+make test-phase-2
+```
+
+### Subsequent Phases
+See: `docs/DEVELOPMENT.md`
+
+---
+
+## Testing
+
+```bash
+# Run all tests
+make test
+
+# Run unit tests only
+make test-unit
+
+# Run integration tests only
+make test-integration
+
+# Run with coverage
+make test-coverage
+
+# Watch mode (auto-rerun on changes)
+make test-watch
+```
+
+---
+
+## Code Quality
+
+```bash
+# Format code
+make format
+
+# Run linters
+make lint
+
+# Type checking
+make type-check
+
+# All quality checks
+make quality
+```
+
+---
+
+## Onboarding (New Developers)
+
+### 1. Initial Setup (5 minutes)
+```bash
+make setup-dev
+```
+
+This installs:
+- Python 3.11+ environment
+- All dependencies (duckdb, nats-py, pydantic)
+- Dev tools (pytest, mypy, black, ruff)
+- Pre-commit hooks
+
+### 2. Understand Architecture (20 minutes)
+Read in order:
+1. `docs/ARCHITECTURE.md` - System design
+2. `docs/adr/INDEX.md` - Decision rationale
+3. This README - Project structure
+
+### 3. Run Tests (5 minutes)
+```bash
+make test
+```
+
+All tests should pass (100% green).
+
+### 4. Explore Code Structure (15 minutes)
+```bash
+# See what's in each module
+ls -R src/okr_executive/
+
+# Read one simple file
+cat src/okr_executive/domain/models.py
+```
+
+### 5. Start Developing (When Ready)
+Pick a Phase 1-7 task from `docs/DEVELOPMENT.md`
+
+---
+
+## CI/CD
+
+**Automated on every PR**:
+- ✅ Unit tests
+- ✅ Integration tests
+- ✅ Type checking (mypy)
+- ✅ Linting (black, ruff)
+- ✅ Coverage reporting
+
+See: `.github/workflows/`
+
+---
+
+## Key Files to Know
+
+| File | Purpose | Size |
+|------|---------|------|
+| `src/okr_executive/__init__.py` | Package root | 100 lines |
+| `src/okr_executive/engines/base.py` | ExecutionEngine interface | 50 lines |
+| `src/okr_executive/domain/models.py` | Data models | 200 lines |
+| `src/okr_executive/domain/events.py` | Event types | 150 lines |
+| `src/okr_executive/orchestrator/okr_orchestrator.py` | Main orchestrator | 300 lines |
+| `tests/unit/test_models.py` | Model tests | 150 lines |
+| `tests/integration/test_e2e_pipeline.py` | End-to-end tests | 200 lines |
+
+---
+
+## Dependencies
+
+### Core
+- **duckdb** - Columnar data store
+- **nats-py** - Event broker (JetStream)
+- **pydantic** - Data validation
+- **python-dateutil** - Date handling
+
+### Development Only
+- **pytest** - Testing framework
+- **black** - Code formatter
+- **ruff** - Linter
+- **mypy** - Type checker
+
+---
+
+## Documentation
+
+| Document | Purpose |
+|----------|---------|
+| `docs/ARCHITECTURE.md` | System design, 6 engines, event flow |
+| `docs/DEVELOPMENT.md` | How to build each Phase 1-7 |
+| `docs/adr/INDEX.md` | Architecture decisions + rationale |
+| `docs/API.md` | API reference (created in Phase 6+) |
+
+---
+
+## Contact & Support
+
+- **Questions**: Review `docs/ARCHITECTURE.md` first
+- **Issues**: Check existing GitHub issues
+- **Development Help**: See `docs/DEVELOPMENT.md`
+
+---
+
+## License
+
+MIT - See LICENSE file
+
+---
+
+## Quick Reference
+
+```bash
+# Setup
+make setup-dev        # Install dependencies
+
+# Testing
+make test            # Run all tests
+make test-unit       # Unit tests only
+make test-coverage   # With coverage report
+
+# Code Quality
+make format          # Format code
+make lint            # Run linters
+make type-check      # Type checking
+make quality         # All checks
+
+# Development
+make develop         # Install in editable mode
+make clean           # Clean build artifacts
+```
+
+---
+
+## Next: Phase 1
+
+Ready to implement? See: `docs/DEVELOPMENT.md#phase-1`
+
+**Estimated Time**: 2 hours  
+**Required Knowledge**: Python, asyncio, inheritance  
+**First Task**: Create `ExecutionEngine` interface
+

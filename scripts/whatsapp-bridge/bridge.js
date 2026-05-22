@@ -9,7 +9,10 @@
  *   GET  /messages       - Long-poll for new incoming messages
  *   POST /send           - Send a message { chatId, message, replyTo? }
  *   POST /edit           - Edit a sent message { chatId, messageId, message }
- *   POST /send-media     - Send media natively { chatId, filePath, mediaType?, caption?, fileName? }
+ *   POST /delete         - Delete a message { chatId, messageId }
+ *   POST /react          - React with emoji { chatId, messageId, emoji }
+ *   POST /send-media     - Send single media file { chatId, filePath, mediaType?, caption?, fileName? }
+ *   POST /send-media-batch - Send multiple media files { chatId, files[], delayMs? }
  *   POST /typing         - Send typing indicator { chatId }
  *   GET  /chat/:id       - Get chat info
  *   GET  /health         - Health check
@@ -528,6 +531,156 @@ app.post('/edit', async (req, res) => {
     }
 
     res.json({ success: true, messageIds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete a previously sent message
+app.post('/delete', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId } = req.body;
+  if (!chatId || !messageId) {
+    return res.status(400).json({ error: 'chatId and messageId are required' });
+  }
+
+  try {
+    const key = { id: messageId, fromMe: true, remoteJid: chatId };
+    await sock.sendMessage(chatId, { delete: key });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// React to a message with an emoji
+app.post('/react', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, messageId, emoji } = req.body;
+  if (!chatId || !messageId) {
+    return res.status(400).json({ error: 'chatId and messageId are required' });
+  }
+
+  try {
+    const key = { id: messageId, fromMe: false, remoteJid: chatId };
+    
+    // If emoji is empty/null, remove the reaction
+    if (!emoji || emoji.trim() === '') {
+      await sock.sendMessage(chatId, { reaction: { text: '', key } });
+    } else {
+      await sock.sendMessage(chatId, { reaction: { text: emoji, key } });
+    }
+    
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Send multiple media files as a batch
+app.post('/send-media-batch', async (req, res) => {
+  if (!sock || connectionState !== 'connected') {
+    return res.status(503).json({ error: 'Not connected to WhatsApp' });
+  }
+
+  const { chatId, files, delayMs } = req.body;
+  if (!chatId || !files || !Array.isArray(files) || files.length === 0) {
+    return res.status(400).json({ error: 'chatId and files array are required' });
+  }
+
+  const messageIds = [];
+  const errors = [];
+  const delayBetweenSends = delayMs || 300;
+
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const { filePath, mediaType, caption, fileName } = files[i];
+      
+      if (!filePath) {
+        errors.push({ index: i, error: 'filePath is required' });
+        continue;
+      }
+
+      if (!existsSync(filePath)) {
+        errors.push({ index: i, error: `File not found: ${filePath}` });
+        continue;
+      }
+
+      try {
+        const buffer = readFileSync(filePath);
+        const ext = filePath.toLowerCase().split('.').pop();
+        const type = mediaType || inferMediaType(ext);
+        let msgPayload;
+
+        switch (type) {
+          case 'image':
+            msgPayload = { image: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'image/jpeg' };
+            break;
+          case 'video':
+            msgPayload = { video: buffer, caption: caption || undefined, mimetype: MIME_MAP[ext] || 'video/mp4' };
+            break;
+          case 'audio': {
+            let audioBuffer = buffer;
+            let audioExt = ext;
+            const needsConversion = !['ogg', 'opus'].includes(ext);
+            let tmpPath = null;
+            if (needsConversion) {
+              tmpPath = path.join(tmpdir(), `hermes_voice_batch_${randomBytes(6).toString('hex')}.ogg`);
+              try {
+                execSync(
+                  `ffmpeg -y -i ${JSON.stringify(filePath)} -ar 48000 -ac 1 -c:a libopus ${JSON.stringify(tmpPath)}`,
+                  { timeout: 30000, stdio: 'pipe' }
+                );
+                audioBuffer = readFileSync(tmpPath);
+                audioExt = 'ogg';
+              } catch (convErr) {
+                console.warn('[bridge] ffmpeg conversion failed for batch, sending as file attachment:', convErr.message);
+              } finally {
+                try { if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath); } catch (_) {}
+              }
+            }
+            const audioMime = (audioExt === 'ogg' || audioExt === 'opus') ? 'audio/ogg; codecs=opus' : 'audio/mpeg';
+            msgPayload = { audio: audioBuffer, mimetype: audioMime, ptt: audioExt === 'ogg' || audioExt === 'opus' };
+            break;
+          }
+          case 'document':
+          default:
+            msgPayload = {
+              document: buffer,
+              fileName: fileName || path.basename(filePath),
+              caption: caption || undefined,
+              mimetype: MIME_MAP[ext] || 'application/octet-stream',
+            };
+            break;
+        }
+
+        const sent = await sock.sendMessage(chatId, msgPayload);
+        trackSentMessageId(sent);
+        
+        if (sent?.key?.id) {
+          messageIds.push(sent.key.id);
+        }
+      } catch (itemErr) {
+        errors.push({ index: i, error: itemErr.message });
+      }
+
+      // Delay between sends (except after the last item)
+      if (i < files.length - 1) {
+        await sleep(delayBetweenSends);
+      }
+    }
+
+    res.json({
+      success: errors.length === 0,
+      messageIds,
+      errors: errors.length > 0 ? errors : undefined,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

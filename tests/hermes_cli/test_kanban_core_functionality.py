@@ -414,9 +414,37 @@ def test_detect_crashed_workers_reclaims(kanban_home):
         conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Daemon loop
-# ---------------------------------------------------------------------------
+def test_detect_crashed_workers_reclaims_stuck_claims(kanban_home):
+    """A ready task with a non-null claim_lock (invariant violation from
+    broken SQL) gets its claim cleared by detect_crashed_workers, making
+    it visible to the dispatcher again."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="stuck-claim-test", assignee="worker")
+        # Simulate the invariant violation: set claim_lock without
+        # transitioning to 'running' (this is what broken bridge SQL can do)
+        conn.execute(
+            "UPDATE tasks SET claim_lock = 'hermes2:manual', claim_expires = ? "
+            "WHERE id = ? AND status = 'ready'",
+            (int(time.time()) + 3600, tid),
+        )
+        conn.commit()
+        # Confirm the task is invisible to the dispatcher
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.claim_lock == "hermes2:manual"
+        # detect_crashed_workers should reclaim the stuck claim
+        crashed = kb.detect_crashed_workers(conn)
+        assert tid in crashed
+        # Task should now be clean — claim_lock cleared, still ready
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        # An event should have been logged
+        events = kb.list_events(conn, tid)
+        assert any(e.kind == "stuck_claim_reclaimed" for e in events)
+    finally:
+        conn.close()
 
 def test_daemon_runs_and_stops(kanban_home):
     """run_daemon should execute at least one tick and exit cleanly on

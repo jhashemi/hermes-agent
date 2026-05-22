@@ -236,6 +236,33 @@ class WebhookAdapter(BasePlatformAdapter):
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
 
+        # ── "origin" delivery: route to the originating platform/chat ──
+        # When a webhook route has deliver=origin, the response should go
+        # back to the platform/chat that the webhook was triggered from.
+        # For webhook-originated sessions this means the "home" platform
+        # (since webhooks have no inherent origin platform), so we resolve
+        # via the gateway's home channel configuration — same pattern as
+        # _deliver_cross_platform uses for explicit platform targets.
+        if deliver_type == "origin":
+            if self.gateway_runner:
+                for plat_name, adapter in self.gateway_runner.adapters.items():
+                    try:
+                        home = self.gateway_runner.config.get_home_channel(plat_name)
+                    except Exception:
+                        home = None
+                    if home and home.chat_id:
+                        try:
+                            result = await adapter.send(str(home.chat_id), content)
+                            if result and getattr(result, "success", True):
+                                logger.info("[webhook] origin delivery via %s (chat_id=%s)", plat_name, home.chat_id)
+                                return result
+                        except Exception as e:
+                            logger.warning("[webhook] origin delivery via %s failed: %s", plat_name, e)
+                            continue
+            # Fallback: log it rather than drop it silently
+            logger.warning("[webhook] origin delivery (no home channel found), logging: %s", content[:200])
+            return SendResult(success=True)
+
         # Cross-platform delivery — any platform with a gateway adapter.
         # Check both built-in names and plugin-registered platforms.
         _BUILTIN_DELIVER_PLATFORMS = {
@@ -698,6 +725,24 @@ class WebhookAdapter(BasePlatformAdapter):
 
         if deliver_type == "github_comment":
             return await self._deliver_github_comment(content, delivery)
+
+        # Handle "origin" delivery in direct-deliver mode too
+        if deliver_type == "origin":
+            if self.gateway_runner:
+                for plat_name, adapter in self.gateway_runner.adapters.items():
+                    try:
+                        home = self.gateway_runner.config.get_home_channel(plat_name)
+                    except Exception:
+                        home = None
+                    if home and home.chat_id:
+                        try:
+                            result = await adapter.send(str(home.chat_id), content)
+                            if result and getattr(result, "success", True):
+                                return result
+                        except Exception:
+                            continue
+            logger.warning("[webhook] origin direct-deliver (no home channel), logging: %s", content[:200])
+            return SendResult(success=True)
 
         # Fall through to the cross-platform dispatcher, which validates the
         # target name and routes via the gateway runner.

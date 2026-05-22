@@ -865,15 +865,16 @@ CREATE TABLE IF NOT EXISTS kanban_notify_subs (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status ON tasks(assignee, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_status          ON tasks(status);
-CREATE INDEX IF NOT EXISTS idx_tasks_tenant          ON tasks(tenant);
-CREATE INDEX IF NOT EXISTS idx_tasks_idempotency     ON tasks(idempotency_key);
 CREATE INDEX IF NOT EXISTS idx_links_child           ON task_links(child_id);
 CREATE INDEX IF NOT EXISTS idx_links_parent          ON task_links(parent_id);
 CREATE INDEX IF NOT EXISTS idx_comments_task         ON task_comments(task_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_task           ON task_events(task_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_events_run            ON task_events(run_id, id);
+-- tenant, idempotency_key, and run_id indexes are created by
+-- _migrate_add_optional_columns() AFTER the columns exist; putting
+-- them here would crash on old DBs that lack those columns yet.
+-- idx_runs_status is also migration-dependent (task_runs may lack
+-- the status column on old DBs).
 CREATE INDEX IF NOT EXISTS idx_runs_task             ON task_runs(task_id, started_at);
-CREATE INDEX IF NOT EXISTS idx_runs_status           ON task_runs(status);
 CREATE INDEX IF NOT EXISTS idx_notify_task           ON kanban_notify_subs(task_id);
 """
 
@@ -988,8 +989,27 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     Called by ``init_db`` so opening an old DB is always safe.
     """
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "body" not in cols:
+        _add_column_if_missing(conn, "tasks", "body", "body TEXT")
+    if "created_by" not in cols:
+        _add_column_if_missing(conn, "tasks", "created_by", "created_by TEXT")
+    if "started_at" not in cols:
+        _add_column_if_missing(conn, "tasks", "started_at", "started_at INTEGER")
+    if "completed_at" not in cols:
+        _add_column_if_missing(conn, "tasks", "completed_at", "completed_at INTEGER")
+    if "workspace_kind" not in cols:
+        _add_column_if_missing(
+            conn, "tasks", "workspace_kind",
+            "workspace_kind TEXT NOT NULL DEFAULT 'scratch'"
+        )
+    if "workspace_path" not in cols:
+        _add_column_if_missing(conn, "tasks", "workspace_path", "workspace_path TEXT")
     if "tenant" not in cols:
         _add_column_if_missing(conn, "tasks", "tenant", "tenant TEXT")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_tenant "
+            "ON tasks(tenant)"
+        )
     if "result" not in cols:
         _add_column_if_missing(conn, "tasks", "result", "result TEXT")
     if "idempotency_key" not in cols:
@@ -1072,6 +1092,53 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # they were getting before the column existed).
         _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
 
+    # task_runs: old DBs may have a minimal schema (id, task_id, worker_pid,
+    # started_at, ended_at, exit_code, log_path, result_path). Migrate to
+    # the full schema expected by the dispatcher and run-tracking code.
+    runs_exist = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
+    ).fetchone() is not None
+    if runs_exist:
+        run_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_runs)")}
+        if "status" not in run_cols:
+            # Old task_runs had no status column. Back-fill from the old
+            # exit_code column: NULL → running, 0 → done, nonzero → crashed.
+            _add_column_if_missing(conn, "task_runs", "status", "status TEXT")
+            conn.execute(
+                "UPDATE task_runs SET status = CASE "
+                "WHEN exit_code IS NULL THEN 'running' "
+                "WHEN exit_code = 0 THEN 'done' "
+                "ELSE 'crashed' END "
+                "WHERE status IS NULL"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_runs_status ON task_runs(status)"
+            )
+        if "profile" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "profile", "profile TEXT")
+        if "step_key" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "step_key", "step_key TEXT")
+        if "claim_lock" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "claim_lock", "claim_lock TEXT")
+        if "claim_expires" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "claim_expires", "claim_expires INTEGER")
+        if "max_runtime_seconds" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "max_runtime_seconds", "max_runtime_seconds INTEGER"
+            )
+        if "last_heartbeat_at" not in run_cols:
+            _add_column_if_missing(
+                conn, "task_runs", "last_heartbeat_at", "last_heartbeat_at INTEGER"
+            )
+        if "outcome" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "outcome", "outcome TEXT")
+        if "summary" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "summary", "summary TEXT")
+        if "metadata" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "metadata", "metadata TEXT")
+        if "error" not in run_cols:
+            _add_column_if_missing(conn, "task_runs", "error", "error TEXT")
+
     # task_events gained a run_id column; back-fill it as NULL for
     # historical events (they predate runs and can't be attributed).
     ev_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_events)")}
@@ -1150,6 +1217,24 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE task_events SET kind = ? WHERE kind = ?",
             (new, old),
+        )
+
+    # Post-migration index assurance: ensure indexes on migration-added
+    # columns exist even when the column was already present (the index
+    # creation was removed from SCHEMA_SQL to avoid crashes on old DBs).
+    tasks_cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+    if "tenant" in tasks_cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant)"
+        )
+    if "idempotency_key" in tasks_cols:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)"
+        )
+    ev_cols2 = {row["name"] for row in conn.execute("PRAGMA table_info(task_events)")}
+    if "run_id" in ev_cols2:
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)"
         )
 
 
@@ -3312,6 +3397,33 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # and tests that destructure the result; ``dispatch_once`` reads this
     # side-channel attribute to populate ``DispatchResult.auto_blocked``.
     detect_crashed_workers._last_auto_blocked = auto_blocked  # type: ignore[attr-defined]
+
+    # ── Stuck-claim recovery ──────────────────────────────────────────
+    # A task in ``ready`` with a non-null ``claim_lock`` is an invariant
+    # violation: ``claim_task`` atomically transitions ready→running when it
+    # sets the claim.  The only way to reach this state is via broken SQL
+    # (e.g. a bridge or manual update that set claim_lock without the
+    # status transition).  These tasks are invisible to the dispatcher
+    # (which only picks up ``WHERE status = 'ready' AND claim_lock IS NULL'')
+    # so they starve forever unless we clean them up here.
+    with write_txn(conn):
+        stuck = conn.execute(
+            "SELECT id, claim_lock FROM tasks "
+            "WHERE status = 'ready' AND claim_lock IS NOT NULL"
+        ).fetchall()
+        for row in stuck:
+            conn.execute(
+                "UPDATE tasks SET claim_lock = NULL, claim_expires = NULL, "
+                "worker_pid = NULL WHERE id = ? AND status = 'ready' "
+                "AND claim_lock IS ?",
+                (row["id"], row["claim_lock"]),
+            )
+            _append_event(
+                conn, row["id"], "stuck_claim_reclaimed",
+                {"stale_lock": row["claim_lock"]},
+            )
+            crashed.append(row["id"])
+
     return crashed
 
 

@@ -175,16 +175,26 @@ class AccessControlManager:
         """Extract unique user identifier from message event.
 
         Priority:
-          1. event.user_id (WhatsApp contact ID)
-          2. event.chat_id (falls back to chat ID)
-          3. Fallback: unknown_user
-        
+          1. event.source.user_id (normalized SessionSource on MessageEvent)
+          2. event.source.chat_id
+          3. event.user_id (legacy / WhatsApp adapter shape)
+          4. event.chat_id (legacy fallback)
+          5. Fallback: unknown_user
+
         Thread-safe: No shared state accessed.
         """
+        source = getattr(event, "source", None)
+        if source is not None:
+            uid = getattr(source, "user_id", None)
+            if uid:
+                return str(uid)
+            cid = getattr(source, "chat_id", None)
+            if cid:
+                return str(cid)
         if hasattr(event, "user_id") and event.user_id:
-            return event.user_id
+            return str(event.user_id)
         if hasattr(event, "chat_id") and event.chat_id:
-            return event.chat_id
+            return str(event.chat_id)
         return "unknown_user"
 
     def has_access(self, event: MessageEvent) -> bool:

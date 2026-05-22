@@ -1,29 +1,38 @@
-"""Multi-instance Hermes orchestrator for WhatsApp gateway.
+"""Multi-instance Hermes orchestrator for messaging gateway.
 
-Allows WhatsApp users to control multiple Hermes instances via slash commands:
+Allows users on any messaging adapter (Telegram, WhatsApp, Discord, etc.)
+to control multiple Hermes instances via slash commands:
   /switch-hermes <instance>    - Switch which instance is controlling responses
   /hermes-list                  - List available instances
   /hermes-status               - Show current active instance
 
-The local WhatsApp gateway (44.198.134.0) receives messages and can either:
+The local gateway receives messages and can either:
 1. Execute locally (default)
-2. Proxy to a remote instance (hermes2.tailscale or others)
+2. Proxy to a remote instance (any configured remote Hermes agent)
 
 Remote instances are accessed via:
-  - SSH tunnel via Tailscale
   - HTTP API on the remote agent
-  - Same authentication (Putty HTTP key + username)
+  - Configurable authentication (API key + username)
 
-This is transparent to the WhatsApp user.
+Instance configuration is loaded from:
+  - Environment variables: HERMES_INSTANCE_<NAME>=<api_url>,
+    HERMES_INSTANCE_<NAME>_KEY=<api_key>, HERMES_INSTANCE_<NAME>_USERNAME=<username>
+  - Config file: ~/.hermes/config.yaml under the ``hermes_instances`` key
+  - Fallback: a single "local" instance pointing to 127.0.0.1:8000
+
+This is transparent to the user regardless of which adapter they use.
 """
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass
 import asyncio
 import httpx
+import json
 import logging
 import hashlib
 import re
 import os
+from pathlib import Path
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -31,6 +40,243 @@ logger = logging.getLogger(__name__)
 
 # P1-002: SECURITY — Fix Input Validation
 MAX_CHAT_ID_LENGTH = 256
+
+# Env var prefix for instance configuration
+_INSTANCE_ENV_PREFIX = "HERMES_INSTANCE_"
+
+
+# ---------------------------------------------------------------------------
+# Config loading: env vars → config.yaml → defaults
+# ---------------------------------------------------------------------------
+
+def _parse_instance_url(url: str) -> Dict[str, str]:
+    """Parse a URL like http://host:port into hostname, ip, port components.
+
+    Returns dict with keys: hostname, ip, port.
+    """
+    url = url.strip()
+    # Remove scheme
+    if url.startswith("http://"):
+        url = url[7:]
+    elif url.startswith("https://"):
+        url = url[8:]
+
+    # Split port
+    host_part = url
+    port = 8000
+    if ":" in url:
+        parts = url.rsplit(":", 1)
+        host_part = parts[0]
+        try:
+            port = int(parts[1])
+        except ValueError:
+            host_part = url  # no valid port, keep as-is
+
+    return {
+        "hostname": host_part,
+        "ip": host_part,  # will be resolved; use hostname as ip initially
+        "port": port,
+    }
+
+
+def _load_instances_from_env() -> Dict[str, Dict[str, Any]]:
+    """Load instance definitions from HERMES_INSTANCE_<NAME> env vars.
+
+    Pattern:
+      HERMES_INSTANCE_LOCAL=http://127.0.0.1:8000
+      HERMES_INSTANCE_LOCAL_KEY=my-api-key
+      HERMES_INSTANCE_LOCAL_USERNAME=ubuntu
+      HERMES_INSTANCE_HERMES2=http://100.79.15.66:8000
+      HERMES_INSTANCE_HERMES2_KEY=real-key-here
+      HERMES_INSTANCE_HERMES2_USERNAME=ubuntu
+    """
+    instances: Dict[str, Dict[str, Any]] = {}
+
+    # Scan env for HERMES_INSTANCE_* keys
+    for key, value in os.environ.items():
+        if not key.startswith(_INSTANCE_ENV_PREFIX):
+            continue
+
+        remainder = key[len(_INSTANCE_ENV_PREFIX):]
+
+        # Check if this is a _KEY or _USERNAME suffix
+        if remainder.endswith("_KEY"):
+            name = remainder[:-4].lower()
+            if name not in instances:
+                instances[name] = {}
+            instances[name]["http_key"] = value
+            continue
+
+        if remainder.endswith("_USERNAME"):
+            name = remainder[:-9].lower()
+            if name not in instances:
+                instances[name] = {}
+            instances[name]["username"] = value
+            continue
+
+        if remainder.endswith("_DESCRIPTION"):
+            name = remainder[:-12].lower()
+            if name not in instances:
+                instances[name] = {}
+            instances[name]["description"] = value
+            continue
+
+        # This is the main URL definition
+        name = remainder.lower()
+        if not name:
+            continue
+        if name not in instances:
+            instances[name] = {}
+        parsed = _parse_instance_url(value)
+        instances[name].update(parsed)
+        instances[name]["url_raw"] = value
+
+    return instances
+
+
+def _load_instances_from_config_yaml() -> Dict[str, Dict[str, Any]]:
+    """Load instance definitions from ~/.hermes/config.yaml.
+
+    Expects a top-level ``hermes_instances`` key with a list of instance dicts:
+
+    ```yaml
+    hermes_instances:
+      - name: local
+        hostname: "127.0.0.1"
+        ip: "127.0.0.1"
+        http_port: 8000
+        description: "Local Hermes instance"
+        is_local: true
+      - name: hermes2
+        hostname: "hermes2.flounder-snake.ts.net"
+        ip: "100.79.15.66"
+        http_port: 8000
+        http_key: "YOUR_API_KEY"
+        username: "ubuntu"
+        description: "Agent execution layer"
+    ```
+    """
+    instances: Dict[str, Dict[str, Any]] = {}
+
+    try:
+        from hermes_constants import get_hermes_home
+        config_path = get_hermes_home() / "config.yaml"
+    except ImportError:
+        config_path = Path.home() / ".hermes" / "config.yaml"
+
+    if not config_path.exists():
+        return instances
+
+    try:
+        import yaml
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    except Exception as e:
+        logger.debug(f"Could not load config.yaml for instances: {e}")
+        return instances
+
+    if not config or not isinstance(config, dict):
+        return instances
+
+    instance_list = config.get("hermes_instances", [])
+    if not isinstance(instance_list, list):
+        return instances
+
+    for inst_dict in instance_list:
+        if not isinstance(inst_dict, dict):
+            continue
+        name = inst_dict.get("name", "").strip().lower()
+        if not name:
+            continue
+        instances[name] = {
+            "hostname": inst_dict.get("hostname", "localhost"),
+            "ip": inst_dict.get("ip", inst_dict.get("hostname", "localhost")),
+            "port": inst_dict.get("http_port", 8000),
+            "http_key": inst_dict.get("http_key", ""),
+            "username": inst_dict.get("username", ""),
+            "description": inst_dict.get("description", ""),
+            "is_local": inst_dict.get("is_local", False),
+        }
+
+    return instances
+
+
+def load_hermes_instances() -> Dict[str, "RemoteHermesInstance"]:
+    """Build the HERMES_INSTANCES registry from configuration sources.
+
+    Priority (highest first):
+      1. Environment variables (HERMES_INSTANCE_<NAME>=<url>, etc.)
+      2. ~/.hermes/config.yaml under ``hermes_instances``
+      3. Built-in default: a single "local" instance at 127.0.0.1:8000
+
+    Returns:
+        Dict mapping instance name → RemoteHermesInstance
+    """
+    instances: Dict[str, RemoteHermesInstance] = {}
+
+    # Start with config.yaml (lower priority)
+    yaml_instances = _load_instances_from_config_yaml()
+    for name, cfg in yaml_instances.items():
+        try:
+            port = int(cfg.get("port", 8000))
+            if not validate_port(port):
+                logger.warning(f"Skipping instance '{name}' from config.yaml: invalid port {port}")
+                continue
+            if not validate_hostname(cfg.get("hostname", "")):
+                logger.warning(f"Skipping instance '{name}' from config.yaml: invalid hostname")
+                continue
+            instances[name] = RemoteHermesInstance(
+                name=name,
+                hostname=cfg.get("hostname", "localhost"),
+                ip=cfg.get("ip", cfg.get("hostname", "localhost")),
+                http_port=port,
+                http_key=cfg.get("http_key", ""),
+                username=cfg.get("username", ""),
+                description=cfg.get("description", f"Remote instance: {name}"),
+                is_local=cfg.get("is_local", False),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load instance '{name}' from config.yaml: {e}")
+
+    # Override / merge with env vars (higher priority)
+    env_instances = _load_instances_from_env()
+    for name, cfg in env_instances.items():
+        hostname = cfg.get("hostname", "localhost")
+        ip = cfg.get("ip", hostname)
+        port = cfg.get("port", 8000)
+        try:
+            port = int(port)
+            if not validate_port(port):
+                logger.warning(f"Skipping env instance '{name}': invalid port {port}")
+                continue
+            if not validate_hostname(hostname):
+                logger.warning(f"Skipping env instance '{name}': invalid hostname '{hostname}'")
+                continue
+            instances[name] = RemoteHermesInstance(
+                name=name,
+                hostname=hostname,
+                ip=ip,
+                http_port=port,
+                http_key=cfg.get("http_key", ""),
+                username=cfg.get("username", ""),
+                description=cfg.get("description", f"Instance: {name}"),
+                is_local=(name == "local" or hostname in ("127.0.0.1", "localhost")),
+            )
+        except Exception as e:
+            logger.warning(f"Failed to load instance '{name}' from env: {e}")
+
+    # Ensure "local" always exists
+    if "local" not in instances:
+        instances["local"] = RemoteHermesInstance(
+            name="local",
+            hostname="127.0.0.1",
+            ip="127.0.0.1",
+            http_port=8000,
+            description="Local Hermes instance",
+            is_local=True,
+        )
+
+    return instances
 
 
 # P2-005: Runtime environment variable loading
@@ -182,8 +428,8 @@ class RemoteHermesInstance:
         hostname: str,  # e.g., "hermes2.flounder-snake.ts.net"
         ip: str,  # e.g., "100.79.15.66"
         http_port: int = 8000,  # Default Hermes agent HTTP port
-        http_key: str = "",  # Shared Putty HTTP key
-        username: str = "",  # SSH/HTTP username
+        http_key: str = "",  # API key for authentication
+        username: str = "",  # HTTP username
         description: str = "",
         is_local: bool = False,
     ):
@@ -197,17 +443,32 @@ class RemoteHermesInstance:
         self.is_local = is_local
 
     def get_base_url(self) -> str:
-        """Get base URL for this instance (prefer IP via Tailscale)."""
+        """Get base URL for this instance (prefer IP for remote)."""
         if self.is_local:
             return "http://127.0.0.1:8000"
         # Use IP address to avoid DNS lookups
         return f"http://{self.ip}:{self.http_port}"
 
-    def get_api_headers(self) -> Dict[str, str]:
-        """Get HTTP headers for authentication."""
+    def get_api_headers(self, body: bytes = b"") -> Dict[str, str]:
+        """Get HTTP headers for authentication including HMAC signature.
+
+        Args:
+            body: Request body bytes for HMAC signature computation.
+                  If empty, only the key header is added (e.g., for GET requests).
+        """
         headers = {"Content-Type": "application/json"}
         if self.http_key:
             headers["X-Hermes-Key"] = self.http_key
+            # P1-HMAC: Include HMAC-SHA256 signature of request body
+            if body:
+                import hashlib as _hashlib
+                import hmac as _hmac
+                sig = _hmac.new(
+                    self.http_key.encode("utf-8"),
+                    body,
+                    _hashlib.sha256,
+                ).hexdigest()
+                headers["X-Hermes-Signature"] = sig
         if self.username:
             headers["X-Hermes-User"] = self.username
         return headers
@@ -217,44 +478,44 @@ class RemoteHermesInstance:
         return f"[{status}] {self.name:20} ({self.hostname}) — {self.description}"
 
 
-# Registry of available instances
-HERMES_INSTANCES: Dict[str, RemoteHermesInstance] = {
-    "local": RemoteHermesInstance(
-        name="local",
-        hostname="127.0.0.1",
-        ip="127.0.0.1",
-        http_port=8000,
-        description="Local Hermes instance (WhatsApp gateway)",
-        is_local=True,
-    ),
-    "hermes2": RemoteHermesInstance(
-        name="hermes2",
-        hostname="hermes2.flounder-snake.ts.net",
-        ip="100.79.15.66",
-        http_port=8000,
-        http_key="putty_key_here",  # TODO: Load from env
-        username="ubuntu",  # TODO: Load from env
-        description="Agent execution layer (voice twins + personas)",
-        is_local=False,
-    ),
-    # Add more instances as needed
-    # "hermes3": RemoteHermesInstance(...),
-}
+# Registry of available instances — loaded dynamically
+HERMES_INSTANCES: Dict[str, RemoteHermesInstance] = load_hermes_instances()
+
+
+def reload_hermes_instances() -> Dict[str, RemoteHermesInstance]:
+    """Reload instance registry from configuration sources.
+
+    Call this to pick up new env vars or config.yaml changes at runtime.
+    Updates the module-level HERMES_INSTANCES dict.
+    """
+    global HERMES_INSTANCES
+    HERMES_INSTANCES = load_hermes_instances()
+    return HERMES_INSTANCES
 
 
 class InstanceOrchestrator:
     """Manages switching between multiple Hermes instances.
 
     Maintains session state: which instance is currently handling requests.
+    Works with any messaging adapter (Telegram, WhatsApp, Discord, etc.).
     """
 
-    def __init__(self):
-        self.current_instance: str = "local"  # Default: WhatsApp gateway's local instance
+    def __init__(self, instances: Optional[Dict[str, RemoteHermesInstance]] = None):
+        self._instances: Dict[str, RemoteHermesInstance] = instances or dict(HERMES_INSTANCES)
+        self.current_instance: str = "local"  # Default: local instance
         self.session_instances: Dict[str, str] = {}  # chat_id → instance_name
         self._http_client: Optional[httpx.AsyncClient] = None
         # P1-004: Health check cache
         self._health_cache: Dict[str, tuple[bool, Any]] = {}  # (healthy, timestamp)
         self._health_cache_ttl = 30  # seconds
+
+    def _get_registry(self) -> Dict[str, RemoteHermesInstance]:
+        """Get the current instance registry (module-level, may be reloaded)."""
+        return self._instances
+
+    def reload_instances(self) -> None:
+        """Reload instances from configuration and update this orchestrator."""
+        self._instances = load_hermes_instances()
 
     async def init(self):
         """Initialize HTTP client for remote calls."""
@@ -280,11 +541,12 @@ class InstanceOrchestrator:
             ValueError: If chat_id exceeds MAX_CHAT_ID_LENGTH (prevents DoS via memory exhaustion)
                        or if instance hostname/port are invalid
         """
-        if instance_name not in HERMES_INSTANCES:
+        registry = self._get_registry()
+        if instance_name not in registry:
             return False
 
         # P2-003: Validate instance hostname and port
-        instance = HERMES_INSTANCES[instance_name]
+        instance = registry[instance_name]
         if not validate_hostname(instance.hostname):
             raise ValueError(f"Invalid hostname for instance '{instance_name}': {instance.hostname} is not a valid IP or FQDN")
         if not validate_port(instance.http_port):
@@ -318,12 +580,13 @@ class InstanceOrchestrator:
 
     def get_instance(self, instance_name: str) -> Optional[RemoteHermesInstance]:
         """Get instance by name."""
-        return HERMES_INSTANCES.get(instance_name)
+        return self._get_registry().get(instance_name)
 
     def list_instances(self) -> str:
         """Format list of available instances."""
+        registry = self._get_registry()
         lines = ["🌐 **Available Hermes Instances:**\n"]
-        for key, inst in HERMES_INSTANCES.items():
+        for key, inst in registry.items():
             marker = "→" if key == self.current_instance else " "
             lines.append(f"  {marker} /switch-{key.lower():15} {inst}")
         return "\n".join(lines)
@@ -377,11 +640,13 @@ class InstanceOrchestrator:
                     await self.init()
 
                 url = f"{instance.get_base_url()}/api/agent/execute"
-                headers = instance.get_api_headers()
                 payload = {
                     "prompt": prompt,
                     "session_id": session_id,
                 }
+                # Compute headers with HMAC signature of serialized body
+                payload_bytes = json.dumps(payload).encode("utf-8")
+                headers = instance.get_api_headers(body=payload_bytes)
 
                 resp = await self._http_client.post(
                     url,
@@ -550,9 +815,8 @@ class InstanceOrchestrator:
                 # P1-004: Log failure at ERROR level for visibility
                 logger.error(f"HEALTH CHECK FAILED: {instance_name} is not responding to health check")
                 
-                # Notify if hermes2 specifically is unreachable
-                if instance_name == "hermes2":
-                    logger.error(f"🚨 CRITICAL: Remote instance 'hermes2' is unreachable! Users cannot access remote execution.")
+                # Log CRITICAL for any unreachable remote instance (not just "hermes2")
+                logger.error(f"🚨 CRITICAL: Remote instance '{instance_name}' is unreachable! Users cannot access remote execution.")
                 
                 return {
                     "name": instance_name,
@@ -567,9 +831,8 @@ class InstanceOrchestrator:
             # P1-004: Log at ERROR level so failures are visible (not DEBUG)
             logger.error(f"Exception during health check for {instance_name}: {e}", exc_info=True)
             
-            # Notify if hermes2 specifically failed
-            if instance_name == "hermes2":
-                logger.error(f"🚨 CRITICAL: Cannot reach remote instance 'hermes2': {e}")
+            # Log CRITICAL for any unreachable remote instance (not just "hermes2")
+            logger.error(f"🚨 CRITICAL: Cannot reach remote instance '{instance_name}': {e}")
             
             return {
                 "name": instance_name,

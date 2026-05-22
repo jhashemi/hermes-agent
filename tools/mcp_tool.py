@@ -2681,8 +2681,13 @@ def sanitize_mcp_name_component(value: str) -> str:
     underscores, and also replaces any other character outside
     ``[A-Za-z0-9_]`` with ``_`` so generated tool names are compatible with
     provider validation rules.
+
+    Returns "unnamed" if the value is None/empty or sanitizes to an empty
+    string, preventing downstream generation of tool names with blank
+    components (which causes Anthropic Bedrock HTTP 400).
     """
-    return re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
+    sanitized = re.sub(r"[^A-Za-z0-9_]", "_", str(value or ""))
+    return sanitized if sanitized else "unnamed"
 
 
 def _convert_mcp_schema(server_name: str, mcp_tool) -> dict:
@@ -2939,6 +2944,18 @@ def _register_server_tools(name: str, server: MCPServerTask, config: dict) -> Li
     for mcp_tool in server._tools:
         if not _should_register(mcp_tool.name):
             logger.debug("MCP server '%s': skipping tool '%s' (filtered by config)", name, mcp_tool.name)
+            continue
+
+        # Validate: skip tools with empty or missing name.
+        # An empty name produces a malformed prefixed name (e.g. "mcp_serena_")
+        # which causes Anthropic Bedrock HTTP 400 when strip_tool_prefix yields "".
+        # See openclaw/openclaw#15485 for the same bug pattern.
+        raw_name = getattr(mcp_tool, 'name', None)
+        if not raw_name or not raw_name.strip():
+            logger.warning(
+                "MCP server '%%s': tool has empty/missing name — skipping. "
+                "Tool object: %%r", name, mcp_tool,
+            )
             continue
 
         # Scan tool description for prompt injection patterns

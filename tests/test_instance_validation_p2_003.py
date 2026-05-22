@@ -164,39 +164,31 @@ class TestInstanceOrchestratorValidation:
         """Test that invalid hostname raises ValueError."""
         orchestrator = InstanceOrchestrator()
         
-        # Create a temporary instance with invalid hostname
-        HERMES_INSTANCES["invalid_test"] = RemoteHermesInstance(
+        # Create a temporary instance with invalid hostname directly in the orchestrator
+        orchestrator._instances["invalid_test"] = RemoteHermesInstance(
             name="invalid_test",
             hostname="256.256.256.256",  # Invalid IP
             ip="100.0.0.1",
             http_port=8000,
         )
         
-        try:
-            with pytest.raises(ValueError, match="Invalid hostname"):
-                orchestrator.set_current_instance("invalid_test")
-        finally:
-            # Cleanup
-            del HERMES_INSTANCES["invalid_test"]
+        with pytest.raises(ValueError, match="Invalid hostname"):
+            orchestrator.set_current_instance("invalid_test")
 
     def test_set_current_instance_invalid_port_should_raise(self):
         """Test that invalid port raises ValueError."""
         orchestrator = InstanceOrchestrator()
         
-        # Create a temporary instance with invalid port
-        HERMES_INSTANCES["invalid_port_test"] = RemoteHermesInstance(
+        # Create a temporary instance with invalid port directly in the orchestrator
+        orchestrator._instances["invalid_port_test"] = RemoteHermesInstance(
             name="invalid_port_test",
             hostname="example.com",
             ip="100.0.0.1",
             http_port=99999,  # Invalid port
         )
         
-        try:
-            with pytest.raises(ValueError, match="Invalid port"):
-                orchestrator.set_current_instance("invalid_port_test")
-        finally:
-            # Cleanup
-            del HERMES_INSTANCES["invalid_port_test"]
+        with pytest.raises(ValueError, match="Invalid port"):
+            orchestrator.set_current_instance("invalid_port_test")
 
     def test_set_current_instance_with_chat_id(self):
         """Test setting instance with chat_id."""
@@ -229,8 +221,8 @@ class TestInstanceOrchestratorValidation:
         orchestrator = InstanceOrchestrator()
         await orchestrator.init()
         
-        # Create a temporary instance with invalid hostname
-        HERMES_INSTANCES["invalid_exec_test"] = RemoteHermesInstance(
+        # Create a temporary instance with invalid hostname directly in the orchestrator
+        orchestrator._instances["invalid_exec_test"] = RemoteHermesInstance(
             name="invalid_exec_test",
             hostname="invalid..hostname",  # Invalid
             ip="100.0.0.1",
@@ -241,7 +233,7 @@ class TestInstanceOrchestratorValidation:
             with pytest.raises(ValueError, match="Invalid hostname"):
                 await orchestrator.execute_on_instance("invalid_exec_test", "test")
         finally:
-            del HERMES_INSTANCES["invalid_exec_test"]
+            del orchestrator._instances["invalid_exec_test"]
             await orchestrator.close()
 
     @pytest.mark.asyncio
@@ -250,8 +242,8 @@ class TestInstanceOrchestratorValidation:
         orchestrator = InstanceOrchestrator()
         await orchestrator.init()
         
-        # Create a temporary instance with invalid port
-        HERMES_INSTANCES["invalid_port_exec_test"] = RemoteHermesInstance(
+        # Create a temporary instance with invalid port directly in the orchestrator
+        orchestrator._instances["invalid_port_exec_test"] = RemoteHermesInstance(
             name="invalid_port_exec_test",
             hostname="example.com",
             ip="100.0.0.1",
@@ -262,7 +254,7 @@ class TestInstanceOrchestratorValidation:
             with pytest.raises(ValueError, match="Invalid port"):
                 await orchestrator.execute_on_instance("invalid_port_exec_test", "test")
         finally:
-            del HERMES_INSTANCES["invalid_port_exec_test"]
+            del orchestrator._instances["invalid_port_exec_test"]
             await orchestrator.close()
 
     @pytest.mark.asyncio

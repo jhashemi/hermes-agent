@@ -14,7 +14,7 @@ from typing import Optional, Union
 import re
 from gateway.platforms.base import MessageEvent, EphemeralReply
 from agent.persona_manager import PersonaManager, EXECUTIVE_PERSONAS
-from gateway.instance_orchestrator import InstanceOrchestrator
+from gateway.instance_orchestrator import InstanceOrchestrator, reload_hermes_instances
 from gateway.error_response import (
     ErrorResponse,
     ErrorCode,
@@ -117,12 +117,9 @@ async def handle_load_agent_command(
 
     persona_data = EXECUTIVE_PERSONAS[persona_key]
 
-    # Check if voice clone is available
-    if not persona_data.get("voice_uuid"):
-        return (
-            f"⚠️  {persona_data['name']} voice clone not ready yet. "
-            f"Available agents: /agents-list"
-        )
+    # Determine mode: voice if clone exists, text-only otherwise
+    has_voice = bool(persona_data.get("voice_uuid"))
+    mode_label = "🎙️ Voice" if has_voice else "📝 Text"
 
     # Get or create persona manager on the agent
     if not hasattr(gateway_runner, "_persona_manager"):
@@ -143,10 +140,11 @@ async def handle_load_agent_command(
         return error.to_emoji_response()
 
     persona_name = persona_data["name"]
+    mode_note = "" if has_voice else "\n📝 _Voice clone not ready — responding via text only._"
     return (
-        f"🎤 Switched to **{persona_name}**\\n\\n"
+        f"✅ Switched to **{persona_name}**\\n\\n"
         f"{persona_data['title']}\\n\\n"
-        f"I'm ready to chat. What would you like to know?"
+        f"{mode_label} mode — I'm ready to chat.{mode_note}"
     )
 
 
@@ -158,7 +156,7 @@ async def handle_agents_list_command(
     lines = ["🤖 **Available Executive Agents:**\n"]
 
     for key, persona in EXECUTIVE_PERSONAS.items():
-        status = "✓" if persona.get("voice_uuid") else "⏳"
+        status = "🎙️" if persona.get("voice_uuid") else "📝"
         agent_name = key.replace("_", " ").title()
         lines.append(
             f"  {status} /load-{agent_name.lower().split()[0]:8} "
@@ -240,11 +238,17 @@ async def handle_switch_instance_command(
         )
         return error.to_emoji_response()
     
-    # Initialize orchestrator if needed
+    # Initialize orchestrator if needed (auto-reloads instance registry)
     if not hasattr(gateway_runner, "_instance_orchestrator"):
+        reload_hermes_instances()  # Refresh from env/config before creating orchestrator
         gateway_runner._instance_orchestrator = InstanceOrchestrator()
     
     orchestrator: InstanceOrchestrator = gateway_runner._instance_orchestrator
+
+    # Ensure the requested instance exists in the registry
+    if instance_name not in orchestrator._get_registry():
+        # Try reloading instances from config (may have been added since startup)
+        orchestrator.reload_instances()
     
     # Attempt switch
     success = orchestrator.set_current_instance(
@@ -279,6 +283,8 @@ async def handle_hermes_list_command(
         gateway_runner._instance_orchestrator = InstanceOrchestrator()
     
     orchestrator: InstanceOrchestrator = gateway_runner._instance_orchestrator
+    # Refresh instances to pick up any config/env changes
+    orchestrator.reload_instances()
     return orchestrator.list_instances()
 
 
@@ -305,7 +311,8 @@ AGENT_COMMAND_HANDLERS = {
     "load-turing": lambda gr, ev: handle_load_agent_command(gr, ev, "alan_turing"),
     "agents-list": handle_agents_list_command,
     "agents-disconnect": handle_agents_disconnect_command,
-    # Instance orchestration
+    # Instance orchestration (works on any adapter: Telegram, WhatsApp, Discord, etc.)
+    "switch-hermes": lambda gr, ev: handle_switch_instance_command(gr, ev, None),  # /switch-hermes <name>
     "switch-local": lambda gr, ev: handle_switch_instance_command(gr, ev, "local"),
     "switch-hermes2": lambda gr, ev: handle_switch_instance_command(gr, ev, "hermes2"),
     "hermes-list": handle_hermes_list_command,

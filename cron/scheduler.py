@@ -1572,6 +1572,29 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
         
+        # Record decision in cognitive audit trail for adaptive learning
+        try:
+            from plugins.memory.cognitive import CognitiveMemoryProvider
+            provider = CognitiveMemoryProvider()
+            provider.record_decision(
+                agent_id="cron:" + job_id,
+                decision_type="cron_execution",
+                reasoning=prompt[:500],  # Truncate for storage
+                confidence=result.get("confidence", 0.7),
+                context={
+                    "job_id": job_id,
+                    "job_name": job_name,
+                    "result_length": len(final_response),
+                    "iterations": result.get("iterations", 0),
+                    "tokens_used": result.get("tokens_used", 0),
+                }
+            )
+            logger.debug("Job '%s': decision recorded to cognitive audit trail", job_name)
+        except ImportError as e:
+            logger.debug("Job '%s': cognitive audit trail not available: %s", job_name, e)
+        except Exception as e:
+            logger.warning("Job '%s': failed to record decision: %s", job_name, e)
+        
         output = f"""# Cron Job: {job_name}
 
 **Job ID:** {job_id}

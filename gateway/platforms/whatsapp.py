@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import platform
+import time
 import re
 import shutil
 import signal
@@ -277,6 +278,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
         # "Fatal whatsapp adapter error" plus dispatch a fatal-error
         # notification before the normal "✓ whatsapp disconnected" fires.
         self._shutting_down: bool = False
+        # State tracking for interactive button callbacks (matches Telegram pattern)
+        self._approval_state: Dict[int, str] = {}  # approval_id -> session_key
+        self._slash_confirm_state: Dict[str, str] = {}  # confirm_id -> session_key
+        self._model_picker_state: Dict[str, Dict[str, Any]] = {}  # chat_id -> picker state
+        self._approval_counter = None  # For generating approval IDs
 
     def _effective_reply_prefix(self) -> str:
         """Return the prefix the Node bridge will add in self-chat mode."""
@@ -897,6 +903,139 @@ class WhatsAppAdapter(BasePlatformAdapter):
         except Exception as e:
             return SendResult(success=False, error=str(e))
 
+    async def delete_message(
+        self,
+        chat_id: str,
+        message_id: str,
+    ) -> SendResult:
+        """Delete a previously sent message via the WhatsApp bridge.
+        
+        Args:
+            chat_id: WhatsApp chat ID (JID)
+            message_id: The message ID to delete
+            
+        Returns:
+            SendResult with success status
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/delete",
+                json={
+                    "chatId": chat_id,
+                    "messageId": message_id,
+                },
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return SendResult(success=data.get("success", False))
+                else:
+                    error = await resp.text()
+                    return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def react_to_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        emoji: str,
+    ) -> SendResult:
+        """React to a message with an emoji via the WhatsApp bridge.
+        
+        Args:
+            chat_id: WhatsApp chat ID (JID)
+            message_id: The message ID to react to
+            emoji: The emoji reaction (Unicode). Pass empty string to remove reaction.
+            
+        Returns:
+            SendResult with success status
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/react",
+                json={
+                    "chatId": chat_id,
+                    "messageId": message_id,
+                    "emoji": emoji,
+                },
+                timeout=aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return SendResult(success=data.get("success", False))
+                else:
+                    error = await resp.text()
+                    return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
+    async def send_media_batch(
+        self,
+        chat_id: str,
+        media_items: list,
+        delay_ms: int = 300,
+    ) -> SendResult:
+        """Send multiple media files as a batch via the WhatsApp bridge.
+        
+        Args:
+            chat_id: WhatsApp chat ID (JID)
+            media_items: List of dicts with keys: filePath, mediaType?, caption?, fileName?
+            delay_ms: Delay between sends in milliseconds (default: 300)
+            
+        Returns:
+            SendResult with list of message IDs and any errors in raw_response
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+        bridge_exit = await self._check_managed_bridge_exit()
+        if bridge_exit:
+            return SendResult(success=False, error=bridge_exit)
+        
+        if not media_items or not isinstance(media_items, list):
+            return SendResult(success=False, error="media_items must be a non-empty list")
+        
+        try:
+            import aiohttp
+            async with self._http_session.post(
+                f"http://127.0.0.1:{self._bridge_port}/send-media-batch",
+                json={
+                    "chatId": chat_id,
+                    "files": media_items,
+                    "delayMs": delay_ms,
+                },
+                timeout=aiohttp.ClientTimeout(total=60)  # Longer timeout for batch
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    # Store batch results in raw_response for callers to access
+                    result = SendResult(
+                        success=data.get("success", False),
+                        message_id=data.get("messageIds", [])[-1] if data.get("messageIds") else None,
+                        raw_response={
+                            "messageIds": data.get("messageIds", []),
+                            "errors": data.get("errors", []),
+                        }
+                    )
+                    return result
+                else:
+                    error = await resp.text()
+                    return SendResult(success=False, error=error)
+        except Exception as e:
+            return SendResult(success=False, error=str(e))
+
     async def _send_media_to_bridge(
         self,
         chat_id: str,
@@ -1006,6 +1145,203 @@ class WhatsAppAdapter(BasePlatformAdapter):
         return await self._send_media_to_bridge(
             chat_id, file_path, "document", caption,
             file_name or os.path.basename(file_path),
+        )
+
+
+    # ─── Interactive Button Methods (matching Telegram) ─────────────────────
+
+    async def send_update_prompt(
+        self, chat_id: str, prompt: str, default: str = "",
+        session_key: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive update prompt (Yes / No buttons).
+
+        Used by the gateway /update watcher when hermes update --gateway
+        needs user input (stash restore, config migration).
+
+        WhatsApp doesn't natively support interactive buttons, so we format
+        the prompt as numbered options and respond via text message selection.
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            default_hint = f" (default: {default})" if default else ""
+            text = (
+                f"⚕ *Update needs your input:*\\n\\n"
+                f"{prompt}{default_hint}\\n\\n"
+                f"Reply with: *yes* or *no*"
+            )
+
+            result = await self.send(chat_id=chat_id, content=text, metadata=metadata)
+            if result.success:
+                # Store prompt context for response handling
+                self._update_prompt_state = {
+                    "chat_id": chat_id,
+                    "session_key": session_key,
+                    "timestamp": time.time(),
+                }
+            return result
+        except Exception as e:
+            logger.warning("[%s] send_update_prompt failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_exec_approval(
+        self, chat_id: str, command: str, session_key: str,
+        description: str = "dangerous command",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive approval prompt with button-like numbered options.
+
+        WhatsApp doesn't have native interactive buttons, so we format this as
+        a numbered menu and respond via text selection (1-4).
+
+        Options:
+        1. Allow Once
+        2. Session
+        3. Always
+        4. Deny
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            cmd_preview = command[:3800] + "..." if len(command) > 3800 else command
+            text = (
+                f"⚠️ *Command Approval Required*\\n\\n"
+                f"```\\n{cmd_preview}\\n```\\n\\n"
+                f"Reason: {description}\\n\\n"
+                f"Reply with a number:\\n"
+                f"1️⃣  Allow Once\\n"
+                f"2️⃣  Allow This Session\\n"
+                f"3️⃣  Allow Always\\n"
+                f"4️⃣  Deny"
+            )
+
+            # Generate approval ID
+            if self._approval_counter is None:
+                import itertools
+                self._approval_counter = itertools.count(1)
+            approval_id = next(self._approval_counter)
+
+            result = await self.send(chat_id=chat_id, content=text, metadata=metadata)
+            if result.success:
+                # Store session key for callback handling
+                self._approval_state[approval_id] = session_key
+
+            return result
+        except Exception as e:
+            logger.warning("[%s] send_exec_approval failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_slash_confirm(
+        self, chat_id: str, title: str, message: str, session_key: str,
+        confirm_id: str, metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Render a three-button slash-command confirmation prompt.
+
+        WhatsApp version uses numbered options (1-3) instead of buttons.
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            preview = message if len(message) <= 3800 else message[:3800] + "..."
+
+            text = (
+                f"*{title}*\\n\\n"
+                f"{preview}\\n\\n"
+                f"Reply with a number:\\n"
+                f"1️⃣  Approve Once\\n"
+                f"🔒 2️⃣  Always Approve\\n"
+                f"3️⃣  Cancel"
+            )
+
+            result = await self.send(chat_id=chat_id, content=text, metadata=metadata)
+            if result.success:
+                self._slash_confirm_state[confirm_id] = session_key
+
+            return result
+        except Exception as e:
+            logger.warning("[%s] send_slash_confirm failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_model_picker(
+        self,
+        chat_id: str,
+        providers: list,
+        current_model: str,
+        current_provider: str,
+        session_key: str,
+        on_model_selected,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive inline-keyboard model picker.
+
+        WhatsApp version renders as numbered lists with pagination instructions.
+        Two-step drill-down: provider selection → model selection.
+        """
+        if not self._running or not self._http_session:
+            return SendResult(success=False, error="Not connected")
+
+        try:
+            # Build provider list with numbering
+            buttons: list = []
+            for idx, p in enumerate(providers, 1):
+                count = p.get("total_models", len(p.get("models", [])))
+                label = f"{p['name']} ({count})"
+                if p.get("is_current"):
+                    label = f"✓ {label}"
+                buttons.append((idx, label, p["slug"]))
+
+            # Format as numbered menu
+            menu_lines = ["⚙ *Model Configuration*", ""]
+            menu_lines.append(f"Current model: `{current_model or 'unknown'}`")
+            menu_lines.append(f"Provider: {current_provider}")
+            menu_lines.append("")
+            menu_lines.append("Select a provider (reply with number):")
+            menu_lines.extend([f"{idx}️⃣ {label}" for idx, label, _ in buttons])
+            menu_lines.append("0️⃣ Cancel")
+
+            text = "\\n".join(menu_lines)
+
+            result = await self.send(chat_id=chat_id, content=text, metadata=metadata)
+            if result.success:
+                # Store picker state keyed by chat_id
+                self._model_picker_state[str(chat_id)] = {
+                    "providers": providers,
+                    "session_key": session_key,
+                    "on_model_selected": on_model_selected,
+                    "current_model": current_model,
+                    "current_provider": current_provider,
+                    "provider_list": buttons,
+                }
+
+            return result
+        except Exception as e:
+            logger.warning("[%s] send_model_picker failed: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
+
+    async def send_private_notice(
+        self,
+        chat_id: str,
+        user_id: Optional[str],
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send a notice privately when the platform supports it.
+
+        WhatsApp sends notices as regular messages (no private notice distinction
+        exists on WhatsApp like it does on Discord). This is an override of the
+        base class method to provide WhatsApp-specific behavior.
+        """
+        return await self.send(
+            chat_id=chat_id,
+            content=content,
+            reply_to=reply_to,
+            metadata=metadata,
         )
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:

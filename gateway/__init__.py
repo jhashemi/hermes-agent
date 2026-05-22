@@ -17,6 +17,13 @@ from .session import (
     build_session_context_prompt,
 )
 from .delivery import DeliveryRouter, DeliveryTarget
+from .vcg_dispatcher import (
+    VCGDispatcher,
+    VCGAgent,
+    VCGNode,
+    TaskAllocationResult,
+    HealthState,
+)
 
 __all__ = [
     # Config
@@ -32,4 +39,10 @@ __all__ = [
     # Delivery
     "DeliveryRouter",
     "DeliveryTarget",
+    # VCG Runtime
+    "VCGDispatcher",
+    "VCGAgent",
+    "VCGNode",
+    "TaskAllocationResult",
+    "HealthState",
 ]

@@ -5862,6 +5862,43 @@ class AIAgent:
                     if cid:
                         surviving_call_ids.add(cid)
 
+
+        # 0. Drop tool_calls with empty/blank name — Anthropic Bedrock rejects
+        #    requests containing tool_use blocks where name is "" (HTTP 400).
+        #    See openclaw/openclaw#15485 for the same bug pattern.
+        _dropped_empty_name = 0
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            tcs = msg.get("tool_calls")
+            if not isinstance(tcs, list) or not tcs:
+                continue
+            cleaned = []
+            for tc in tcs:
+                if not isinstance(tc, dict):
+                    cleaned.append(tc)
+                    continue
+                tc_name = ""
+                if isinstance(tc.get("function"), dict):
+                    tc_name = tc["function"].get("name", "") or ""
+                elif tc.get("name"):
+                    tc_name = tc["name"]
+                if not tc_name.strip():
+                    _dropped_empty_name += 1
+                    logger.warning(
+                        "Pre-call sanitizer: dropping tool_call with empty name "
+                        "(id=%s) — would cause Anthropic HTTP 400",
+                        tc.get("id", "?"),
+                    )
+                    continue
+                cleaned.append(tc)
+            msg["tool_calls"] = cleaned
+        if _dropped_empty_name:
+            logger.info(
+                "Pre-call sanitizer: dropped %d tool_call(s) with empty name",
+                _dropped_empty_name,
+            )
+
         result_call_ids: set = set()
         for msg in messages:
             if msg.get("role") == "tool":
