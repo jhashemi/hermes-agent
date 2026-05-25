@@ -1,0 +1,117 @@
+name: Changelog Preview
+
+# Validates CHANGELOG.md format when changed, and posts a reminder
+# comment on PRs that don't include a changelog entry (unless the
+# PR is docs-only, a dependency update by bots, or ADR-only).
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: changelog-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changelog-check:
+    name: Changelog check
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      changelog_changed: ${{ steps.diff.outputs.changelog_changed }}
+      is_exempt: ${{ steps.diff.outputs.is_exempt }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+
+      - name: Analyze changed files
+        id: diff
+        run: |
+          # Check if CHANGELOG.md is among the changed files
+          CHANGED=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD" 2>/dev/null || git diff --name-only HEAD~1)
+          echo "Files changed:"
+          echo "$CHANGED"
+
+          if echo "$CHANGED" | grep -q "^CHANGELOG.md$"; then
+            echo "changelog_changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changelog_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # Determine if this PR is exempt from the changelog reminder
+          # Exempt: docs-only, dependency updates by bots, ADR-only
+          BOT_AUTHORS="dependabot[bot] renovate[bot] github-actions[bot]"
+          IS_BOT="false"
+          for bot in $BOT_AUTHORS; do
+            if [ "${{ github.actor }}" = "$bot" ]; then
+              IS_BOT="true"
+              break
+            fi
+          done
+
+          # Count non-docs, non-ADR changes
+          NON_EXEMPT=$(echo "$CHANGED" | grep -vE '^docs/|^.*\.md$' | grep -vE '^\.github/workflows/' | wc -l || echo "0")
+          ONLY_DOCS="false"
+          ONLY_ADR="false"
+          TOTAL=$(echo "$CHANGED" | wc -l)
+
+          if [ "$TOTAL" -gt 0 ]; then
+            DOCS_ONLY=$(echo "$CHANGED" | grep -vE '\.md$' | wc -l || echo "0")
+            if [ "$DOCS_ONLY" -eq 0 ]; then
+              ONLY_DOCS="true"
+            fi
+            ADR_ONLY=$(echo "$CHANGED" | grep -vE '^docs/adr/' | wc -l || echo "0")
+            if [ "$ADR_ONLY" -eq 0 ]; then
+              ONLY_ADR="true"
+            fi
+          fi
+
+          if [ "$IS_BOT" = "true" ] || [ "$ONLY_DOCS" = "true" ] || [ "$ONLY_ADR" = "true" ]; then
+            echo "is_exempt=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_exempt=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate changelog format
+        if: steps.diff.outputs.changelog_changed == 'true'
+        run: |
+          python scripts/validate_changelog.py || echo "::warning::Changelog format validation found issues (non-blocking)"
+
+      - name: Post changelog reminder
+        if: steps.diff.outputs.changelog_changed == 'false' && steps.diff.outputs.is_exempt == 'false'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
+        with:
+          script: |
+            const marker = '<!-- changelog-reminder -->';
+            const body = marker + '\n## Changelog Reminder\n\n' +
+              'This PR does not include a change to `CHANGELOG.md`. ' +
+              'If this change is user-facing, please add an entry following the [Keep a Changelog](https://keepachangelog.com/) format.\n\n' +
+              'If this is an internal-only change (refactor, test, docs, etc.), you can ignore this reminder.';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }

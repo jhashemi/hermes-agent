@@ -1,0 +1,68 @@
+name: ADR Lint
+
+on:
+  pull_request:
+    paths:
+      - "docs/adr/**"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: adr-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  adr-validate:
+    name: Validate ADR files
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b  # v5
+        with:
+          python-version: "3.11"
+
+      - name: Run ADR validation
+        run: python scripts/validate_adrs.py --verbose --github-actions
+
+      - name: Post validation summary
+        if: always()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+            let result;
+            try {
+              result = execSync('python scripts/validate_adrs.py --verbose', { encoding: 'utf8' });
+            } catch (e) {
+              result = e.stdout || e.message;
+            }
+            const marker = '<!-- adr-lint-summary -->';
+            const body = marker + '\n## ADR Validation Report\n\n```\n' + result + '\n```';
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                comment_id: existing.id,
+                body: body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo:  context.repo.repo,
+                issue_number: context.issue.number,
+                body: body,
+              });
+            }
