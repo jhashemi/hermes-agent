@@ -2901,6 +2901,9 @@ class DispatchResult:
     """Task ids auto-blocked by the spawn-failure circuit breaker."""
     timed_out: list[str] = field(default_factory=list)
     """Task ids whose workers exceeded ``max_runtime_seconds``."""
+    silent_crashes: list[str] = field(default_factory=list)
+    """Task ids whose worker PIDs died silently (detected proactively before TTL).
+    Transitioned to 'paused' status with error recorded for manual intervention."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -3860,6 +3863,16 @@ def dispatch_once(
     )
     if _crash_auto_blocked:
         result.auto_blocked.extend(_crash_auto_blocked)
+    
+    # NEW: Proactively detect silent worker crashes (dead PIDs still marked running).
+    # This catches workers that exit cleanly without calling kanban_complete/kanban_block,
+    # before TTL expiry. Transitions them to 'paused' state for manual intervention.
+    _silent_crashes = handle_dead_worker_pids(conn)
+    if _silent_crashes:
+        # Track silent crashes separately so monitoring can distinguish from
+        # exit-code-based crash detection
+        result.silent_crashes = _silent_crashes
+    
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn)
 
