@@ -4,6 +4,69 @@ Production-ready WhatsApp gateway with multi-instance execution, executive agent
 
 **Status**: ✅ Production Ready | **Version**: 1.0.0 | **Tests**: 145+ passing
 
+## Framework Dependencies
+
+Hermes depends on the [Executive Agents Framework](https://github.com/hashemi/executive-agents-framework) — a hexagonal-architecture cognitive platform providing 26 port interfaces, 13 infrastructure systems, and the 12-step executive agent cycle. The framework is a **core dependency** in `pyproject.toml` (`executive-agents>=0.1.0,<1`) installed as an **editable package** so both repos evolve in lockstep.
+
+### Editable Installation
+
+Run these steps on the deployment host after initial checkout or after pulling framework updates:
+
+```bash
+# 1. Install (or reinstall after a framework pull) into the Hermes venv
+cd /home/ubuntu/hermes-agent
+source venv/bin/activate  # or .venv/bin/activate
+pip install -e "/home/ubuntu/executive_agents_framework[dev]"
+
+# 2. Verify the import resolves
+python -c "from executive_agents.composition.container import build; print('OK')"
+```
+
+The editable `.pth` file points to `executive_agents_framework/src/` — no `build` step needed. Always run from the Hermes virtual environment.
+
+### What Hermes Imports from the Framework
+
+The primary integration surface lives in `projects/okr-executive-system/` where OKR engines wire framework components into Hermes' orchestration layer:
+
+| Domain | Framework Modules | Purpose |
+|---|---|---|
+| **Container** | `executive_agents.composition.container` | `build()` wires all 26 ports into an `AgentContainer` |
+| **Memory** | `executive_agents.ports.memory` | STM, LTM, ActivationField, TemporalTrace, ScratchPad |
+| **RL Substrate** | `executive_agents.ports.rl` | Dopamine reward, TD(λ), prioritized replay |
+| **Nervous System** | `executive_agents.infrastructure.nervous_system` | Event bus (`GOAL_COMPLETED`, `ERROR_DETECTED`, `VOICE_*`) |
+| **VCG Scheduler** | `ecutive_agents.infrastructure.systems.vcg_scheduler` | Game-theoretic dispatch across 13 named agents |
+| **Dispatcher** | `ecutive_agents.infrastructure.systems.vcg_dispatcher` | Worker allocation with priority and load balancing |
+| **MCTS Planning** | `ecutive_agents.infrastructure.systems.fractal_mcts` | Monte Carlo tree search for goal decomposition |
+| **Goal Hierarchy** | `ecutive_agents.infrastructure.systems.goal_hierarchy` | Recursive RICE-scored goal trees |
+| **Consensus Voting** | `ecutive_agents.infrastructure.systems.consensus_voting` | Multi-system decision consensus |
+| **Decision Audit** | `ecutive_agents.infrastructure.systems.decision_audit` | 100% decision traceability |
+| **KPI / OKR** | `ecutive_agents.infrastructure.systems.kpi_tracker`, `okr_accountability` | Agent KPI metrics and objective-key-result chains |
+| **Pair Coding** | `ecutive_agents.domain.services.pair_coding_team` | Two-agent deliberation with named accountability |
+| **LLDAP Auth** | `executive_agents.adapters.lldap` | Directory-backed authentication adapter |
+| **NATS Events** | `ecutive_agents.adapters.nats` | Production JetStream event bus adapter |
+
+### Why Duplicate Implementations Were Removed
+
+Before wire-001, Hermes shipped its own in-memory implementations of memory stores, event buses, schedulers, and scoring engines. This caused three problems:
+
+1. **Drift** — Hermes copies diverged from the framework's canonical versions (e.g., different TD(λ) convergence).
+2. **Maintenance burden** — every framework improvement required a manual port.
+3. **Broken trust** — the framework's 1656-test suite results didn't apply to Hermes' divergent copies.
+
+The wire-001 through wire-006 series consolidated all duplicates so Hermes imports directly from `executive_agents`. The hexagonal architecture (domain → ports → adapters) keeps domain logic framework-agnostic while Hermes provides the gateway and platform adapters.
+
+### Version Pinning Strategy
+
+```toml
+"executive-agents>=0.1.0,<1"
+```
+
+- **Minimum (`>=0.1.0`)** — bumped when Hermes requires a new port, system, or adapter.
+- **Ceiling (`<1`)** — protects against breaking API changes. Raised to `<2` after migration review at framework 1.0.
+- **Editable override** — the editable install tracks `HEAD` of `executive_agents_framework/`, so the PyPI pin only applies to production deployments.
+
+See the framework's [MIGRATION.md](https://github.com/hashemi/executive-agents-framework/blob/main/MIGRATION.md) for upgrade procedures, and `projects/okr-executive-system/README.md` for the Hermes-specific integration walkthrough.
+
 ## Quick Start
 
 ```bash

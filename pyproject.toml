@@ -49,6 +49,11 @@ dependencies = [
   # (which is a silent killer on Windows — see CONTRIBUTING.md) and
   # `os.killpg` (which doesn't exist on Windows).
   "psutil>=5.9.0,<8",
+ # Executive Agents Framework — cognitive architecture (8-layer memory,
+ # game-theoretic scheduling, authentic voice delivery). Promoted from
+ # [dev] to core to eliminate duplicate implementations and wire LLDAP/NATS
+ # adapters as first-class capabilities (wire-001, Phase 1).
+ "executive-agents>=0.1.0,<1",
 ]
 
 [project.optional-dependencies]
@@ -56,6 +61,12 @@ modal = ["modal>=1.0.0,<2"]
 daytona = ["daytona>=0.148.0,<1"]
 vercel = ["vercel>=0.5.7,<0.6.0"]
 dev = ["debugpy>=1.8.0,<2", "pytest>=9.0.2,<10", "pytest-asyncio>=1.3.0,<2", "pytest-xdist>=3.0,<4", "pytest-split>=0.9,<1", "mcp>=1.2.0,<2", "ty>=0.0.1a29,<0.0.22", "ruff"]
+# NATS event bus — passthrough to executive-agents[nats] for multi-agent
+# nervous-system coordination (pub/sub, cross-agent credit assignment).
+nats = ["executive-agents[nats]>=0.1.0,<1"]
+# LLDAP auth — passthrough to executive-agents[ldap] for directory-backed
+# agent identity and RBAC (per-agent auth via LLDAP/GoLDAP).
+lldap = ["executive-agents[ldap]>=0.1.0,<1"]
 messaging = ["python-telegram-bot[webhooks]>=22.6,<23", "discord.py[voice]>=2.7.1,<3", "aiohttp>=3.13.3,<4", "slack-bolt>=1.18.0,<2", "slack-sdk>=3.27.0,<4", "qrcode>=7.0,<8"]
 cron = []  # croniter is now a core dependency; this extra kept for back-compat
 slack = ["slack-bolt>=1.18.0,<2", "slack-sdk>=3.27.0,<4"]
@@ -115,6 +126,8 @@ termux-all = [
   "hermes-agent[homeassistant]",
   "hermes-agent[sms]",
   "hermes-agent[web]",
+ "hermes-agent[nats]",
+ "hermes-agent[lldap]",
 ]
 dingtalk = ["dingtalk-stream>=0.20,<1", "alibabacloud-dingtalk>=2.0.0", "qrcode>=7.0,<8"]
 feishu = ["lark-oapi>=1.5.3,<2", "qrcode>=7.0,<8"]
@@ -172,6 +185,8 @@ all = [
   "hermes-agent[bedrock]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
+ "hermes-agent[nats]",
+ "hermes-agent[lldap]",
 ]
 
 [project.scripts]
