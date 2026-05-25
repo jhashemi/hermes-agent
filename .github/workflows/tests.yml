@@ -21,7 +21,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  smoke:
+    name: Smoke test (imports + health)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv venv .venv --python 3.11
+          source .venv/bin/activate
+          uv pip install -e ".[all,dev]"
+
+      - name: Import check — core modules
+        run: |
+          source .venv/bin/activate
+          python -c "
+          import run_agent
+          import model_tools
+          import cli
+          import toolsets
+          print('Core imports OK')
+          "
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
+      - name: Health check — tool registry
+        run: |
+          source .venv/bin/activate
+          python -c "
+          from tools.registry import discover_builtin_tools
+          tools = discover_builtin_tools()
+          print(f'Discovered {len(tools)} builtin tools')
+          "
+        env:
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
+
   test:
+    needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -54,6 +103,7 @@ jobs:
           NOUS_API_KEY: ""
 
   e2e:
+    needs: smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

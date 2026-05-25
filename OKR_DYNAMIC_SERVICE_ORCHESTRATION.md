@@ -1,414 +1,177 @@
 # OKR: Dynamic Service Orchestration & Load Balancing
 
-**Objective:** Implement dynamic service assignment to machines in the cluster based on load and resource consumption with automatic rebalancing  
-**Accountable (Pair):** jeff_dean (lead) + werner_vogels (partner)  
-**Research Consultant:** john_carmack (performance optimization)  
-**Timeline:** May 26 - June 10, 2026 (16 days)  
-**Status:** in_progress  
+**Status**: in_progress  
+**Timeline**: May 26 - June 10, 2026 (16 days)  
+**Accountable Pair**: jeff_dean (lead) + werner_vogels (partner)  
+**Research Consultant**: john_carmack
 
 ---
 
-## Strategic Context
+## Objective
 
-Current state: Services statically assigned to machines. No load-aware scheduling. No rebalancing capability.
+Implement dynamic service assignment to machines based on load and resource consumption with automatic rebalancing.
 
-Target state: Services dynamically assigned based on real-time load, estimated resource consumption, and machine capacity. Continuous rebalancing to maintain optimal resource utilization across the cluster.
+**Rationale**: Current static service-to-machine assignments create inefficient resource utilization, hot nodes, and cascading failures. This OKR delivers a runtime system that continuously monitors machine load, predicts service resource needs, and automatically migrates services to optimal machines using game-theoretic (VCG) optimization with zero-downtime guarantees.
 
 ---
 
-## Key Results
+## Key Results (4 Total)
 
-### KR1: Load-Aware Service Placement (50 hours)
-**Definition:** Services assigned to machines based on current load and resource requirements  
-**Acceptance Criteria:**
-- [ ] Service resource requirements (CPU, memory, disk, network) defined
-- [ ] Machine capacity model implemented (hermes1: 2c/7.7GB, hermes2: 4c/15GB)
-- [ ] Load sampling via metrics collection (Prometheus-compatible)
-- [ ] Placement algorithm: VCG-based resource allocation (minimize cost)
-- [ ] Placement decisions auditable (why service placed on machine X)
-- [ ] Tests: 20+ placement scenarios with different load profiles
+### KR1: Load-Aware Placement (50 hours)
+**Definition**: Services are assigned to machines based on real-time load, predicted resource requirements, and VCG-optimized allocation.
 
-**Success Metric:** 100% services placed optimally, avg machine utilization 60-75%  
-**Owners:** jeff_dean + werner_vogels (pair)  
+**Success Criteria**:
+- Machine capacity model deployed (CPU, memory, I/O, network)
+- Service schema with resource hints complete
+- Metrics pipeline collecting machine + service telemetry
+- VCG algorithm implemented and validated on 20 placement scenarios
+- Smart placement engine placing services within 15% of theoretical optimal
+- Dashboard showing placement rationale
+
+**Subtasks**: Phase 1 (baseline infrastructure) + Phase 2 (smart placement + testing)
+
+---
 
 ### KR2: Dynamic Rebalancing (40 hours)
-**Definition:** Services automatically migrate between machines to maintain load balance  
-**Acceptance Criteria:**
-- [ ] Rebalancing trigger: Any machine >80% OR <30% utilization
-- [ ] Migration algorithm: Minimize cost + downtime
-- [ ] Zero-downtime migrations (graceful drain + resume)
-- [ ] Rebalancing decisions auditable (what moved, why, when)
-- [ ] Rollback capability if migration fails
-- [ ] Tests: 15+ rebalancing scenarios (scale up/down/shuffle)
+**Definition**: Services automatically migrate between machines when imbalance is detected, with zero downtime and automatic rollback on failure.
 
-**Success Metric:** Cluster stays within 60-75% utilization band, zero unplanned downtime  
-**Owners:** jeff_dean + werner_vogels (pair)  
+**Success Criteria**:
+- Rebalancing triggers configured (load threshold, imbalance ratio)
+- Migration algorithm (service drain → transfer → startup) in place
+- Graceful drain with connection draining + timeout handling
+- Atomic rollback on migration failure
+- Tested on 10 failure scenarios (network partition, disk full, OOM, crash, etc.)
+- Audit log of all migrations with reason and outcome
 
-### KR3: Resource Consumption Estimation (35 hours)
-**Definition:** Accurate prediction of service resource needs based on workload  
-**Acceptance Criteria:**
-- [ ] Historical metrics collection (CPU, memory, disk, network)
-- [ ] Workload profile extraction (peaks, valleys, patterns)
-- [ ] ML-based prediction model (SVM/Random Forest)
-- [ ] Estimation accuracy >90% within 20% margin
-- [ ] Per-service cost model (CPU, memory, disk, network)
-- [ ] Tests: Validate predictions against actual consumption
+**Subtasks**: Phase 3 (rebalancing core logic) + Phase 5 (monitoring + audit)
 
-**Success Metric:** Prediction error <20%, model retrains monthly  
-**Owners:** jeff_dean + werner_vogels (pair)  
-**Consultant:** john_carmack (performance optimization)  
+---
+
+### KR3: Resource Estimation (35 hours)
+**Definition**: ML-based prediction system forecasts service resource needs (CPU, memory) with 80%+ accuracy, enabling proactive placement and scaling decisions.
+
+**Success Criteria**:
+- Historical service telemetry collected (4+ weeks of production data)
+- Feature engineering (time-of-day, service type, request rate, error rate)
+- ML model trained (XGBoost or similar) and evaluated
+- Model predictions integrated into placement engine
+- Accuracy validation on holdout test set: 80%+ for CPU, 75%+ for memory
+- Model retraining pipeline scheduled weekly
+
+**Subtasks**: Phase 4 (data collection + ML model training)
+
+---
 
 ### KR4: Monitoring & Observability (30 hours)
-**Definition:** Real-time visibility into cluster load, placement decisions, and rebalancing  
-**Acceptance Criteria:**
-- [ ] Metrics dashboard: Machine utilization, service placement, migration activity
-- [ ] Event logging: All placement/migration decisions with rationale
-- [ ] Alerting: Anomaly detection (unplanned utilization spike, failed migration)
-- [ ] Audit trail: Complete history of all orchestration decisions
-- [ ] Performance: Metrics collection <1% overhead
-- [ ] Tests: Dashboard queries return results <500ms
+**Definition**: Real-time observability into system state, with comprehensive event logging and audit trail for compliance and debugging.
 
-**Success Metric:** Full observability of cluster state, <1s decision-to-action latency  
-**Owners:** jeff_dean + werner_vogels (pair)  
+**Success Criteria**:
+- Metrics dashboard (10+ key indicators: placement rate, rebalancing frequency, latency, migrations)
+- Event logging for all placement and rebalancing decisions
+- Audit trail queryable by time, service, machine, event type
+- Alerting on anomalies (placement failures, migration timeouts, resource saturation)
+- Production audit checklist (security, compliance, safety)
 
----
-
-## Implementation Plan
-
-### Phase 1: Foundational Infrastructure (May 26-29)
-**Deliverables:**
-1. Machine capacity model (hermes1, hermes2)
-2. Service resource requirements schema
-3. Load metrics collection pipeline
-4. VCG placement algorithm
-5. Metrics storage (DuckDB)
-
-**Metrics:**
-- Capacity model: ✅ Complete
-- Metrics pipeline: 10+ metrics collected
-- Storage: Sub-second queries
-- Latency: <100ms placement decisions
-
-### Phase 2: Smart Placement (May 30 - June 2)
-**Deliverables:**
-1. VCG cost optimizer (CPU, memory, network)
-2. Placement decisions with auditing
-3. Dashboard for placement visibility
-4. Testing suite (20+ scenarios)
-5. Historical analysis
-
-**Metrics:**
-- Services placed: 88/88 (100%)
-- Placement optimality: >95%
-- Placement latency: <200ms
-- Decision auditability: 100%
-
-### Phase 3: Dynamic Rebalancing (June 3-6)
-**Deliverables:**
-1. Rebalancing trigger mechanism
-2. Migration algorithm (minimize cost + downtime)
-3. Graceful drain (connection draining)
-4. State synchronization
-5. Rollback mechanisms
-
-**Metrics:**
-- Rebalancing triggered: 10+ scenarios
-- Migration success rate: 99%+
-- Downtime per migration: <5 seconds
-- Rollback capability: 100% tested
-
-### Phase 4: ML-Based Estimation (June 7-9)
-**Deliverables:**
-1. Historical metrics collection (30 days baseline)
-2. Workload profile extraction
-3. ML model training (SVM/Random Forest)
-4. Prediction engine integration
-5. Model accuracy validation
-
-**Metrics:**
-- Training data: 30 days collected
-- Model accuracy: >90% within 20%
-- Prediction latency: <50ms
-- Retraining: Automated monthly
-
-### Phase 5: Monitoring & Production (June 10)
-**Deliverables:**
-1. Metrics dashboard (Grafana)
-2. Event logging (structured)
-3. Alerting rules
-4. Audit trail UI
-5. Production validation
-
-**Metrics:**
-- Dashboard response: <500ms
-- Event ingestion: <1ms latency
-- Alert latency: <10 seconds
-- Audit completeness: 100%
+**Subtasks**: Phase 4 (data collection) + Phase 5 (dashboard + monitoring)
 
 ---
 
-## Pair-Coding Structure
+## Work Breakdown Structure
 
-### jeff_dean (Lead)
-**Focus:** Optimization algorithms, VCG cost functions, performance
-**Responsibilities:**
-- Design placement algorithm
-- Optimize cost functions
-- Performance profiling
-- Model tuning
+### Phase 1: Foundation & Infrastructure (May 26-29, 5 tasks)
+Establish baseline models, schemas, metrics, and algorithm implementation.
 
-### werner_vogels (Partner)
-**Focus:** Distributed systems, orchestration, rebalancing
-**Responsibilities:**
-- Design rebalancing engine
-- State synchronization
-- Failure recovery
-- Infrastructure integration
+- T1-001: Machine Capacity Model
+- T1-002: Service Schema with Resource Hints
+- T1-003: Metrics Pipeline Setup
+- T1-004: VCG Algorithm Implementation
+- T1-005: Persistent Storage (etcd/Consul)
 
-### john_carmack (Research Consultant)
-**Focus:** Systems-level optimization, memory efficiency, performance
-**Responsibilities:**
-- Performance optimization review
-- Systems architecture advice
-- Bottleneck analysis
-- GPU/accelerator integration (future)
+### Phase 2: Smart Placement & Testing (May 30-June 2, 7 tasks)
+Build placement engine, auditing, dashboard, and comprehensive test coverage.
 
-### Collaboration Model
-- **Daily standup:** Sync on decisions, blockers, progress
-- **Code review:** Pair review all critical paths
-- **Architecture:** Joint design decisions
-- **Testing:** Shared test suite ownership
-- **Production:** Joint deployment responsibility
+- T2-001: Smart Placement Engine
+- T2-002: Placement Auditing & Logging
+- T2-003: Placement Dashboard
+- T2-004: Scenario-Based Testing (20 cases)
+- T2-005: Performance Validation
+- T2-006: Integration Tests
+- T2-007: Phase 2 Acceptance
 
----
+### Phase 3: Dynamic Rebalancing (June 3-6, 6 tasks)
+Implement service migration logic with zero-downtime guarantees.
 
-## Technical Architecture
+- T3-001: Rebalancing Trigger Detection
+- T3-002: Migration Algorithm
+- T3-003: Graceful Drain Implementation
+- T3-004: Atomic Rollback System
+- T3-005: Failure Scenario Testing
+- T3-006: Phase 3 Acceptance
 
-### Machine Model
-```python
-class Machine:
-    id: str  # "hermes1", "hermes2"
-    cpu_cores: int
-    memory_gb: float
-    disk_gb: float
-    network_mbps: int
-    
-    current_cpu_util: float  # 0-100%
-    current_memory_util: float
-    current_disk_util: float
-    current_network_util: float
-```
+### Phase 4: ML Resource Estimation (June 7-9, 4 tasks)
+Collect historical data and train predictive models.
 
-### Service Model
-```python
-class Service:
-    id: str  # "executive-agent-1", "gateway-telegram"
-    required_cpu_cores: float
-    required_memory_gb: float
-    required_disk_gb: float
-    required_network_mbps: int
-    
-    estimated_cpu: float  # ML-based prediction
-    estimated_memory: float
-    estimated_disk: float
-    estimated_network: int
-    
-    assigned_machine: str  # "hermes1"
-    can_migrate: bool
-```
+- T4-001: Historical Data Collection
+- T4-002: Feature Engineering & ML Pipeline
+- T4-003: Model Training & Validation
+- T4-004: Model Integration
 
-### Placement Algorithm (VCG-Based)
-```python
-def place_service(service: Service, machines: List[Machine]) -> str:
-    """
-    Compute optimal machine for service using Vickrey-Clarke-Groves.
-    
-    Cost function:
-    - Utilization cost (drive to 60-75% band)
-    - Migration cost (if moving existing service)
-    - Network cost (prefer local connections)
-    
-    Returns: machine_id with minimum total cost
-    """
-    costs = {}
-    for machine in machines:
-        utilization_cost = compute_utilization_cost(
-            current_util=machine.current_cpu_util,
-            service_util=service.estimated_cpu
-        )
-        migration_cost = 0
-        if service.assigned_machine != machine.id:
-            migration_cost = compute_migration_cost(service)
-        
-        total_cost = utilization_cost + migration_cost
-        costs[machine.id] = total_cost
-    
-    return min(costs, key=costs.get)
-```
+### Phase 5: Observability & Production Hardening (June 10, 3 tasks)
+Final monitoring, metrics dashboard, and production audit.
 
-### Rebalancing Trigger
-```python
-def should_rebalance(cluster: Cluster) -> bool:
-    """Rebalance if any machine violates utilization band"""
-    for machine in cluster.machines:
-        if machine.cpu_util > 80% or machine.cpu_util < 30%:
-            return True
-    return False
-
-def compute_rebalancing_plan(cluster: Cluster) -> List[Migration]:
-    """Find optimal set of migrations to restore balance"""
-    # Use MCTS to explore migration sequences
-    # Minimize: total migrations + total downtime
-    # Constraint: No service leaves cluster
-```
-
-### Event Types
-```python
-class ServicePlacedEvent:
-    service_id: str
-    machine_id: str
-    reason: str  # "Initial placement", "Rebalancing", "Upgrade"
-    utilization_before: float
-    utilization_after: float
-    timestamp: str
-
-class ServiceMigratedEvent:
-    service_id: str
-    from_machine: str
-    to_machine: str
-    reason: str  # "Load balancing", "Machine upgrade"
-    downtime_ms: int
-    timestamp: str
-
-class RebalancingStartedEvent:
-    reason: str  # "Machine overloaded", "Cluster rebalancing"
-    migrations_planned: int
-    timestamp: str
-```
+- T5-001: Metrics & Observability
+- T5-002: Monitoring Dashboard
+- T5-003: Production Audit & Deployment
 
 ---
 
-## Metrics & KPIs
+## Timeline & Milestones
 
-### Primary Metrics
-- **Placement Optimality:** >95% of services placed optimally
-- **Cluster Utilization:** Maintained 60-75% band
-- **Rebalancing Success:** 99%+ migrations successful
-- **Prediction Accuracy:** >90% within 20% margin
-- **Observability:** <1s decision-to-action latency
-
-### Secondary Metrics
-- **Placement Latency:** <200ms per decision
-- **Migration Downtime:** <5 seconds per service
-- **Dashboard Response:** <500ms queries
-- **Audit Completeness:** 100% decisions logged
-- **Overhead:** <1% CPU/memory for orchestration
+| Phase | Dates | Duration | Focus | Deliverables |
+|-------|-------|----------|-------|--------------|
+| **Phase 1** | May 26-29 | 4 days | Infrastructure | Machine model, service schema, metrics, VCG algo |
+| **Phase 2** | May 30-Jun 2 | 4 days | Placement | Smart placement engine, auditing, 20 test scenarios |
+| **Phase 3** | Jun 3-6 | 4 days | Rebalancing | Migration logic, graceful drain, atomic rollback |
+| **Phase 4** | Jun 7-9 | 3 days | ML | Historical data, ML model training, integration |
+| **Phase 5** | Jun 10 | 1 day | Production | Dashboard, monitoring, production audit |
 
 ---
 
-## Success Criteria
+## Resource Allocation & Pair Structure
 
-**By June 10, 2026:**
+**Accountable Lead**: jeff_dean (20h allocation, leadership + Phase 1 + Phase 2 + Phase 5 reviews)  
+**Accountable Partner**: werner_vogels (20h allocation, Phase 3 lead + rebalancing + testing)  
+**Research Consultant**: john_carmack (advisory, 5h allocation, VCG optimization + algorithm validation)
 
-- ✅ All 88 services dynamically placed
-- ✅ Cluster utilization 60-75% band maintained
-- ✅ 10+ rebalancing scenarios tested and working
-- ✅ ML-based resource estimation >90% accuracy
-- ✅ Full observability dashboard operational
-- ✅ Zero unplanned downtime due to placement
-- ✅ Production ready for June 1 deployment (core) + optimization (June 10)
-
----
-
-## Risk Mitigation
-
-| Risk | Probability | Mitigation |
-|------|-------------|-----------|
-| Suboptimal placement | Medium | VCG algorithm validated, cost function tuned |
-| Migration failures | Low | Graceful drain, rollback, circuit breaker |
-| ML model accuracy | Medium | 30-day baseline, monthly retraining |
-| Cascading failures | Low | Rate limiting, fuse mechanisms, monitoring |
-| Metric collection overhead | Low | Efficient sampling, async collection |
+**Task Assignment Strategy**: All 25 tasks assigned to jeff_dean or werner_vogels in pair structure. Phase work split approximately:
+- **Phase 1** (5 tasks): Alternating (T1-001 → jeff, T1-002 → werner, T1-003 → jeff, T1-004 → werner, T1-005 → jeff)
+- **Phase 2** (7 tasks): Alternating with pair dependencies
+- **Phase 3** (6 tasks): werner_vogels lead (rebalancing is his domain)
+- **Phase 4** (4 tasks): jeff_dean lead (ML integration + production)
+- **Phase 5** (3 tasks): Both (monitoring + audit)
 
 ---
 
-## Timeline
+## Success Criteria (Aggregate)
 
-```
-May 25 (Today)
-└─ OKR created ✅
-
-May 26-29 (Phase 1: Infrastructure)
-├─ Machine capacity model
-├─ Metrics pipeline
-├─ VCG algorithm
-└─ Storage layer
-
-May 30 - June 2 (Phase 2: Placement)
-├─ Smart placement
-├─ Auditing
-├─ Dashboard
-└─ Testing
-
-June 3-6 (Phase 3: Rebalancing)
-├─ Rebalancing triggers
-├─ Migration algorithm
-├─ Graceful drain
-└─ Rollback
-
-June 7-9 (Phase 4: ML)
-├─ Historical collection
-├─ Model training
-├─ Validation
-└─ Integration
-
-June 10 (Phase 5: Production)
-├─ Dashboard
-├─ Monitoring
-├─ Production audit
-└─ Deployment ready ✅
-```
+1. ✅ All 25 kanban tasks created with proper phase gating
+2. ✅ Phase dependencies configured (Phase N blocked until Phase N-1 completes)
+3. ✅ Machine capacity model + metrics pipeline operational by EOD May 29
+4. ✅ Smart placement engine tested on 20+ scenarios by EOD June 2
+5. ✅ Migration system with graceful drain by EOD June 6
+6. ✅ ML model trained and integrated by EOD June 9
+7. ✅ Production monitoring + audit complete by EOD June 10
+8. ✅ Zero service downtime during migrations (SLA: 99.99%)
+9. ✅ Placement optimization within 15% of theoretical best
+10. ✅ Audit trail complete and queryable
 
 ---
 
-## Deliverables
+## References
 
-### Code
-- `cluster_orchestrator.py` - Main orchestration engine
-- `placement_algorithm.py` - VCG-based placement
-- `rebalancing_engine.py` - Dynamic rebalancing
-- `ml_predictor.py` - Resource consumption estimation
-- `metrics_collector.py` - Load sampling
-- `dashboard.py` - Grafana integration
-- Tests: 50+ scenarios covering all phases
+- **VCG Algorithm**: Vickrey-Clarke-Groves mechanism for truthful resource allocation
+- **Service Orchestration**: Distributed task assignment with dynamic rebalancing
+- **ML Estimation**: Time-series forecasting for resource consumption
+- **Production Audit**: Security, compliance, safety checklist
 
-### Documentation
-- `CLUSTER_ORCHESTRATION_ARCHITECTURE.md` (design)
-- `PLACEMENT_ALGORITHM_SPEC.md` (VCG details)
-- `REBALANCING_PROCEDURE.md` (graceful migration)
-- `ML_ESTIMATION_MODEL.md` (prediction model)
-- `MONITORING_GUIDE.md` (dashboard + alerts)
-- Operational runbooks (troubleshooting)
-
-### Metrics
-- Machine capacity model
-- Service resource profiles
-- Cost function tuning
-- Model accuracy baseline
-
----
-
-**OKR Created:** May 25, 2026, 08:45 UTC  
-**Accountable:** jeff_dean  
-**Status:** in_progress  
-**Target Completion:** June 10, 2026  
-**Confidence:** 90% (established patterns, clear requirements)
-
----
-
-**Next Steps:**
-1. jeff_dean reviews this OKR
-2. Breakdown into 25 kanban tasks (phased by May 26)
-3. Begin Phase 1 infrastructure setup
-4. Daily standups May 26 - June 10
-5. Integration with existing executive agents framework
+**Kanban Board Status**: 25 tasks queued, Phase 1 ready for dispatch on May 26, 2026
