@@ -1681,6 +1681,9 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     print(f"Crashed:      {len(res.crashed)}")
     if res.crashed:
         print(f"  {', '.join(res.crashed)}")
+    print(f"Silent crashes: {len(res.silent_crashes)}")
+    if res.silent_crashes:
+        print(f"  {', '.join(res.silent_crashes)}")
     print(f"Timed out:    {len(res.timed_out)}")
     if res.timed_out:
         print(f"  {', '.join(res.timed_out)}")
