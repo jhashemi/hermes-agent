@@ -1,0 +1,41 @@
+# EditorConfig — hermes-agent monorepo
+# https://editorconfig.org
+#
+# All editors and IDEs that support .editorconfig will pick this up
+# automatically.  Run `editorconfig .editorconfig` to verify syntax.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.py]
+indent_style = space
+indent_size = 4
+
+[*.{yaml,yml,json,toml}]
+indent_style = space
+indent_size = 2
+
+[*.md]
+indent_style = space
+indent_size = 2
+trim_trailing_whitespace = false
+
+[*.sh]
+indent_style = space
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+
+[*.{js,ts,tsx,jsx,css,html}]
+indent_style = space
+indent_size = 2
+
+[Dockerfile]
+indent_style = space
+indent_size = 2

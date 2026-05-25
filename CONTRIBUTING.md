@@ -200,6 +200,26 @@ hermes-agent/
 | `~/.hermes/cron/` | Scheduled job data |
 | `~/.hermes/whatsapp/session/` | WhatsApp bridge credentials |
 
+### Where does my change go?
+
+When adding a new file, use this decision tree to find the right location:
+
+| What are you adding? | Where it goes | Example |
+|---|---|---|
+| New tool | `tools/` | `tools/my_tool.py` |
+| New skill (broadly useful) | `skills/<category>/` | `skills/research/arxiv/SKILL.md` |
+| New skill (niche/heavy deps) | `optional-skills/<category>/` | `optional-skills/media/youtube-content/` |
+| New platform adapter | `gateway/platforms/` | `gateway/platforms/telegram.py` |
+| New plugin | `plugins/<name>/` | `plugins/memory/honcho/` |
+| Bug fix | Same file | Edit in place |
+| New ADR | `docs/adr/ADR-{NNN}-{title}.md` | `docs/adr/ADR-003-repository-standards.md` |
+| Completion / summary artifact | `docs/completions/` | `docs/completions/O7-06_completion_summary.md` |
+| CLI subcommand | `hermes_cli/` | `hermes_cli/doctor.py` |
+| Test | `tests/` | `tests/test_my_tool.py` |
+| Script | `scripts/` | `scripts/run_tests.sh` |
+
+For the full canonical description of directory layout, naming conventions, and linting policy, see [REPO_STANDARDS.md](./REPO_STANDARDS.md). That document is the single source of truth for file naming (`snake_case.py`, `PascalCase` classes, `ADR-{NNN}-{kebab}` pattern) and directory structure.
+
 ---
 
 ## Architecture Overview
@@ -232,12 +252,115 @@ User message → AIAgent._run_agent_loop()
 
 ---
 
-## Code Style
+## Coding Conventions
 
-- **PEP 8** with practical exceptions (we don't enforce strict line length)
-- **Comments**: Only when explaining non-obvious intent, trade-offs, or API quirks. Don't narrate what the code does — `# increment counter` adds nothing
-- **Error handling**: Catch specific exceptions. Log with `logger.warning()`/`logger.error()` — use `exc_info=True` for unexpected errors so stack traces appear in logs
-- **Cross-platform**: Never assume Unix. See [Cross-Platform Compatibility](#cross-platform-compatibility)
+### Python style
+
+| Convention | Rule | Example |
+|---|---|---|
+| **File names** | `snake_case.py` | `vcg_dispatcher.py`, `run_agent.py` |
+| **Class names** | `PascalCase` | `VCGDispatcher`, `AIAgent`, `HermesCLI` |
+| **Test files** | `test_{module_name}.py` | `test_vcg_dispatcher.py` |
+| **Indentation** | 4 spaces (enforced by `.editorconfig`) | — |
+| **Line length** | 100 chars (enforced by `ruff format`) | — |
+| **Quote style** | Double quotes (enforced by `ruff format`) | — |
+
+### Imports
+
+Sort order: **stdlib → third-party → local**, enforced by `ruff check --select I001`:
+
+```python
+# stdlib
+import json
+import os
+from pathlib import Path
+
+# third-party
+import httpx
+from rich.console import Console
+
+# local
+from tools.registry import registry
+from agent.memory_manager import MemoryManager
+```
+
+Run `ruff check --select I001 --fix` to auto-sort imports.
+
+### Type hints
+
+Type hints are **encouraged but not required**. No stub files (`.pyi`). Add type hints when they clarify intent, especially for public APIs and complex return types:
+
+```python
+def dispatch_task(task: Task, node_pool: list[Node]) -> Allocation:
+    """Type hints clarify what goes in and what comes out."""
+    ...
+
+# Simple private helpers don't need them:
+def _format_time(secs):
+    return f"{secs:.1f}s"
+```
+
+### Docstrings
+
+**Google style** with `"""` triple quotes. Every `.py` file must have a module-level docstring:
+
+```python
+"""my_module — Brief description of what this module does."""
+
+def public_function(param1: str, param2: int = 10) -> dict:
+    """One-line summary.
+
+    Args:
+        param1: What param1 is.
+        param2: What param2 is. Defaults to 10.
+
+    Returns:
+        Dictionary with keys for thing1 and thing2.
+
+    Raises:
+        ValueError: If param1 is empty.
+    """
+    ...
+```
+
+For private helpers with obvious behavior, a one-liner is fine:
+
+```python
+def _escape(text):
+    """Shell-escape a string for safe interpolation."""
+    return shlex.quote(text)
+```
+
+### Error handling
+
+1. **Catch specific exceptions** — never bare `except:`. Use `logger.warning()` / `logger.error()` for handling, `exc_info=True` for unexpected errors so stack traces appear in logs.
+2. **Prefer explicit exception types** — define custom exceptions when the built-in ones don't communicate intent clearly.
+3. **Use tenacity for retries** — `tenacity` is already a core dependency. Use it for network calls, file locks, and other transient-failure scenarios:
+
+```python
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=10))
+def fetch_remote(url):
+    ...
+```
+
+### Comments
+
+Write comments only when explaining **non-obvious intent**, trade-offs, or API quirks. Don't narrate what the code does — `# increment counter` adds nothing. If the code needs a comment to be understood, consider rewriting it instead.
+
+### Cross-platform
+
+See [Cross-Platform Compatibility](#cross-platform-compatibility) for the full rules. In short: never assume Unix; use `pathlib.Path`, `psutil` for process management, and `shutil.which()` before shelling out.
+
+### Linting
+
+- **Blocking**: `PLW1514` (unspecified-encoding) is enforced in CI. Run `ruff check` to verify.
+- **Advisory**: `I001`, `F`, `E`, `W`, `N`, `UP` are configured but not blocking. Run manually with:
+  ```bash
+  ruff check --select I001,F,E,W,N,UP --statistics
+  ```
+- **Promotion**: To promote an advisory rule to blocking, see [REPO_STANDARDS.md §4 Linting Policy](./REPO_STANDARDS.md).
 
 ---
 
@@ -733,6 +856,26 @@ Hermes has terminal access. Security matters.
 - **Test on all platforms** if your change touches file paths, process management, or shell commands
 
 If your PR affects security, note it explicitly in the description.
+
+---
+
+## Completion File Policy
+
+Completion summaries, handoff documents, and other task artifacts **must not land at the repository root**. They clutter directory listings and are not discoverable.
+
+### Rules
+
+1. **No `*_COMPLETION_SUMMARY*` files at the repo root.** Files like `O7-06_COMPLETION_SUMMARY.md` or `P1-005_COMPLETION_SUMMARY.txt` belong under `docs/completions/` or should be deleted after merge.
+2. **Archive or delete after merge.** Completion summaries are documentation — move them to `docs/completions/` for long-term reference, or remove them if the information is already captured in code comments, commit messages, or ADRs.
+3. **`.gitignore` catches these patterns.** The following patterns are in `.gitignore` to prevent accidental commits:
+   ```
+   *_COMPLETION_SUMMARY*
+   *_COMPLETION_SUMMARY.md
+   *_COMPLETION_SUMMARY.txt
+   ```
+4. **In-repo documentation goes in `docs/`.** Design docs → `docs/design/`, ADRs → `docs/adr/`, planning → `docs/plans/`, completions → `docs/completions/`.
+
+See [REPO_STANDARDS.md §6 Completion / Summary Files](./REPO_STANDARDS.md) for the canonical reference.
 
 ---
 

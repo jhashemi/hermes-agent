@@ -211,14 +211,27 @@ exclude = ["tinker-atropos"]
 preview = true  # required for PLW1514 (unspecified-encoding) — preview rule
 
 [tool.ruff.lint]
-# All other lints are intentionally disabled (see comment history on this
-# file) while we wrangle typechecks — but PLW1514 is too load-bearing to
-# keep off.  Bare open()/read_text()/write_text() in text mode defaults to
+# ── Blocking rules ──────────────────────────────────────────────────
+# Only PLW1514 (unspecified-encoding) is enforced as a blocking lint.
+# Bare open()/read_text()/write_text() in text mode defaults to
 # the system locale encoding on Windows (cp1252 on US-locale installs),
 # which silently corrupts any non-ASCII file content.  We had three
 # separate Windows sandbox regressions in one debug session before
 # adding the explicit encoding.  This rule keeps new code honest.
 select = ["PLW1514"]
+
+# ── Advisory rules (not blocking) ──────────────────────────────────
+# The following rule categories are configured but intentionally not
+# selected above.  They can be run manually with:
+#   ruff check --select I001,F,E,W,N,UP --statistics
+# Once violations are triaged, we will promote individual rules to the
+# blocking select list.  See REPO_STANDARDS.md for the promotion process.
+#
+# I001 — isort: import sorting
+# F    — pyflakes: undefined names, unused imports, etc.
+# E/W  — pycodestyle: style errors (E) and warnings (W)
+# N    — pep8-naming: naming conventions
+# UP   — pyupgrade: modernize Python syntax
 
 [tool.ruff.lint.per-file-ignores]
 # Tests can intentionally exercise locale-encoding edge cases.
@@ -227,6 +240,10 @@ select = ["PLW1514"]
 "skills/**" = ["PLW1514"]
 "optional-skills/**" = ["PLW1514"]
 "plugins/**" = ["PLW1514"]
+
+[tool.ruff.format]
+line-length = 100
+quote-style = "double"
 
 [tool.uv]
 exclude-newer = "7 days"

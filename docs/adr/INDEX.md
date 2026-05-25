@@ -12,6 +12,36 @@
 
 ---
 
+## Repository Standards ADRs
+
+### 🟢 ADR-003: Adopt REPO_STANDARDS.md as Canonical Repository Standards
+
+**File**: `adr/ADR-003-repository-standards.md`  
+**Date**: 2026-05-25  
+**Status**: Accepted  
+**Author**: Werner Vogels (D2.3 Standards Documentation)
+
+**Summary**: Adopt REPO_STANDARDS.md as the canonical reference for naming conventions, directory layout, file organization, and linting policy.
+
+**Key Decisions**:
+- All new files follow snake_case.py naming convention
+- Completion artifacts go to `docs/completions/` or are deleted (not repo root)
+- `.editorconfig` enforces consistent formatting
+- CI enforces encoding (PLW1514) with advisory rules expanding over time
+- Cross-referencing between REPO_STANDARDS.md, CONTRIBUTING.md, and this ADR
+
+**Consequences**:
+- Single source of truth for contributors
+- .gitignore catches `*_COMPLETION_SUMMARY*` patterns
+- Advisory lint rules (I001, F, E/W, N, UP) documented with promotion process
+- Existing violations tracked in D2.2 cleanup task
+
+**Related Decisions**: 
+- Supports ADR-O-001, ADR-O-002 (standardizes where their code lives)
+- Referenced by CONTRIBUTING.md (practical contributor guide)
+
+---
+
 ## Kanban System ADRs
 
 ### 🟡 ADR-K-001: DuckDB Migration for Kanban Boards
@@ -210,6 +240,7 @@ ADR-O-005 (VCG Allocation)
 
 | ADR | Component | Status | Location |
 |-----|-----------|--------|----------|
+| ADR-003 | Repository Standards | ✅ Active | `adr/ADR-003-repository-standards.md` |
 | ADR-O-001 | DuckDBRepository | ✅ Designed | `adr/ADR-001-*.md` |
 | ADR-O-002 | NATSJetStreamBroker | ✅ Designed | `adr/ADR-002-*.md` |
 | ADR-O-003 | Hexagonal Architecture | ✅ Designed | `adr/ADR-003-*.md` |
@@ -220,7 +251,7 @@ ADR-O-005 (VCG Allocation)
 
 ## How to Add New ADRs
 
-1. Create file: `adr/ADR-NNN-title.md`
+1. Create file: `adr/ADR-NNN-title.md` (check `INDEX.md` for the next available number)
 2. Use template from `adr/template.md`
 3. Add entry to this index
 4. Link related ADRs (both directions)
