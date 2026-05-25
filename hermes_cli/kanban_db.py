@@ -3145,6 +3145,119 @@ def heartbeat_worker(
     return True
 
 
+def detect_worker_pids_alive(
+    conn: sqlite3.Connection,
+) -> list[dict[str, Any]]:
+    """Detect tasks in 'running' state whose worker PID is no longer alive.
+
+    Returns a list of dicts with crash information:
+    - task_id: the task that crashed
+    - pid: the dead PID
+    - status_before: the task status (always 'running')
+    - run_id: the associated run id
+
+    This is a read-only detection pass; it does not modify the DB.
+    Use :func:`handle_dead_worker_pids` to mark them as crashed.
+
+    Motivation: May 2026 RCA found workers crashing silently without
+    logging, leaving tasks in 'running' state indefinitely with dead PIDs
+    and no heartbeats. This function proactively detects that pattern
+    so the dispatcher can recover without waiting for TTL expiry.
+    """
+    dead_pids: list[dict[str, Any]] = []
+    now = int(time.time())
+
+    # Find all tasks in 'running' state with a non-null worker_pid.
+    rows = conn.execute(
+        "SELECT id, worker_pid, current_run_id FROM tasks "
+        "WHERE status = 'running' AND worker_pid IS NOT NULL AND worker_pid > 0"
+    ).fetchall()
+
+    for row in rows:
+        pid = row["worker_pid"]
+        task_id = row["id"]
+        run_id = row["current_run_id"]
+
+        # Check if the PID is actually alive.
+        if not _pid_alive(pid):
+            dead_pids.append({
+                "task_id": task_id,
+                "pid": pid,
+                "status_before": "running",
+                "run_id": run_id,
+                "detected_at": now,
+            })
+
+    return dead_pids
+
+
+def handle_dead_worker_pids(
+    conn: sqlite3.Connection,
+    *,
+    signal_fn=None,
+) -> list[dict[str, Any]]:
+    """Detect dead worker PIDs and transition tasks to 'paused' with error tracking.
+
+    Returns a list of crash info dicts (same as :func:`detect_worker_pids_alive`).
+
+    For each dead worker PID:
+    1. Mark the task as 'paused' (requires manual intervention)
+    2. Increment consecutive_failures
+    3. Record error in last_failure_error
+    4. Mark the run as 'crashed' with error message
+    5. Emit a 'worker_crashed' event for audit trail
+
+    This is called by the dispatcher's maintenance loop to keep the board
+    healthy when workers die without proper cleanup. Complements the
+    existing ``detect_crashed_workers`` which handles exit classification.
+    """
+    dead_pids = detect_worker_pids_alive(conn)
+    now = int(time.time())
+
+    for crash_info in dead_pids:
+        task_id = crash_info["task_id"]
+        pid = crash_info["pid"]
+        run_id = crash_info["run_id"]
+
+        with write_txn(conn):
+            # Increment failure counter and record error
+            conn.execute(
+                "UPDATE tasks "
+                "SET status = 'paused', "
+                "    consecutive_failures = consecutive_failures + 1, "
+                "    last_failure_error = ?, "
+                "    worker_pid = NULL, "
+                "    claim_lock = NULL, "
+                "    claim_expires = NULL "
+                "WHERE id = ? AND status = 'running'",
+                (f"Worker PID not alive: {pid} (no heartbeat, no ended_at)", task_id),
+            )
+
+            # Mark the run as crashed
+            if run_id:
+                conn.execute(
+                    "UPDATE task_runs "
+                    "SET status = 'crashed', outcome = 'crashed', "
+                    "    ended_at = ?, "
+                    "    error = ? "
+                    "WHERE id = ? AND status = 'running'",
+                    (now, f"Worker PID not alive: {pid}", int(run_id)),
+                )
+
+            # Emit audit event
+            _append_event(
+                conn, task_id, "worker_crashed",
+                {
+                    "pid": pid,
+                    "reason": "pid_not_alive",
+                    "run_id": run_id,
+                },
+                run_id=run_id,
+            )
+
+    return dead_pids
+
+
 def enforce_max_runtime(
     conn: sqlite3.Connection,
     *,
