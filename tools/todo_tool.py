@@ -63,6 +63,15 @@ class TodoStore:
                         status = str(t["status"]).strip().lower()
                         if status in VALID_STATUSES:
                             existing[item_id]["status"] = status
+                    # Update DAG fields if provided
+                    if "blocks" in t:
+                        blocks = t["blocks"]
+                        existing[item_id]["blocks"] = blocks if isinstance(blocks, list) else []
+                    if "blocked_by" in t:
+                        blocked_by = t["blocked_by"]
+                        existing[item_id]["blocked_by"] = blocked_by if isinstance(blocked_by, list) else []
+                    if "active_form" in t and t.get("active_form"):
+                        existing[item_id]["active_form"] = str(t["active_form"]).strip()
                 else:
                     # New item -- validate fully and append to end
                     validated = self._validate(t)
@@ -114,10 +123,21 @@ class TodoStore:
         if not active_items:
             return None
 
+        # Compute effective block status
+        completed_ids = {item["id"] for item in self._items
+                         if item["status"] == "completed"}
         lines = ["[Your active task list was preserved across context compression]"]
         for item in active_items:
             marker = markers.get(item["status"], "[?]")
-            lines.append(f"- {marker} {item['id']}. {item['content']} ({item['status']})")
+            line = f"- {marker} {item['id']}. {item['content']} ({item['status']})"
+            # Show blocking info for blocked items
+            pending_blockers = [
+                b for b in item.get("blocked_by", [])
+                if b not in completed_ids
+            ]
+            if pending_blockers:
+                line += f" [blocked by #{', #'.join(pending_blockers)}]"
+            lines.append(line)
 
         return "\n".join(lines)
 
@@ -141,7 +161,17 @@ class TodoStore:
         if status not in VALID_STATUSES:
             status = "pending"
 
-        return {"id": item_id, "content": content, "status": status}
+        result = {"id": item_id, "content": content, "status": status}
+
+        # Optional DAG fields — preserve if present, default to empty
+        blocks = item.get("blocks")
+        result["blocks"] = blocks if isinstance(blocks, list) else []
+        blocked_by = item.get("blocked_by")
+        result["blocked_by"] = blocked_by if isinstance(blocked_by, list) else []
+        active_form = str(item.get("active_form", "")).strip()
+        result["active_form"] = active_form if active_form else ""
+
+        return result
 
     @staticmethod
     def _dedupe_by_id(todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -183,8 +213,20 @@ def todo_tool(
     completed = sum(1 for i in items if i["status"] == "completed")
     cancelled = sum(1 for i in items if i["status"] == "cancelled")
 
+    # Compute which tasks are effectively blocked
+    completed_ids = {i["id"] for i in items if i["status"] == "completed"}
+    blocked_tasks = []
+    for item in items:
+        pending_blockers = [
+            b for b in item.get("blocked_by", [])
+            if b not in completed_ids
+        ]
+        if pending_blockers:
+            blocked_tasks.append(item["id"])
+
     return json.dumps({
         "todos": items,
+        "blocked_tasks": blocked_tasks,
         "summary": {
             "total": len(items),
             "pending": pending,

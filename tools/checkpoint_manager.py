@@ -594,19 +594,91 @@ class CheckpointManager:
         (Implemented via ``.gitignore`` excludes + a post-stage size check.)
     """
 
-    def __init__(
-        self,
-        enabled: bool = False,
-        max_snapshots: int = 20,
-        max_total_size_mb: int = 500,
-        max_file_size_mb: int = 10,
-    ):
+    def __init__(self, enabled: bool = True, max_snapshots: int = 20,
+                 max_total_size_mb: float = 500, max_file_size_mb: float = 50):
         self.enabled = enabled
-        self.max_snapshots = max(1, int(max_snapshots))
-        self.max_total_size_mb = max(0, int(max_total_size_mb))
-        self.max_file_size_mb = max(0, int(max_file_size_mb))
-        self._checkpointed_dirs: Set[str] = set()
-        self._git_available: Optional[bool] = None  # lazy probe
+        self.max_snapshots = max_snapshots
+        self.max_total_size_mb = max_total_size_mb
+        self.max_file_size_mb = max_file_size_mb
+        self._checkpointed_dirs: set = set()
+        self._git_available: Optional[bool] = None
+        # Per-file pre-mutation snapshot tracking
+        self._file_snapshots: Dict[str, str] = {}  # lazy probe
+
+    # -----------------------------------------------------------------
+    # Per-file pre-mutation snapshot hooks
+    # -----------------------------------------------------------------
+
+    def snapshot_file(self, file_path: str, reason: str = "pre-mutation") -> bool:
+        """
+        Create a per-file backup before a mutating operation (write_file, patch, etc).
+
+        The snapshot is stored in a .hermes-snapshots/ directory adjacent to the
+        working dir root.  Returns True if the snapshot was created, False otherwise.
+        Never raises — all errors are silently logged.
+        """
+        file_path = str(_normalize_path(file_path))
+        if not os.path.isfile(file_path):
+            return False
+
+        try:
+            snapshot_dir = self._snapshot_dir_for(file_path)
+            os.makedirs(snapshot_dir, exist_ok=True)
+            # Use a stable filename so repeated snapshots overwrite
+            import hashlib
+            h = hashlib.sha256(file_path.encode()).hexdigest()[:16]
+            dest = os.path.join(snapshot_dir, f"{h}.snap")
+            shutil.copy2(file_path, dest)
+            # Record the mapping
+            self._file_snapshots[file_path] = dest
+            logger.debug("File snapshot created: %s → %s (%s)", file_path, dest, reason)
+            return True
+        except Exception as e:
+            logger.debug("File snapshot failed (non-fatal): %s — %s", file_path, e)
+            return False
+
+    def get_snapshot_path(self, file_path: str) -> Optional[str]:
+        """Return the snapshot path for a file, or None if not snapshotted."""
+        file_path = str(_normalize_path(file_path))
+        return self._file_snapshots.get(file_path)
+
+    def restore_snapshot(self, file_path: str) -> bool:
+        """
+        Restore a file from its pre-mutation snapshot.
+
+        Returns True if the file was restored, False if no snapshot exists.
+        Never raises — all errors are silently logged.
+        """
+        file_path = str(_normalize_path(file_path))
+        snap_path = self._file_snapshots.get(file_path)
+        if not snap_path or not os.path.isfile(snap_path):
+            return False
+
+        try:
+            shutil.copy2(snap_path, file_path)
+            logger.debug("File restored from snapshot: %s", file_path)
+            return True
+        except Exception as e:
+            logger.debug("File restore failed (non-fatal): %s — %s", file_path, e)
+            return False
+
+    def _snapshot_dir_for(self, file_path: str) -> str:
+        """Determine the .hermes-snapshots directory for a given file."""
+        # Place snapshots in a .hermes-snapshots/ dir next to the file's
+        # nearest git root (or its parent directory if no git root found).
+        abs_path = str(_normalize_path(file_path))
+        parent = os.path.dirname(abs_path)
+        # Walk up to find a .git directory
+        candidate = parent
+        for _ in range(10):  # limit search depth
+            if os.path.isdir(os.path.join(candidate, ".git")):
+                return os.path.join(candidate, ".hermes-snapshots")
+            up = os.path.dirname(candidate)
+            if up == candidate:
+                break
+            candidate = up
+        # Fallback: place next to the file's parent
+        return os.path.join(parent, ".hermes-snapshots")
 
     # ------------------------------------------------------------------
     # Turn lifecycle

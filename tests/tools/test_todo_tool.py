@@ -31,10 +31,12 @@ class TestWriteAndRead:
             {"id": "2", "content": "Other task", "status": "pending"},
             {"id": "1", "content": "Latest version", "status": "in_progress"},
         ])
-        assert result == [
-            {"id": "2", "content": "Other task", "status": "pending"},
-            {"id": "1", "content": "Latest version", "status": "in_progress"},
-        ]
+        assert len(result) == 2
+        assert result[0]["id"] == "2"
+        assert result[0]["content"] == "Other task"
+        assert result[1]["id"] == "1"
+        assert result[1]["content"] == "Latest version"
+        assert result[1]["status"] == "in_progress"
 
 
 class TestHasItems:

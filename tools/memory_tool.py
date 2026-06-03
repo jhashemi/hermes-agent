@@ -122,6 +122,8 @@ class MemoryStore:
         self.user_char_limit = user_char_limit
         # Frozen snapshot for system prompt -- set once at load_from_disk()
         self._system_prompt_snapshot: Dict[str, str] = {"memory": "", "user": ""}
+        # Confidence metadata: maps (target, entry_text) -> float
+        self._confidence: Dict[str, Dict[str, float]] = {"memory": {}, "user": {}}
 
     def load_from_disk(self):
         """Load entries from MEMORY.md and USER.md, capture system prompt snapshot."""
@@ -221,11 +223,14 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
-    def add(self, target: str, content: str) -> Dict[str, Any]:
+    def add(self, target: str, content: str, confidence: float = 1.0) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
             return {"success": False, "error": "Content cannot be empty."}
+
+        # Clamp confidence to [0.0, 1.0]
+        confidence = max(0.0, min(1.0, confidence))
 
         # Scan for injection/exfiltration before accepting
         scan_error = _scan_memory_content(content)
@@ -260,11 +265,102 @@ class MemoryStore:
                     "usage": f"{current:,}/{limit:,}",
                 }
 
+            # Check for conflicts BEFORE appending (so we only compare against
+            # existing entries, not the new entry itself)
+            conflict = self._detect_conflict(target, content)
+
             entries.append(content)
             self._set_entries(target, entries)
+            # Store confidence metadata
+            self._confidence.setdefault(target, {})[content] = confidence
+            self._persist_confidence(target)
             self.save_to_disk(target)
 
-        return self._success_response(target, "Entry added.")
+            msg = "Entry added."
+            if confidence < 0.5:
+                msg += " (low confidence — verify before relying on this)"
+            if conflict:
+                msg += f" ⚠ Possible conflict with existing: '{conflict[:60]}...'"
+
+            return self._success_response(target, msg)
+
+    def get_confidence(self, target: str, content: str) -> Optional[float]:
+        """Return confidence score for an entry, or None if not found."""
+        return self._confidence.get(target, {}).get(content)
+
+    def _detect_conflict(self, target: str, new_content: str) -> Optional[str]:
+        """
+        Simple heuristic conflict detection.
+        Checks if new_content appears to contradict an existing entry
+        by looking for opposing sentiment on the same subject.
+
+        A conflict requires: (1) same subject/predicate keyword AND
+        (2) contradictory object/value.
+        """
+        entries = self._entries_for(target)
+        if not entries:
+            return None
+
+        # Pairs of words that signal contradiction when applied to same subject
+        _contradiction_pairs = [
+            ("prefers", "prefers"),  # "X prefers A" vs "X prefers B"
+            ("uses", "uses"),
+            ("never", "always"),
+            ("always", "never"),
+            ("must", "must not"),
+            ("must not", "must"),
+            ("should", "should not"),
+            ("should not", "should"),
+            ("likes", "dislikes"),
+            ("dislikes", "likes"),
+            ("is", "is not"),
+            ("is not", "is"),
+        ]
+
+        new_lower = new_content.lower()
+        for entry in entries:
+            entry_lower = entry.lower()
+            for kw_new, kw_existing in _contradiction_pairs:
+                if kw_new not in new_lower:
+                    continue
+                if kw_existing not in entry_lower:
+                    continue
+                # Both entries use opposing keywords.
+                # Check if they share the same subject (text before the keyword).
+                new_prefix = new_lower.split(kw_new)[0].strip()
+                entry_prefix = entry_lower.split(kw_existing)[0].strip()
+                # Require exact subject match for "prefers"/"uses" (common false positives)
+                if kw_new in ("prefers", "uses") and new_prefix != entry_prefix:
+                    continue
+                # For negation pairs, looser matching is fine
+                if new_prefix and entry_prefix and (
+                    new_prefix == entry_prefix
+                    or (kw_new not in ("prefers", "uses")
+                        and (new_prefix in entry_prefix or entry_prefix in new_prefix))
+                ):
+                    return entry
+        return None
+
+    def _persist_confidence(self, target: str) -> None:
+        """Write confidence metadata to a sidecar file."""
+        import json as _json
+        conf_path = str(self._path_for(target)) + ".confidence.json"
+        try:
+            with open(conf_path, "w") as f:
+                _json.dump(self._confidence.get(target, {}), f)
+        except OSError:
+            pass  # Non-critical — confidence is best-effort
+
+    def _load_confidence(self, target: str) -> None:
+        """Load confidence metadata from sidecar file."""
+        import json as _json
+        conf_path = str(self._path_for(target)) + ".confidence.json"
+        try:
+            if os.path.exists(conf_path):
+                with open(conf_path, "r") as f:
+                    self._confidence[target] = _json.load(f)
+        except (OSError, _json.JSONDecodeError):
+            pass
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
         """Find entry containing old_text substring, replace it with new_content."""
@@ -391,12 +487,22 @@ class MemoryStore:
         return resp
 
     def _render_block(self, target: str, entries: List[str]) -> str:
-        """Render a system prompt block with header and usage indicator."""
+        """Render a system prompt block with header, usage indicator, and confidence marks."""
         if not entries:
             return ""
 
         limit = self._char_limit(target)
-        content = ENTRY_DELIMITER.join(entries)
+        # Annotate low-confidence entries
+        conf = self._confidence.get(target, {})
+        rendered_entries = []
+        for entry in entries:
+            c = conf.get(entry, 1.0)
+            if c < 0.7:
+                rendered_entries.append(f"{entry} (uncertain, confidence={c:.1f})")
+            else:
+                rendered_entries.append(entry)
+
+        content = ENTRY_DELIMITER.join(rendered_entries)
         current = len(content)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
