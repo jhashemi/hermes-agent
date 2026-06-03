@@ -10433,15 +10433,17 @@ class AIAgent:
             if not isinstance(function_args, dict):
                 function_args = {}
 
-            # Checkpoint for file-mutating tools
-            if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
-                try:
-                    file_path = function_args.get("path", "")
-                    if file_path:
-                        work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
-                except Exception:
-                    pass
+    # Checkpoint for file-mutating tools
+    if function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
+        try:
+            file_path = function_args.get("path", "")
+            if file_path:
+                work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
+                self._checkpoint_mgr.ensure_checkpoint(work_dir, f"before {function_name}")
+                # Per-file snapshot for fine-grained rollback
+                self._checkpoint_mgr.snapshot_file(file_path, reason=f"pre-{function_name}")
+        except Exception:
+            pass
 
             # Checkpoint before destructive terminal commands
             if function_name == "terminal" and self._checkpoint_mgr.enabled:
@@ -10891,17 +10893,19 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool start callback error: {cb_err}")
 
-            # Checkpoint: snapshot working dir before file-mutating tools
-            if not _execution_blocked and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
-                try:
-                    file_path = function_args.get("path", "")
-                    if file_path:
-                        work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
-                        self._checkpoint_mgr.ensure_checkpoint(
-                            work_dir, f"before {function_name}"
-                        )
-                except Exception:
-                    pass  # never block tool execution
+    # Checkpoint: snapshot working dir before file-mutating tools
+    if not _execution_blocked and function_name in ("write_file", "patch") and self._checkpoint_mgr.enabled:
+        try:
+            file_path = function_args.get("path", "")
+            if file_path:
+                work_dir = self._checkpoint_mgr.get_working_dir_for_path(file_path)
+                self._checkpoint_mgr.ensure_checkpoint(
+                    work_dir, f"before {function_name}"
+                )
+                # Per-file snapshot for fine-grained rollback
+                self._checkpoint_mgr.snapshot_file(file_path, reason=f"pre-{function_name}")
+        except Exception:
+            pass # never block tool execution
 
             # Checkpoint before destructive terminal commands
             if not _execution_blocked and function_name == "terminal" and self._checkpoint_mgr.enabled:
@@ -15002,9 +15006,27 @@ class AIAgent:
 
         # Save trajectory if enabled.  ``user_message`` may be a multimodal
         # list of parts; the trajectory format wants a plain string.
-        self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
+    self._save_trajectory(messages, _summarize_user_message_for_log(user_message), completed)
 
-        # Clean up VM and browser for this task after conversation completes
+    # Post-session memory consolidation: extract durable facts
+    # from the conversation and persist high-confidence ones.
+    try:
+        from tools.memory_consolidator import MemoryConsolidator
+        _consolidator = MemoryConsolidator()
+        _session_text = "\n".join(
+            f"{m.get('role', '?')}: {m.get('content', '')}"
+            for m in messages
+            if m.get("role") in ("user", "assistant") and m.get("content")
+        )
+        _facts = _consolidator.extract_facts(_session_text)
+        if _facts:
+            _written = _consolidator.write_facts("memory", _facts)
+            if _written:
+                logger.info("Memory consolidator: %d facts extracted, %d persisted", len(_facts), _written)
+    except Exception as e:
+        logger.debug("Memory consolidation skipped (non-fatal): %s", e)
+
+    # Clean up VM and browser for this task after conversation completes
         self._cleanup_task_resources(effective_task_id)
 
         # Persist session to both JSON log and SQLite only after private retry
