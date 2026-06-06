@@ -4052,6 +4052,102 @@ class AIAgent:
     )
 
     @staticmethod
+    def _broadcast_skill_actions(actions: List[str]) -> None:
+        """Fire-and-forget cluster broadcast for skills the bg-review just created/updated.
+
+        Walks the action summary list (e.g. ``[\"Skill 'l4-governance-compilation' created.\", ...]``)
+        from ``_summarize_background_review_actions``. For every action that names a
+        skill, resolves the local skill directory under ``HERMES_HOME/skills/`` and
+        fires ``tools.skills_broadcast.cmd_publish`` in a daemon thread so the result
+        propagates to the rest of the cluster via the existing NATS JetStream
+        ``SKILLS_BROADCAST`` stream.
+
+        Cluster propagation rule: every newly created or updated skill on this node
+        MUST land on every other cluster node within seconds. The bg-review agent is
+        the canonical creation surface during conversation (skill_manage is also
+        used directly for explicit user asks; that path is broadcast inside
+        skill_manager_tool itself in a follow-up if-needed). This hook covers the
+        review-driven creation path so the user's "💾 Self-improvement review:
+        Skill 'X' created." message is always followed by silent cluster
+        propagation.
+
+        Best-effort: any exception (NATS unavailable, skill dir missing, parse
+        failure) is swallowed — broadcast failures must never break the review
+        flow or the user-facing summary emit.
+        """
+        import re
+        import threading
+        if not actions:
+            return
+
+        # Match both "Skill 'name' created." and "Skill 'name' updated."
+        pattern = re.compile(r"Skill\s+'([^']+)'\s+(?:created|updated)")
+        skill_names: List[str] = []
+        for action in actions:
+            if not isinstance(action, str):
+                continue
+            for match in pattern.finditer(action):
+                name = match.group(1).strip()
+                if name and name not in skill_names:
+                    skill_names.append(name)
+
+        if not skill_names:
+            return
+
+        def _do_broadcast() -> None:
+            try:
+                # Lazy import: skills_broadcast pulls in nats-py + sets sys.path.
+                # Import inside the thread so a missing dep can't crash review.
+                import asyncio
+                import sys as _sys
+                from pathlib import Path as _Path
+                _broadcast_root = _Path("/home/ubuntu/hermes-agent")
+                if str(_broadcast_root) not in _sys.path:
+                    _sys.path.insert(0, str(_broadcast_root))
+                from tools import skills_broadcast as _sb  # type: ignore
+
+                def _resolve_skill_dir(name: str) -> Optional[Path]:
+                    # Top-level: ~/.hermes/skills/<name>/SKILL.md
+                    direct = _sb.SKILLS_DIR / name
+                    if (direct / "SKILL.md").exists():
+                        return direct
+                    # Category-nested: ~/.hermes/skills/<category>/<name>/SKILL.md
+                    for entry in _sb.SKILLS_DIR.iterdir():
+                        if not entry.is_dir() or entry.name.startswith("."):
+                            continue
+                        candidate = entry / name
+                        if (candidate / "SKILL.md").exists():
+                            return candidate
+                    return None
+
+                for name in skill_names:
+                    skill_dir = _resolve_skill_dir(name)
+                    if skill_dir is None:
+                        logger.debug(
+                            "skill broadcast: %s has no SKILL.md under %s, skipping",
+                            name,
+                            _sb.SKILLS_DIR,
+                        )
+                        continue
+                    try:
+                        asyncio.run(_sb.cmd_publish(skill_dir))
+                        logger.info(
+                            "skill broadcast: published %s to cluster", name
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "skill broadcast: publish %s failed: %s", name, e
+                        )
+            except Exception as e:
+                logger.debug("skill broadcast thread aborted: %s", e)
+
+        threading.Thread(
+            target=_do_broadcast,
+            daemon=True,
+            name=f"bg-skill-broadcast-{len(skill_names)}",
+        ).start()
+
+    @staticmethod
     def _summarize_background_review_actions(
         review_messages: List[Dict],
         prior_snapshot: List[Dict],
@@ -4226,6 +4322,14 @@ class AIAgent:
                             )
                         except Exception:
                             pass
+                    # Cluster propagation: any skill the review just created or
+                    # updated must reach the other nodes within seconds. Fire
+                    # the broadcast in a daemon thread so a NATS hiccup or a
+                    # missing skill dir cannot break the review flow.
+                    try:
+                        AIAgent._broadcast_skill_actions(actions)
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.warning("Background memory/skill review failed: %s", e)
