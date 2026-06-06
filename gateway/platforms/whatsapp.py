@@ -815,6 +815,7 @@ class WhatsAppAdapter(BasePlatformAdapter):
         Formats markdown for WhatsApp, splits long messages into chunks
         that preserve code block boundaries, and sends each chunk sequentially.
         """
+        import aiohttp
         if not self._running or not self._http_session:
             return SendResult(success=False, error="Not connected")
         bridge_exit = await self._check_managed_bridge_exit()
@@ -825,7 +826,6 @@ class WhatsAppAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=None)
 
         try:
-            import aiohttp
 
             # Format and chunk the message
             formatted = self.format_message(content)
@@ -861,6 +861,11 @@ class WhatsAppAdapter(BasePlatformAdapter):
                 success=True,
                 message_id=last_message_id,
             )
+        except (aiohttp.ServerDisconnectedError, aiohttp.ClientConnectionError) as e:
+            # Idle aiohttp.ClientSession can be dropped by the bridge keep-alive
+            # even though the bridge process itself is healthy. Mark retryable
+            # so BasePlatformAdapter._send_with_retry refreshes and retries.
+            return SendResult(success=False, error=f"Server disconnected: {e}", retryable=True)
         except Exception as e:
             return SendResult(success=False, error=str(e))
 

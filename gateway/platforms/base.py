@@ -1155,6 +1155,9 @@ _RETRYABLE_ERROR_PATTERNS = (
     "network",
     "broken pipe",
     "remotedisconnected",
+    "serverdisconnected",
+    "server disconnected",
+    "clientconnectionerror",
     "eoferror",
 )
 
