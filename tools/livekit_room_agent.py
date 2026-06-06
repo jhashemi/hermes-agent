@@ -28,6 +28,10 @@ import aiohttp
 
 logger = logging.getLogger("livekit_room_agent")
 
+# Energy threshold for "speech" detection on int16 PCM samples.
+# 200 / 32768 ≈ 0.6% of full scale — picks up normal speech, ignores DC noise.
+_SPEECH_ENERGY_THRESHOLD = 200
+
 
 @dataclasses.dataclass
 class AudioFrameBuffer:
@@ -45,9 +49,10 @@ class AudioFrameBuffer:
 
     def append(self, pcm: bytes) -> None:
         self._buf.extend(pcm)
-        # Cheap energy check: max abs sample > 200 = "speech"
+        # Cheap energy check: max abs sample > _SPEECH_ENERGY_THRESHOLD = "speech"
         has_speech = any(
-            abs(int.from_bytes(pcm[i:i + 2], "little", signed=True)) > 200
+            abs(int.from_bytes(pcm[i:i + 2], "little", signed=True))
+            > _SPEECH_ENERGY_THRESHOLD
             for i in range(0, len(pcm) - 1, 2)
             if i + 2 <= len(pcm)
         )

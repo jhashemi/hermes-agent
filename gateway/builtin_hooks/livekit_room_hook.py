@@ -16,6 +16,10 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 logger = logging.getLogger("livekit_room_hook")
 
+_TOKEN_TTL_SECS = 3600           # 1-hour participant JWT
+_SIDECAR_KILL_TIMEOUT_SECS = 5   # grace period after SIGTERM before SIGKILL
+_IDENTITY_CHAT_ID_PREFIX_LEN = 16  # truncate chat_id when forming bot identity
+
 
 def parse_voice_command(text: str) -> Optional[Tuple[str, Optional[str]]]:
     """Parse '/voice <subcommand> [arg]' into (subcommand, arg) or None.
@@ -66,8 +70,8 @@ class LiveKitRoomController:
             token = mint_participant_token(
                 cfg,
                 room_name=room,
-                identity=f"hermes-bot-{chat_id[:16]}",
-                ttl_seconds=3600,
+                identity=f"hermes-bot-{chat_id[:_IDENTITY_CHAT_ID_PREFIX_LEN]}",
+                ttl_seconds=_TOKEN_TTL_SECS,
             )
 
             proc = await asyncio.create_subprocess_exec(
@@ -99,7 +103,7 @@ class LiveKitRoomController:
                 return {"status": "not_active"}
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=_SIDECAR_KILL_TIMEOUT_SECS)
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
@@ -131,6 +135,7 @@ from gateway.builtin_hooks.voice_agent_hook import (  # noqa: E402
     GatewayMessageHook,
     get_hook_manager,
 )
+from gateway.error_response import ErrorResponse  # noqa: E402
 from gateway.platforms.base import MessageEvent  # noqa: E402
 
 
@@ -139,7 +144,7 @@ class LiveKitRoomHook(GatewayMessageHook):
 
     async def before_message_processing(
         self, event: MessageEvent, gateway_runner: Any
-    ) -> Optional[Union[str, Any]]:
+    ) -> Optional[Union[str, ErrorResponse]]:
         text = (
             getattr(event, "text_content", None)
             or getattr(event, "text", None)

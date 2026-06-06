@@ -101,3 +101,38 @@ async def test_status_reports_active_room():
 
     other = await ctrl.status(chat_id="999")
     assert other["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_hook_returns_config_error_when_env_missing(monkeypatch):
+    """When /voice join arrives but LIVEKIT_URL etc. are unset, the hook
+    must return a 'LiveKit not configured' string (not raise).
+    """
+    from gateway.builtin_hooks.livekit_room_hook import LiveKitRoomHook
+
+    for var in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        monkeypatch.delenv(var, raising=False)
+
+    fake_event = mock.MagicMock()
+    fake_event.text_content = "/voice join"
+    fake_event.chat_id = "445462521"
+
+    hook = LiveKitRoomHook()
+    result = await hook.before_message_processing(fake_event, gateway_runner=None)
+
+    assert isinstance(result, str)
+    assert result.startswith("LiveKit not configured"), result
+
+
+@pytest.mark.asyncio
+async def test_hook_passes_through_non_voice_messages():
+    """Plain user messages must NOT be intercepted (return None = pass through)."""
+    from gateway.builtin_hooks.livekit_room_hook import LiveKitRoomHook
+
+    fake_event = mock.MagicMock()
+    fake_event.text_content = "hello world"
+    fake_event.chat_id = "445462521"
+
+    hook = LiveKitRoomHook()
+    result = await hook.before_message_processing(fake_event, gateway_runner=None)
+    assert result is None

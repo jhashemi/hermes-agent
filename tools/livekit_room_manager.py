@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 ROOM_PREFIX = "hermes-"
 ROOM_HASH_LEN = 16  # 64 bits — enough to avoid collisions for any plausible chat_id volume
+_ROOM_EMPTY_TIMEOUT_SECS = 300  # auto-close empty room after 5 min idle
 
 
 @dataclasses.dataclass(frozen=True)
@@ -107,7 +108,7 @@ async def ensure_room(cfg: LiveKitConfig, room_name: str, max_participants: int 
                 lk_api.CreateRoomRequest(
                     name=room_name,
                     max_participants=max_participants,
-                    empty_timeout=300,  # auto-close after 5 min idle
+                    empty_timeout=_ROOM_EMPTY_TIMEOUT_SECS,
                 )
             )
             logger.info("Created LiveKit room %s", room_name)
