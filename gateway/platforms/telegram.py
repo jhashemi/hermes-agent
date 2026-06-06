@@ -264,6 +264,57 @@ def _wrap_markdown_tables(text: str) -> str:
     return '\n'.join(out)
 
 
+async def _try_handle_skill_file(adapter, event, msg) -> bool:
+    """ADR-009: download a .skill document and route through install_skill_file().
+
+    Returns True if the file was handled (regardless of install verdict — the
+    user-facing message is set on `event.text` either way). Returns False only
+    if the document could not be fetched.
+    """
+    try:
+        from tools.skill_file_install import install_skill_file
+    except Exception as e:
+        logger.warning("[Telegram] skill install pipeline unavailable: %s", e)
+        return False
+
+    doc = msg.document
+    original_filename = doc.file_name or "untitled.skill"
+    sender_id = ""
+    try:
+        if msg.from_user is not None:
+            sender_id = str(msg.from_user.id)
+    except Exception:
+        pass
+
+    try:
+        file_obj = await doc.get_file()
+        payload = bytes(await file_obj.download_as_bytearray())
+    except Exception as e:
+        logger.warning("[Telegram] could not download .skill file: %s", e, exc_info=True)
+        return False
+
+    try:
+        report = install_skill_file(
+            payload=payload,
+            filename=original_filename,
+            sender_id=sender_id,
+            platform="telegram",
+        )
+    except Exception as e:
+        logger.exception("[Telegram] install_skill_file unexpected failure: %s", e)
+        event.text = f"❌ Skill install failed: {e}"
+        await adapter.handle_message(event)
+        return True
+
+    event.text = report.user_message
+    logger.info(
+        "[Telegram] .skill verdict=%s sender=%s filename=%s",
+        report.verdict, sender_id, original_filename,
+    )
+    await adapter.handle_message(event)
+    return True
+
+
 class TelegramAdapter(BasePlatformAdapter):
     """
     Telegram bot adapter.
@@ -3778,6 +3829,14 @@ class TelegramAdapter(BasePlatformAdapter):
                     logger.info("[Telegram] Cached user video document at %s", cached_path)
                     await self.handle_message(event)
                     return
+
+                # ADR-009: route .skill files to the install pipeline before
+                # the generic SUPPORTED_DOCUMENT_TYPES check. The pipeline
+                # runs a security scan and only installs if it passes.
+                if ext == ".skill" or (original_filename and original_filename.lower().endswith(".skill")):
+                    handled = await _try_handle_skill_file(self, event, msg)
+                    if handled:
+                        return
 
                 # Check if supported
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
