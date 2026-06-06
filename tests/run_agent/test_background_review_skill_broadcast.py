@@ -47,6 +47,12 @@ def _install_fake_skills_broadcast(monkeypatch, tmp_path: Path, calls: list):
 
     fake.cmd_publish = fake_cmd_publish  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "tools.skills_broadcast", fake)
+    # Also replace the attribute on the ``tools`` package so that
+    # ``from tools import skills_broadcast`` (used inside the production
+    # broadcast hook) resolves to our fake even when ``tools`` was already
+    # imported earlier in the test session.
+    import tools as _tools_pkg
+    monkeypatch.setattr(_tools_pkg, "skills_broadcast", fake, raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +144,12 @@ def test_broadcast_skill_actions_swallows_publish_failure(monkeypatch, tmp_path)
 
     fake.cmd_publish = boom  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "tools.skills_broadcast", fake)
+    # Also replace the attribute on the ``tools`` package so that
+    # ``from tools import skills_broadcast`` (used inside the production
+    # broadcast hook) resolves to our fake even when ``tools`` was already
+    # imported earlier in the test session.
+    import tools as _tools_pkg
+    monkeypatch.setattr(_tools_pkg, "skills_broadcast", fake, raising=False)
     monkeypatch.setattr(run_agent_module.threading, "Thread", _ImmediateThread)
 
     skill_dir = tmp_path / "explody"
