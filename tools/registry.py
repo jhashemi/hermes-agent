@@ -390,6 +390,65 @@ class ToolRegistry:
             return json.dumps({"error": f"Tool execution failed: {type(e).__name__}: {e}"})
 
     # ------------------------------------------------------------------
+    # Skill tool integration  (VOICE-TOOL-04)
+    # ------------------------------------------------------------------
+
+    def register_skill_tools(self, skills_dir) -> List[str]:
+        """Register all tools discovered in SKILL.md files under ``skills_dir``.
+
+        Calls ``tools.skill_tool_discovery.discover_skill_tools()`` to find
+        tools declared in skill frontmatter, then registers each one via
+        :meth:`register`. Tools that would shadow an existing tool with a
+        different toolset are rejected by ``register`` and skipped here.
+
+        Args:
+            skills_dir: Path to a directory containing skill subdirectories
+                (e.g. ``~/.hermes/skills/`` or a test fixture directory).
+
+        Returns:
+            List of tool names that were successfully registered. Names that
+            failed schema/handler validation or were rejected by the registry
+            (e.g. duplicate-name shadow) are NOT included.
+        """
+        from pathlib import Path as _Path
+        try:
+            from tools.skill_tool_discovery import discover_skill_tools
+        except ImportError:
+            logger.debug("skill_tool_discovery unavailable; skipping skill tool registration")
+            return []
+
+        registered: List[str] = []
+        for _skill_name, tool_entry in discover_skill_tools(_Path(skills_dir)):
+            tool_name = tool_entry["name"]
+            # Snapshot existing entry to detect register() rejection-without-raise.
+            existing_before = self._tools.get(tool_name)
+            self.register(
+                name=tool_entry["name"],
+                toolset=tool_entry["toolset"],
+                schema=tool_entry["schema"],
+                handler=tool_entry["handler"],
+                check_fn=tool_entry.get("check_fn"),
+                requires_env=tool_entry.get("requires_env"),
+                is_async=tool_entry.get("is_async", False),
+                description=tool_entry.get("description", ""),
+                emoji=tool_entry.get("emoji", ""),
+                max_result_size_chars=tool_entry.get("max_result_size_chars"),
+            )
+            after = self._tools.get(tool_name)
+            # Registration succeeded if the entry now points to our handler
+            # (either newly added, or replaced an entry from the same toolset).
+            if after is not None and after.handler is tool_entry["handler"]:
+                registered.append(tool_name)
+            else:
+                # register() rejected the shadow; keep the original entry.
+                logger.debug(
+                    "Skill tool '%s' rejected (would shadow existing toolset '%s')",
+                    tool_name,
+                    existing_before.toolset if existing_before else "<unknown>",
+                )
+        return registered
+
+    # ------------------------------------------------------------------
     # Query helpers  (replace redundant dicts in model_tools.py)
     # ------------------------------------------------------------------
 
