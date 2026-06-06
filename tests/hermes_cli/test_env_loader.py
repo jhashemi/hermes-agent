@@ -70,6 +70,52 @@ def test_user_env_takes_precedence_over_project_env(tmp_path, monkeypatch):
     assert os.getenv("OPENAI_API_KEY") == "project-key"
 
 
+def test_voice_twins_env_fills_missing_without_overriding(tmp_path, monkeypatch):
+    """ADR-013: ~/.env.voice_twins is loaded as a no-override third tier.
+
+    Voice-twin credentials (LIVEKIT_*, RESEMBLE_*, DEEPGRAM_*) defined in
+    that file should fill missing keys without clobbering values already
+    set by ~/.hermes/.env (which remains authoritative).
+    """
+    home = tmp_path / "hermes"
+    home.mkdir()
+    user_env = home / ".env"
+    user_env.write_text("LIVEKIT_URL=wss://user.example\n", encoding="utf-8")
+
+    voice_twins = tmp_path / ".env.voice_twins"
+    voice_twins.write_text(
+        "LIVEKIT_URL=wss://voicetwins.example\n"  # should NOT override user_env
+        "LIVEKIT_API_KEY=voicetwins-key\n"          # should fill missing
+        "LIVEKIT_API_SECRET=voicetwins-secret\n",   # should fill missing
+        encoding="utf-8",
+    )
+
+    monkeypatch.delenv("LIVEKIT_URL", raising=False)
+    monkeypatch.delenv("LIVEKIT_API_KEY", raising=False)
+    monkeypatch.delenv("LIVEKIT_API_SECRET", raising=False)
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    assert loaded == [user_env, voice_twins]
+    # User env wins for the conflicting key.
+    assert os.getenv("LIVEKIT_URL") == "wss://user.example"
+    # Voice-twins fills missing keys.
+    assert os.getenv("LIVEKIT_API_KEY") == "voicetwins-key"
+    assert os.getenv("LIVEKIT_API_SECRET") == "voicetwins-secret"
+
+
+def test_voice_twins_env_absent_is_silent(tmp_path):
+    """Loader must not error or include voice_twins path when file is missing."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    (home / ".env").write_text("FOO=bar\n", encoding="utf-8")
+
+    loaded = load_hermes_dotenv(hermes_home=home)
+
+    # No voice-twins file in tmp_path → only the user .env loaded.
+    assert loaded == [home / ".env"]
+
+
 def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
     home = tmp_path / "hermes"
     home.mkdir()
