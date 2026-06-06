@@ -46,12 +46,15 @@ async def initialize_builtin_hooks():
     except Exception as e:
         logger.error(f"[hooks] ✗ Failed to register voice hook: {e}")
     
-    # Future hooks can be registered here
-    # try:
-    #     register_some_other_hook()
-    #     logger.info("[hooks] ✓ Other hook registered")
-    # except Exception as e:
-    #     logger.error(f"[hooks] ✗ Failed to register other hook: {e}")
+    # Register LiveKit room hook (ADR-013)
+    try:
+        from gateway.builtin_hooks.livekit_room_hook import (
+            register_builtin_hooks as register_livekit_hooks,
+        )
+        register_livekit_hooks()
+        logger.info("[hooks] ✓ LiveKit room hook registered (channel-agnostic /voice)")
+    except Exception as e:
+        logger.error(f"[hooks] ✗ Failed to register LiveKit room hook: {e}")
     
     logger.info("[hooks] Initialization complete")
 
