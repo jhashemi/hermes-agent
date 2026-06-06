@@ -423,6 +423,25 @@ def install_skill_file(
             "[skill_install] INSTALL skill=%s sender=%s verdict=%s path=%s",
             bundle.name, sender_id, report.verdict, install_path,
         )
+        # --- Cluster broadcast: propagate new install to all peer nodes ---
+        # Fire-and-forget in a background thread; never block the caller.
+        # Loop guard: skip broadcasting when this install ITSELF came from NATS.
+        if platform != "nats" and report.verdict in ("safe", "pass"):
+            try:
+                import threading
+                from tools.skills_broadcast import cmd_publish, SKILLS_DIR
+                import asyncio
+                def _broadcast():
+                    skill_dir = SKILLS_DIR / bundle.name
+                    if skill_dir.exists():
+                        try:
+                            asyncio.run(cmd_publish(skill_dir))
+                            logger.info("[skill_install] broadcast queued for %s", bundle.name)
+                        except Exception as be:
+                            logger.warning("[skill_install] broadcast failed for %s: %s", bundle.name, be)
+                threading.Thread(target=_broadcast, daemon=True, name=f"broadcast-{bundle.name}").start()
+            except Exception as be:
+                logger.warning("[skill_install] broadcast setup failed: %s", be)
         return report
 
     except Exception as e:

@@ -1180,6 +1180,63 @@ class WhatsAppAdapter(BasePlatformAdapter):
             if data.get("isGroup"):
                 body = self._clean_bot_mention_text(body, data)
             MAX_TEXT_INJECT_BYTES = 100 * 1024
+
+            # ADR-009: route .skill files to the install pipeline BEFORE the
+            # generic text-injection branch. Mirrors telegram.py:3836 and
+            # discord.py:4240. WhatsApp bridge has already downloaded the
+            # document to a local path on disk; we read that path's bytes
+            # and feed them to install_skill_file().
+            if msg_type == MessageType.DOCUMENT and cached_urls:
+                for doc_path in list(cached_urls):
+                    fname = Path(doc_path).name
+                    # Bridge prefixes downloads with `doc_<hex>_<original>` —
+                    # the original name (with `.skill`) lives at the tail.
+                    original_name = fname
+                    if "_" in fname:
+                        parts = fname.split("_", 2)
+                        if len(parts) >= 3:
+                            original_name = parts[2]
+                    if not original_name.lower().endswith(".skill"):
+                        continue
+                    try:
+                        from tools.skill_file_install import install_skill_file
+                    except Exception as e:
+                        logger.warning("[WhatsApp] skill install pipeline unavailable: %s", e)
+                        break
+                    try:
+                        payload = Path(doc_path).read_bytes()
+                    except Exception as e:
+                        logger.warning("[WhatsApp] could not read .skill payload at %s: %s", doc_path, e)
+                        break
+                    sender_id = str(data.get("senderId") or data.get("chatId") or "")
+                    try:
+                        report = install_skill_file(
+                            payload=payload,
+                            filename=original_name,
+                            sender_id=sender_id,
+                            platform="whatsapp",
+                        )
+                    except Exception as e:
+                        logger.exception("[WhatsApp] install_skill_file unexpected failure: %s", e)
+                        return MessageEvent(
+                            text=f"❌ Skill install failed: {e}",
+                            message_type=MessageType.TEXT,
+                            source=source,
+                            raw_message=data,
+                            message_id=data.get("messageId"),
+                        )
+                    logger.info(
+                        "[WhatsApp] .skill verdict=%s sender=%s filename=%s",
+                        report.verdict, sender_id, original_name,
+                    )
+                    return MessageEvent(
+                        text=report.user_message,
+                        message_type=MessageType.TEXT,
+                        source=source,
+                        raw_message=data,
+                        message_id=data.get("messageId"),
+                    )
+
             if msg_type == MessageType.DOCUMENT and cached_urls:
                 for doc_path in cached_urls:
                     ext = Path(doc_path).suffix.lower()
