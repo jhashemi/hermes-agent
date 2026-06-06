@@ -36,6 +36,11 @@ def kanban_home(tmp_path, monkeypatch):
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # Clear dispatcher-injected env vars so tests use the tmp_path DB, not the
+    # live kanban board (HERMES_KANBAN_DB is set when running inside a worker).
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
     kb.init_db()
     return home
 
@@ -1217,6 +1222,10 @@ def test_known_assignees_merges_disk_and_board(tmp_path, monkeypatch):
     profiles = tmp_path / ".hermes" / "profiles"
     profiles.mkdir(parents=True)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
+    # Clear dispatcher-injected env vars to avoid connecting to the live board.
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
 
     for name in ("researcher", "writer"):
         d = profiles / name
@@ -3951,3 +3960,151 @@ def test_reclaim_task_clears_failure_counter(kanban_home):
         assert task.status == "ready"
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# dispatch_once_free: task-tree unfolding (Gap G-S5-H1-1 remediation)
+# ---------------------------------------------------------------------------
+
+def _noop_spawn(task, workspace):
+    """Spawn stub that does nothing and returns no PID."""
+    return None
+
+
+def test_dispatch_once_free_single_task_tree_depth_zero(kanban_home, all_assignees_spawnable):
+    """Single ready task with no children -> tree_depth = 0 (backward compat)."""
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="solo", assignee="alice")
+        kb.recompute_ready(conn)
+        res = kb.dispatch_once_free(conn, spawn_fn=_noop_spawn, dry_run=True)
+        assert res.tree_depth == 0
+        assert len(res.spawned) == 1
+        assert res.spawned[0][0] == t
+    finally:
+        conn.close()
+
+
+def test_dispatch_once_free_depth_3_dag_selects_deepest_path(kanban_home, all_assignees_spawnable):
+    """DAG root->mid->leaf (depth 3): dispatch_once_free picks root (most descendants),
+    and tree_depth reflects the full depth = 2."""
+    conn = kb.connect()
+    try:
+        # Build: root (ready) -> mid (todo, parents=[root]) -> leaf (todo, parents=[mid])
+        root = kb.create_task(conn, title="root", assignee="alice")
+        mid = kb.create_task(conn, title="mid", assignee="alice", parents=[root])
+        leaf = kb.create_task(conn, title="leaf", assignee="alice", parents=[mid])
+        # Only root is ready (mid/leaf blocked by parents).
+        kb.recompute_ready(conn)
+        root_task = kb.get_task(conn, root)
+        assert root_task.status == "ready"
+
+        # Add a separate shallow task (no children) so there are multiple ready tasks.
+        shallow = kb.create_task(conn, title="shallow", assignee="alice")
+        kb.recompute_ready(conn)
+
+        spawned_ids = []
+        def _capture_spawn(task, workspace):
+            spawned_ids.append(task.id)
+            return None
+
+        res = kb.dispatch_once_free(conn, spawn_fn=_capture_spawn)
+        # root has 2 descendants (mid + leaf), shallow has 0.
+        # dispatch_once_free should prefer root.
+        assert res.tree_depth >= 2, f"Expected tree_depth >= 2, got {res.tree_depth}"
+        assert root in spawned_ids, f"Expected root to be dispatched, got {spawned_ids}"
+    finally:
+        conn.close()
+
+
+def test_dispatch_once_free_tree_depth_ge_2_on_multi_task_dag(kanban_home, all_assignees_spawnable):
+    """Validates the KR threshold: a multi-level DAG yields tree_depth >= 2."""
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", assignee="alice")
+        mid = kb.create_task(conn, title="mid", assignee="alice", parents=[root])
+        leaf = kb.create_task(conn, title="leaf", assignee="alice", parents=[mid])
+        kb.recompute_ready(conn)
+
+        res = kb.dispatch_once_free(conn, spawn_fn=_noop_spawn)
+        assert res.tree_depth >= 2, (
+            f"KR kr_s5_h1_1 requires tree_depth >= 2 for multi-level DAGs, "
+            f"got {res.tree_depth}"
+        )
+    finally:
+        conn.close()
+
+
+def test_dispatch_once_free_backward_compat_no_dag(kanban_home, all_assignees_spawnable):
+    """Two flat ready tasks with no parent-child links -> tree_depth = 0, still
+    dispatches one of them (same behavior as dispatch_once)."""
+    conn = kb.connect()
+    try:
+        a = kb.create_task(conn, title="a", assignee="alice")
+        b = kb.create_task(conn, title="b", assignee="alice")
+        kb.recompute_ready(conn)
+
+        res = kb.dispatch_once_free(conn, spawn_fn=_noop_spawn, max_spawn=1)
+        assert res.tree_depth == 0, (
+            f"Flat board (no DAG) should have tree_depth=0, got {res.tree_depth}"
+        )
+        assert len(res.spawned) == 1
+    finally:
+        conn.close()
+
+
+def test_dispatch_once_free_dispatch_result_has_tree_depth_field(kanban_home):
+    """DispatchResult must expose tree_depth attribute."""
+    dr = kb.DispatchResult()
+    assert hasattr(dr, "tree_depth"), "DispatchResult missing tree_depth field"
+    assert dr.tree_depth == 0
+
+
+def test_dispatch_once_existing_tests_still_pass_via_free(kanban_home):
+    """dispatch_once_free on an empty board behaves like dispatch_once (no crash,
+    no spawns, result is empty)."""
+    conn = kb.connect()
+    try:
+        res = kb.dispatch_once_free(conn, spawn_fn=_noop_spawn)
+        assert res.spawned == []
+        assert res.tree_depth == 0
+    finally:
+        conn.close()
+
+
+def test_dispatch_once_free_dry_run(kanban_home, all_assignees_spawnable):
+    """dry_run=True returns spawned list without actually claiming tasks."""
+    conn = kb.connect()
+    try:
+        t = kb.create_task(conn, title="task", assignee="alice")
+        kb.recompute_ready(conn)
+        res = kb.dispatch_once_free(conn, dry_run=True)
+        assert len(res.spawned) == 1
+        assert res.spawned[0][0] == t
+        # Task should still be ready (not claimed) after dry_run.
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+    finally:
+        conn.close()
+
+
+def test_build_task_subtree_depth_3(kanban_home):
+    """_build_task_subtree returns correct depth and descendant_count."""
+    conn = kb.connect()
+    try:
+        root = kb.create_task(conn, title="root", assignee="alice")
+        mid = kb.create_task(conn, title="mid", assignee="alice", parents=[root])
+        leaf = kb.create_task(conn, title="leaf", assignee="alice", parents=[mid])
+        kb.recompute_ready(conn)
+
+        info = kb._build_task_subtree(conn, [root])
+        # root at depth 0, mid at depth 1, leaf at depth 2
+        assert info[root]["depth"] == 0
+        assert info[mid]["depth"] == 1
+        assert info[leaf]["depth"] == 2
+        # root should have descendant_count >= 1 (mid at minimum)
+        assert info[root]["descendant_count"] >= 1
+    finally:
+        conn.close()
+

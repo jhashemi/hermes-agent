@@ -260,6 +260,79 @@ def test_has_access_with_message_event_unknown():
     result = mgr.has_access(event)
     assert result is False
 
+# ============================================================================
+# P1-RCA: Telegram numeric ID access denied
+# Tests that Telegram users (identified by numeric ID) can access
+# restricted commands when their numeric ID is in the whitelist.
+# ============================================================================
+
+def test_telegram_numeric_id_has_access():
+    """Test that a Telegram user identified by numeric ID has access
+    when that numeric ID is in the whitelist.
+
+    RCA: get_user_id() for Telegram returns str(numeric_id) like '445462521',
+    but DEFAULT_WHITELIST contains username strings like 'taylor_swanson'.
+    The types never match, so all Telegram users get Access Denied.
+    """
+    mgr = AccessControlManager()
+    # Simulate Telegram: source.user_id is a numeric string
+    mgr.grant_access("445462521")  # Telegram numeric user ID
+
+    event = Mock(spec=MessageEvent)
+    source = Mock()
+    source.user_id = "445462521"
+    source.chat_id = "445462521"
+    event.source = source
+    event.user_id = None  # Telegram uses source.user_id, not event.user_id
+    event.chat_id = None
+
+    result = mgr.has_access(event)
+    assert result is True, "Telegram user with numeric ID in whitelist should have access"
+
+
+def test_telegram_numeric_id_denied_when_not_in_whitelist():
+    """Test that a Telegram user NOT in the whitelist is denied access."""
+    mgr = AccessControlManager()
+
+    event = Mock(spec=MessageEvent)
+    source = Mock()
+    source.user_id = "999999999"  # Not in whitelist
+    source.chat_id = "999999999"
+    event.source = source
+    event.user_id = None
+    event.chat_id = None
+
+    result = mgr.has_access(event)
+    assert result is False, "Telegram user not in whitelist should be denied"
+
+
+def test_whatsoever_numeric_id_in_default_whitelist():
+    """Test that a numeric ID added to DEFAULT_WHITELIST is recognized.
+
+    This is the REGRESSION GUARD: after the fix, if we add Telegram user IDs
+    to the default whitelist, has_access must work for those users.
+    """
+    # Add to DEFAULT_WHITELIST temporarily for test
+    from gateway.access_control import DEFAULT_WHITELIST
+    original = set(DEFAULT_WHITELIST)
+    try:
+        DEFAULT_WHITELIST.add("445462521")
+        mgr = AccessControlManager()  # Reloads from DEFAULT_WHITELIST
+
+        event = Mock(spec=MessageEvent)
+        source = Mock()
+        source.user_id = "445462521"
+        source.chat_id = "445462521"
+        event.source = source
+        event.user_id = None
+        event.chat_id = None
+
+        result = mgr.has_access(event)
+        assert result is True, "Numeric ID in DEFAULT_WHITELIST should grant access"
+    finally:
+        DEFAULT_WHITELIST.clear()
+        DEFAULT_WHITELIST.update(original)
+
 
 # ============================================================================
 # Test: get_user_id from MessageEvent

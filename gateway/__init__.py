@@ -17,13 +17,19 @@ from .session import (
     build_session_context_prompt,
 )
 from .delivery import DeliveryRouter, DeliveryTarget
-from .vcg_dispatcher import (
-    VCGDispatcher,
-    VCGAgent,
-    VCGNode,
-    TaskAllocationResult,
-    HealthState,
-)
+
+# VCG runtime is in hermes-orchestration package; lazy import so the
+# gateway can start even if the package is not installed.
+try:
+    from .vcg_dispatcher import (
+        VCGDispatcher,
+        VCGAgent,
+        VCGNode,
+        TaskAllocationResult,
+        HealthState,
+    )
+except ImportError:
+    VCGDispatcher = VCGAgent = VCGNode = TaskAllocationResult = HealthState = None
 
 __all__ = [
     # Config

@@ -1404,13 +1404,27 @@ class SessionDB:
         Returns the value unchanged when it's already a safe scalar, or a
         sentinel-prefixed JSON string for lists/dicts. Paired with
         :meth:`_decode_content` on read.
+
+        β₆ INVARIANT (S3/H1) — decode ∘ encode = id holds for any
+        JSON-serializable content (None / str / bytes / int / float / list of
+        primitives / dict of primitives). For non-JSON-safe objects the
+        fallback ``str(content)`` is intentionally lossy: sqlite cannot
+        represent arbitrary Python objects, and silent pickle-serialization
+        would be a security footgun. Callers MUST stick to JSON-serializable
+        content; ``logger.warning`` fires when fallback is hit.
         """
         if content is None or isinstance(content, (str, bytes, int, float)):
             return content
         try:
             return cls._CONTENT_JSON_PREFIX + json.dumps(content)
         except (TypeError, ValueError):
-            # Last-resort fallback: stringify so persistence never fails.
+            logger.warning(
+                "hermes_state._encode_content: non-JSON-serializable content "
+                "encountered (type=%s); falling back to str() — round-trip is "
+                "LOSSY for this value. β₆ invariant only holds for JSON-safe "
+                "content.",
+                type(content).__name__,
+            )
             return str(content)
 
     @classmethod

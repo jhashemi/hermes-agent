@@ -3354,6 +3354,13 @@ class GatewayRunner:
         # Discover and load event hooks
         self.hooks.discover_and_load()
 
+        # Initialize builtin voice-agent message interceptor hooks
+        try:
+            from gateway.builtin_hooks import initialize_builtin_hooks
+            await initialize_builtin_hooks()
+        except Exception as e:
+            logger.warning(f"[gateway] Builtin hook init skipped: {e}")
+
         
         # Recover background processes from checkpoint (crash recovery)
         try:
@@ -4197,7 +4204,7 @@ class GatewayRunner:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
-                return _kb.dispatch_once(
+                return _kb.dispatch_once_free(
                     conn,
                     board=slug,
                     max_spawn=max_spawn,
@@ -5797,6 +5804,18 @@ class GatewayRunner:
             else:
                 self._pending_messages[_quick_key] = event.text
             return None
+
+        # ── Voice agent message interceptor (channel-agnostic) ──
+        # Try builtin hooks before command dispatch. If a hook (e.g. voice
+        # agent interceptor) returns a non-None response, the message is
+        # fully handled and we short-circuit the rest of the pipeline.
+        try:
+            from gateway.builtin_hooks import get_hook_manager
+            _hook_result = await get_hook_manager().before_message_processing(event, self)
+            if _hook_result is not None:
+                return _hook_result
+        except Exception as _hook_exc:
+            logger.debug("builtin hook dispatch failed (non-fatal): %s", _hook_exc)
 
         # Check for commands
         command = event.get_command()

@@ -202,6 +202,44 @@ def _is_arcee_trinity_thinking(model: Optional[str]) -> bool:
     return bare == "trinity-large-thinking"
 
 
+def _is_claude_opus_4_6_or_7(model: Optional[str]) -> bool:
+    """True for Claude Opus 4.6 / 4.7 / 4.8 across all routes (Anthropic, Bedrock, OpenRouter, Vertex).
+
+    Matches versioned IDs like:
+      - ``anthropic/claude-opus-4.7``
+      - ``us.anthropic.claude-opus-4-7-20251001-v1:0`` (Bedrock cross-region)
+      - ``anthropic.claude-opus-4-6-20250514-v1:0``    (Bedrock direct)
+      - ``claude-opus-4-7``                            (native Anthropic)
+      - ``us.anthropic.claude-opus-4-8-20251001-v1:0`` (Bedrock cross-region)
+    """
+    bare = (model or "").strip().lower()
+    if not bare:
+        return False
+    # Normalise separators so dot/dash/version-suffix all collapse.
+    normalised = bare.replace(".", "-")
+    return (
+        ("claude-opus-4-8" in normalised)
+        or ("claude-opus-4-7" in normalised)
+        or ("claude-opus-4-6" in normalised)
+    )
+
+
+def _is_glm_5(model: Optional[str]) -> bool:
+    """True for GLM-5.x models (Z.AI / Nvidia route, e.g. ``z-ai/glm-5.1``).
+
+    Matches ``glm-5`` only when it appears as a standalone model family,
+    NOT as a substring of unrelated names like ``chatglm-5b``.
+    """
+    bare = (model or "").strip().lower().replace(".", "-")
+    if not bare:
+        return False
+    # Must be "glm-5" as a standalone segment — preceded by / or start-of-string
+    # This avoids matching "chatglm-5b" which contains "glm-5" as substring.
+    parts = bare.split("/")
+    model_name = parts[-1]  # take the last segment after provider prefix
+    return model_name.startswith("glm-5")
+
+
 def _fixed_temperature_for_model(
     model: Optional[str],
     base_url: Optional[str] = None,
@@ -236,6 +274,19 @@ def _compression_threshold_for_model(model: Optional[str]) -> Optional[float]:
     """
     if _is_arcee_trinity_thinking(model):
         return 0.75
+    if _is_claude_opus_4_6_or_7(model):
+        # Opus 4.6/4.7 is extremely expensive (~$15/MTok input, $75/MTok output)
+        # and Anthropic's prompt-caching is most effective when context grows
+        # incrementally on cache hits. Compress at 40% of the 1M window
+        # (~400K tokens) to: (1) preserve cache prefixes longer, (2) avoid
+        # re-paying for full-context replays, (3) stay well clear of the
+        # cliff where summarisation forces a cold cache.
+        return 0.40
+    if _is_glm_5(model):
+        # GLM-5.1 has a 203K context window. Compress at 70%
+        # (~142K tokens) to maximise the usable window while still
+        # triggering compression before the hard context limit.
+        return 0.70
     return None
 
 # Default auxiliary models for direct API-key providers (cheap/fast for side tasks)

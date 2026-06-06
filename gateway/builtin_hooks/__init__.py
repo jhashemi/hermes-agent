@@ -1,5 +1,5 @@
 """
-Builtin Gateway Hooks - Extensible Message Processing
+Builtin Gateway Hooks - Channel-Agnostic Message Interception
 
 Provides a hook mechanism for message interception without modifying
 core platform adapters. Follows SOLID design principles.
@@ -8,15 +8,14 @@ Hooks are registered at gateway startup and can be added/removed dynamically.
 Each hook implements GatewayMessageHook interface and is responsible for
 deciding whether to intercept or pass through messages.
 
-Example hook:
-    class MyHook(GatewayMessageHook):
-        async def before_message_processing(self, event, gateway_runner):
-            if my_condition(event):
-                return my_response
-            return None
-    
-    manager = get_hook_manager()
-    manager.register_hook(MyHook())
+The voice agent interceptor handles:
+- /load-{agent} commands → create voice session
+- /voice-agents → list available agents  
+- /voice-disconnect → disconnect from agent
+- Audio messages with active voice session → transcribe + respond
+
+All hooks are channel-agnostic: work identically across Telegram,
+WhatsApp, Discord, Signal, and other platforms.
 """
 
 import logging
@@ -28,10 +27,10 @@ async def initialize_builtin_hooks():
     """
     Initialize all builtin gateway hooks.
     
-    Called once at gateway startup in gateway/run.py.
+    Called once at gateway startup in GatewayRunner.__init__().
     
     Registers:
-    - Voice agent message interceptor
+    - Voice agent message interceptor (channel-agnostic)
     - (Future hooks can be added here without modifying core code)
     """
     from gateway.builtin_hooks.voice_agent_hook import (
@@ -43,7 +42,7 @@ async def initialize_builtin_hooks():
     # Register voice agent hook
     try:
         register_voice_hooks()
-        logger.info("[hooks] ✓ Voice agent hook registered")
+        logger.info("[hooks] ✓ Voice agent hook registered (channel-agnostic)")
     except Exception as e:
         logger.error(f"[hooks] ✗ Failed to register voice hook: {e}")
     
@@ -59,4 +58,11 @@ async def initialize_builtin_hooks():
 
 __all__ = [
     "initialize_builtin_hooks",
+    "get_hook_manager",
 ]
+
+
+def get_hook_manager():
+    """Convenience re-export of the hook manager for run.py."""
+    from gateway.builtin_hooks.voice_agent_hook import get_hook_manager as _gm
+    return _gm()

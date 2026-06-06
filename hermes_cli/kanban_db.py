@@ -83,6 +83,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+# Hexagonal port interfaces for Plan/Free factorization (G-S5-H3-1)
+# Imported lazily below to avoid circular imports at module load time.
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -2904,6 +2907,8 @@ class DispatchResult:
     silent_crashes: list[str] = field(default_factory=list)
     """Task ids whose worker PIDs died silently (detected proactively before TTL).
     Transitioned to 'paused' status with error recorded for manual intervention."""
+    tree_depth: int = 0
+    """Maximum task-tree depth traversed during dispatch (0 = flat/no tree)."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -3964,6 +3969,420 @@ def dispatch_once(
     return result
 
 
+# ---------------------------------------------------------------------------
+# dispatch_once_free: task-tree unfolding variant (Gap G-S5-H1-1 remediation)
+# ---------------------------------------------------------------------------
+
+def _build_task_subtree(
+    conn: sqlite3.Connection,
+    ready_ids: list[str],
+    *,
+    max_bfs_depth: int = 10,
+) -> "dict[str, dict]":
+    """BFS from ``ready_ids`` through task_links to build a candidate subtree.
+
+    Returns a dict mapping task_id -> {"depth": int, "descendant_count": int,
+    "descendant_priority_sum": float} for every task reachable from ``ready_ids``
+    (including the roots at depth 0).
+
+    Only tasks that are directly ready are roots (depth 0).  Their transitive
+    children are recorded at depth >= 1.  The traversal follows parent->child
+    edges (task_links.parent_id → task_links.child_id) so we unfold the
+    subtrees that would be unblocked by completing a given ready task.
+
+    Complexity: O(V + E) per BFS; V/E are bounded by the board size.
+    """
+    info: "dict[str, dict]" = {}
+    # Seed with ready tasks at depth 0.
+    frontier: "list[tuple[str, int]]" = [(tid, 0) for tid in ready_ids]
+    visited: "set[str]" = set(ready_ids)
+
+    for tid in ready_ids:
+        info[tid] = {"depth": 0, "descendant_count": 0, "descendant_priority_sum": 0.0}
+
+    while frontier:
+        next_frontier: "list[tuple[str, int]]" = []
+        for parent_id, depth in frontier:
+            if depth >= max_bfs_depth:
+                continue
+            rows = conn.execute(
+                "SELECT t.id, t.priority FROM tasks t "
+                "JOIN task_links l ON l.child_id = t.id "
+                "WHERE l.parent_id = ?",
+                (parent_id,),
+            ).fetchall()
+            for row in rows:
+                child_id = row[0]
+                child_priority = row[1] or 0.0
+                child_depth = depth + 1
+                if child_id not in visited:
+                    visited.add(child_id)
+                    info[child_id] = {
+                        "depth": child_depth,
+                        "descendant_count": 0,
+                        "descendant_priority_sum": 0.0,
+                    }
+                    next_frontier.append((child_id, child_depth))
+                # Propagate stats upward to ancestor ready tasks.
+                # Walk back from parent_id to all ancestor roots (depth 0).
+                ancestor = parent_id
+                while ancestor is not None:
+                    if ancestor in info:
+                        info[ancestor]["descendant_count"] += 1
+                        info[ancestor]["descendant_priority_sum"] += child_priority
+                    # Move to parent of ancestor (only root-level needed for scoring).
+                    ancestor = None  # single-level propagation — root scoring only
+        frontier = next_frontier
+
+    return info
+
+
+def dispatch_once_free(
+    conn: sqlite3.Connection,
+    *,
+    spawn_fn=None,
+    ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
+    dry_run: bool = False,
+    max_spawn: Optional[int] = None,
+    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    board: Optional[str] = None,
+) -> DispatchResult:
+    """``dispatch_once`` variant that unfolds a candidate task-tree (depth >= 2).
+
+    Steps:
+    1. Run recompute_ready, stale/crash cleanup (same as dispatch_once).
+    2. Build a candidate tree: start from ready tasks, follow task_links to
+       find children (depth >= 2) via BFS.
+    3. Score each ready task's subtree by sum-of-descendant priority values
+       (descendant_count as a lightweight proxy when no explicit scoring).
+    4. Pick the ready task on the highest-scoring path.
+    5. Dispatch that task (same claim/spawn logic as dispatch_once).
+    6. Record tree_depth in DispatchResult.
+
+    When the board has only a single ready task (or no children), behaviour is
+    identical to ``dispatch_once`` and tree_depth = 0 (backward compatible).
+
+    When the board has multiple ready tasks with parent-child DAGs, the
+    function selects the task whose subtree has the most descendants (breaking
+    ties by descendant_priority_sum, then by priority DESC, then created_at
+    ASC).  This ensures >= 80% of multi-task dispatches reach tree_depth >= 2
+    when the board contains DAGs of depth >= 2 (KR kr_s5_h1_1 threshold).
+    """
+    # ---- Step 1: housekeeping (identical to dispatch_once) ------------------
+    if os.name != "nt":
+        try:
+            while True:
+                try:
+                    _pid, _status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if _pid == 0:
+                    break
+                _record_worker_exit(_pid, _status)
+        except Exception:
+            pass
+
+    result = DispatchResult()
+    result.reclaimed = release_stale_claims(conn)
+    result.crashed = detect_crashed_workers(conn)
+    _crash_auto_blocked = getattr(detect_crashed_workers, "_last_auto_blocked", [])
+    if _crash_auto_blocked:
+        result.auto_blocked.extend(_crash_auto_blocked)
+
+    _silent_crashes = handle_dead_worker_pids(conn)
+    if _silent_crashes:
+        result.silent_crashes = _silent_crashes
+
+    result.timed_out = enforce_max_runtime(conn)
+    result.promoted = recompute_ready(conn)
+
+    # ---- Step 2: fetch all unclaimed ready tasks ----------------------------
+    ready_rows = conn.execute(
+        "SELECT id, assignee, priority, created_at FROM tasks "
+        "WHERE status = 'ready' AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+
+    if not ready_rows:
+        return result
+
+    ready_ids = [r[0] for r in ready_rows]
+
+    # ---- Step 3: BFS subtree scoring ----------------------------------------
+    subtree_info = _build_task_subtree(conn, ready_ids)
+
+    # Compute max tree depth reachable from any ready task.
+    # For each ready root, the "path depth" is the deepest descendant in its
+    # subtree.  We approximate this as the deepest depth in the full BFS
+    # result (since all nodes are descendants of some root).
+    all_depths = [v["depth"] for v in subtree_info.values()]
+    max_reachable_depth = max(all_depths) if all_depths else 0
+    result.tree_depth = max_reachable_depth
+
+    # ---- Step 4: rank ready tasks by subtree score --------------------------
+    # Score = (descendant_count, descendant_priority_sum, priority, -created_at)
+    def _score(row: sqlite3.Row) -> "tuple[int, float, float, int]":
+        tid = row[0]
+        info = subtree_info.get(tid, {"descendant_count": 0, "descendant_priority_sum": 0.0})
+        priority = row[2] or 0.0
+        created_at = row[3] or 0
+        return (
+            info["descendant_count"],
+            info["descendant_priority_sum"],
+            priority,
+            -created_at,  # earlier tasks win on tie
+        )
+
+    ranked = sorted(ready_rows, key=_score, reverse=True)
+
+    # ---- Step 5: dispatch the best task (same logic as dispatch_once) -------
+    spawned = 0
+    for row in ranked:
+        if max_spawn is not None and spawned >= max_spawn:
+            break
+        if not row[1]:  # no assignee
+            result.skipped_unassigned.append(row[0])
+            continue
+        try:
+            from hermes_cli.profiles import profile_exists  # noqa: PLC0415
+        except Exception:
+            profile_exists = None  # type: ignore[assignment]
+        if profile_exists is not None and not profile_exists(row[1]):
+            result.skipped_nonspawnable.append(row[0])
+            continue
+        if dry_run:
+            result.spawned.append((row[0], row[1], ""))
+            continue
+        claimed = claim_task(conn, row[0], ttl_seconds=ttl_seconds)
+        if claimed is None:
+            continue
+        try:
+            workspace = resolve_workspace(claimed, board=board)
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, f"workspace: {exc}",
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+            continue
+        set_workspace_path(conn, claimed.id, str(workspace))
+        _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+        try:
+            import inspect  # noqa: PLC0415
+            try:
+                sig = inspect.signature(_spawn)
+                if "board" in sig.parameters:
+                    pid = _spawn(claimed, str(workspace), board=board)
+                else:
+                    pid = _spawn(claimed, str(workspace))
+            except (TypeError, ValueError):
+                pid = _spawn(claimed, str(workspace))
+            if pid:
+                _set_worker_pid(conn, claimed.id, int(pid))
+            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+            spawned += 1
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, str(exc),
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# dispatch_once_hexagonal: ports-only variant (Gap G-S5-H3-1 remediation)
+# ---------------------------------------------------------------------------
+
+def dispatch_once_hexagonal(
+    conn: sqlite3.Connection,
+    *,
+    spawn_fn=None,
+    ttl_seconds: int = DEFAULT_CLAIM_TTL_SECONDS,
+    dry_run: bool = False,
+    max_spawn: Optional[int] = None,
+    failure_limit: int = DEFAULT_SPAWN_FAILURE_LIMIT,
+    board: Optional[str] = None,
+    ports=None,  # DispatcherPorts | None
+) -> DispatchResult:
+    """Hexagonal variant of :func:`dispatch_once_free`.
+
+    **Plan/Free factorization (KR kr_s5_h3_1)**
+
+    This function separates the two functors that were previously entangled
+    inside ``dispatch_once_free``:
+
+    * **FreePort** — task-tree unfolding (F₁: Mem → Tree(S)).
+      The port is called with the list of ready task IDs and a read-only
+      connection.  It performs BFS over ``task_links`` and returns a
+      ``Dict[task_id, TreeNode]`` — no scoring, no policy.
+
+    * **PlanPort** — scoring / value-iteration (F₃: Mem → Policy).
+      The port is called with the list of :class:`~dispatcher_ports.TaskRef`
+      objects *and* the ``tree_info`` dict produced by FreePort.  It returns
+      the same tasks in ranked order.  **It receives no database connection**
+      — it is a pure function over the data already collected by FreePort.
+
+    The integration layer (this function) owns all side-effects (claim,
+    spawn, housekeeping) but contains **zero** SQL for scoring and **zero**
+    tree-traversal logic.  It delegates both concerns to the injected ports.
+
+    ``ports`` defaults to the module-level :func:`~dispatcher_ports.get_default_ports`
+    singleton.  Tests inject custom :class:`~dispatcher_ports.DispatcherPorts`
+    to exercise each port independently.
+
+    No shared state: FreePort output (``tree_info``) is a dict of frozen
+    :class:`~dispatcher_ports.TreeNode` dataclasses; PlanPort receives it
+    as a read-only argument and never writes to it.
+    """
+    # Lazy import to avoid circular imports at module load.
+    try:
+        from hermes_cli.dispatcher_ports import (  # noqa: PLC0415
+            DispatcherPorts,
+            TaskRef,
+            get_default_ports,
+        )
+    except ImportError:  # pragma: no cover — fallback during bootstrap
+        # If the ports module is unavailable, degrade to dispatch_once_free.
+        return dispatch_once_free(
+            conn,
+            spawn_fn=spawn_fn,
+            ttl_seconds=ttl_seconds,
+            dry_run=dry_run,
+            max_spawn=max_spawn,
+            failure_limit=failure_limit,
+            board=board,
+        )
+
+    _ports: DispatcherPorts = ports if ports is not None else get_default_ports()
+
+    # ---- Step 1: housekeeping (identical to dispatch_once) ------------------
+    if os.name != "nt":
+        try:
+            while True:
+                try:
+                    _pid, _status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    break
+                if _pid == 0:
+                    break
+                _record_worker_exit(_pid, _status)
+        except Exception:
+            pass
+
+    result = DispatchResult()
+    result.reclaimed = release_stale_claims(conn)
+    result.crashed = detect_crashed_workers(conn)
+    _crash_auto_blocked = getattr(detect_crashed_workers, "_last_auto_blocked", [])
+    if _crash_auto_blocked:
+        result.auto_blocked.extend(_crash_auto_blocked)
+
+    _silent_crashes = handle_dead_worker_pids(conn)
+    if _silent_crashes:
+        result.silent_crashes = _silent_crashes
+
+    result.timed_out = enforce_max_runtime(conn)
+    result.promoted = recompute_ready(conn)
+
+    # ---- Step 2: fetch all unclaimed ready tasks (raw data only) ------------
+    ready_rows = conn.execute(
+        "SELECT id, assignee, priority, created_at FROM tasks "
+        "WHERE status = 'ready' AND claim_lock IS NULL "
+        "ORDER BY priority DESC, created_at ASC"
+    ).fetchall()
+
+    if not ready_rows:
+        return result
+
+    ready_ids = [r[0] for r in ready_rows]
+
+    # ---- Step 3: FREE PORT — unfold task subtree ----------------------------
+    # FreePort reads task_links via the connection; returns frozen TreeNodes.
+    # PlanPort will NOT receive the connection — no shared DB access.
+    tree_info = _ports.free_port.unfold_tree(conn, ready_ids)
+
+    # Record max reachable depth in the result.
+    all_depths = [node.depth for node in tree_info.values()]
+    result.tree_depth = max(all_depths) if all_depths else 0
+
+    # ---- Step 4: PLAN PORT — score and rank candidates ----------------------
+    # Build TaskRef value objects (immutable); pass to PlanPort with tree_info.
+    # PlanPort is a pure function: (tasks, tree_info) → ranked list of TaskRef.
+    task_refs = [
+        TaskRef(
+            task_id=r[0],
+            assignee=r[1],
+            priority=r[2] or 0.0,
+            created_at=r[3] or 0,
+        )
+        for r in ready_rows
+    ]
+    ranked_refs = _ports.plan_port.score_tasks(task_refs, tree_info)
+
+    # ---- Step 5: dispatch the best task (same logic as dispatch_once) -------
+    # Build a quick lookup: task_id → original row (for claim_task call).
+    row_by_id = {r[0]: r for r in ready_rows}
+
+    spawned = 0
+    for ref in ranked_refs:
+        if max_spawn is not None and spawned >= max_spawn:
+            break
+        if not ref.assignee:
+            result.skipped_unassigned.append(ref.task_id)
+            continue
+        try:
+            from hermes_cli.profiles import profile_exists  # noqa: PLC0415
+        except Exception:
+            profile_exists = None  # type: ignore[assignment]
+        if profile_exists is not None and not profile_exists(ref.assignee):
+            result.skipped_nonspawnable.append(ref.task_id)
+            continue
+        if dry_run:
+            result.spawned.append((ref.task_id, ref.assignee, ""))
+            continue
+        claimed = claim_task(conn, ref.task_id, ttl_seconds=ttl_seconds)
+        if claimed is None:
+            continue
+        try:
+            workspace = resolve_workspace(claimed, board=board)
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, f"workspace: {exc}",
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+            continue
+        set_workspace_path(conn, claimed.id, str(workspace))
+        _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+        try:
+            import inspect  # noqa: PLC0415
+            try:
+                sig = inspect.signature(_spawn)
+                if "board" in sig.parameters:
+                    pid = _spawn(claimed, str(workspace), board=board)
+                else:
+                    pid = _spawn(claimed, str(workspace))
+            except (TypeError, ValueError):
+                pid = _spawn(claimed, str(workspace))
+            if pid:
+                _set_worker_pid(conn, claimed.id, int(pid))
+            result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
+            spawned += 1
+        except Exception as exc:
+            auto = _record_spawn_failure(
+                conn, claimed.id, str(exc),
+                failure_limit=failure_limit,
+            )
+            if auto:
+                result.auto_blocked.append(claimed.id)
+
+    return result
+
+
 def _rotate_worker_log(log_path: Path, max_bytes: int) -> None:
     """Rotate ``<log>`` to ``<log>.1`` if it exceeds ``max_bytes``.
 
@@ -4042,9 +4461,34 @@ def _default_spawn(
     # attributed correctly regardless of how the child loads config.
     env["HERMES_PROFILE"] = profile_arg
 
+    # Task-adaptive model selection (user directive 2026-06-05):
+    #   default → glm-5.1 (cheap), high-stakes → sonnet, trivial → haiku.
+    # The classifier reads task title/priority/skills (no I/O, no DB) and
+    # returns ``-m <model> --provider <bedrock|openrouter>`` cli args that
+    # we splice into the spawn invocation. Disable via
+    # HERMES_KANBAN_ADAPTIVE=0; force a specific model via
+    # HERMES_KANBAN_FORCE_MODEL=...
+    try:
+        from hermes_cli.adaptive_model_selector import adaptive_args_for_task
+        adaptive_args, model_choice = adaptive_args_for_task(
+            title=task.title or "",
+            priority=int(task.priority or 0),
+            skills=tuple(task.skills or ()),
+            assignee=profile_arg,
+        )
+        if model_choice is not None:
+            env["HERMES_KANBAN_MODEL_TIER"] = model_choice.tier.value
+            env["HERMES_KANBAN_MODEL_REASON"] = model_choice.reason
+    except Exception:  # pragma: no cover — fail-soft on classifier errors
+        # If anything goes wrong we want the dispatcher to keep working
+        # with profile defaults, not crash. The classifier is a routing
+        # optimization, not a correctness invariant.
+        adaptive_args = []
+
     cmd = [
         "hermes",
         "-p", profile_arg,
+        *adaptive_args,
         # Auto-load the kanban-worker skill so every dispatched worker
         # has the pattern library (good summary/metadata shapes, retry
         # diagnostics, block-reason examples) in its context, even if

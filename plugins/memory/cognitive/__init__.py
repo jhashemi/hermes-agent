@@ -262,6 +262,41 @@ class CognitiveMemoryProvider(MemoryProvider):
         """Always available — uses local JSONL, no external deps."""
         return self._enabled
 
+    def record_decision(
+        self,
+        agent_id: str,
+        decision_type: str,
+        reasoning: str,
+        confidence: float,
+        context: dict | None = None,
+    ) -> str | None:
+        """β₉ (S4/H4) — Plan ↦ Audit functor delegate. Forward to the
+        underlying _StandaloneAuditTrail so dispatchers can record allocations
+        without dipping into provider internals. No-op if audit not initialized
+        (e.g. before initialize()) — fail-soft so dispatcher never crashes on
+        a missing audit sink.
+        """
+        if self._audit is None:
+            try:
+                # Auto-bootstrap with default path so callers from outside
+                # the gateway initialize loop still get audit coverage.
+                from pathlib import Path
+
+                home = Path(self._hermes_home or Path.home() / ".hermes")
+                home.mkdir(parents=True, exist_ok=True)
+                self._audit = _StandaloneAuditTrail(
+                    storage_path=str(home / "cognitive_audit.jsonl")
+                )
+            except Exception:
+                return None
+        return self._audit.record_decision(
+            agent_id=agent_id,
+            decision_type=decision_type,
+            reasoning=reasoning,
+            confidence=confidence,
+            context=context,
+        )
+
     def initialize(self, session_id: str, **kwargs) -> None:
         agent_context = kwargs.get("agent_context", "")
         platform = kwargs.get("platform", "cli")

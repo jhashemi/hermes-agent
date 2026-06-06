@@ -9,6 +9,11 @@ providers:
     name: Pass.wafer.ai
     default_model: glm-5.1
     api_key: wfr_e71734141004c91c3d81fd0a1f320936a78e1920403bb19402c02a0aaf3220f7
+  ollama-cloud:
+    api: https://api.ollama.ai/v1
+    name: Ollama Cloud
+    default_model: deepseek-v4-pro
+    api_key: ''
   local-127.0.0.1:11434:
     api: http://127.0.0.1:11434/v1
     name: Local (127.0.0.1:11434)
@@ -184,12 +189,15 @@ auxiliary:
     timeout: 30
     extra_body: {}
   compression:
-    provider: custom:pass.wafer.ai
-    model: glm-5.1
-    base_url: https://pass.wafer.ai/v1
+    provider: symbolic
+    model: symbolic-lambda-calculus
+    base_url: ''
     api_key: ''
-    timeout: 120
-    extra_body: {}
+    timeout: 10
+    extra_body:
+      focus_extraction: true
+      axiom_optimization: true
+      beta_reduction_iterations: 100
   session_search:
     provider: auto
     model: ''
@@ -459,6 +467,32 @@ kanban:
   resource_check: true
   backoff_check: true
   max_spawn_per_tick: 2
+
+# ── NATS Event Bus (wire-016) ──────────────────────────────────────────
+# Configuration for the NATS JetStream event bus used by the executive
+# agent nervous system. When no NATS server is available, the bus
+# operates in offline mode — events are buffered locally and never
+# reach a server. This is safe for single-agent CLI usage.
+nats:
+  # Comma-separated NATS server URLs. Override via NATS_SERVERS env var.
+  # For a 3-node cluster: nats://10.0.1.50:4222,nats://10.0.1.51:4222,nats://10.0.1.52:4222
+  servers: nats://localhost:4222
+  # Client name for NATS connection identification
+  client_name: hermes-eventbus
+  # Max publishes per second (0 = unlimited)
+  rate_limit_per_sec: 0
+  # Whether to attempt async connection on startup
+  auto_connect: true
+  # Timeout in seconds for initial connection
+  connection_timeout: 10
+  # Maximum reconnection attempts before falling back to offline
+  max_reconnect_attempts: 10
+  # Base wait (seconds) between reconnects (exponential backoff)
+  reconnect_wait_base: 1.0
+  # Maximum wait (seconds) between reconnects
+  reconnect_wait_max: 30.0
+  # Maximum messages to buffer in offline mode
+  offline_buffer_size: 1000
 code_execution:
   mode: project
   timeout: 300
