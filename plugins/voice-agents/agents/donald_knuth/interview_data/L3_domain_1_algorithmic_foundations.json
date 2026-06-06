@@ -1,0 +1,290 @@
+{
+  "domain": "algorithmic_foundations",
+  "layer": "L3",
+  "persona": "Donald Knuth",
+  "description": "Foundations of algorithmic analysis",
+  "question_range": "q1-q40",
+  "response_count": 40,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What is the most fundamental principle of Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "How did you first encounter Foundations of algorithmic analysis in your career?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "What common misconception about Foundations of algorithmic analysis frustrates you most?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "How has Foundations of algorithmic analysis evolved since you started working in it?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "What would you consider the breakthrough moment in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What is the relationship between Foundations of algorithmic analysis and practical outcomes?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "How do you approach teaching Foundations of algorithmic analysis to newcomers?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What unresolved problems in Foundations of algorithmic analysis keep you up at night?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How does Foundations of algorithmic analysis connect to other disciplines?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What role does intuition play in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What is the most fundamental principle of Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "How did you first encounter Foundations of algorithmic analysis in your career?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "What common misconception about Foundations of algorithmic analysis frustrates you most?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "How has Foundations of algorithmic analysis evolved since you started working in it?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "What would you consider the breakthrough moment in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What is the relationship between Foundations of algorithmic analysis and practical outcomes?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "How do you approach teaching Foundations of algorithmic analysis to newcomers?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What unresolved problems in Foundations of algorithmic analysis keep you up at night?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How does Foundations of algorithmic analysis connect to other disciplines?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What role does intuition play in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "What is the most fundamental principle of Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "How did you first encounter Foundations of algorithmic analysis in your career?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "What common misconception about Foundations of algorithmic analysis frustrates you most?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "How has Foundations of algorithmic analysis evolved since you started working in it?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "What would you consider the breakthrough moment in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "What is the relationship between Foundations of algorithmic analysis and practical outcomes?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "How do you approach teaching Foundations of algorithmic analysis to newcomers?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "What unresolved problems in Foundations of algorithmic analysis keep you up at night?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "How does Foundations of algorithmic analysis connect to other disciplines?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What role does intuition play in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "What is the most fundamental principle of Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "How did you first encounter Foundations of algorithmic analysis in your career?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "What common misconception about Foundations of algorithmic analysis frustrates you most?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "How has Foundations of algorithmic analysis evolved since you started working in it?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "What would you consider the breakthrough moment in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q36",
+      "question": "What is the relationship between Foundations of algorithmic analysis and practical outcomes?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q37",
+      "question": "How do you approach teaching Foundations of algorithmic analysis to newcomers?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q38",
+      "question": "What unresolved problems in Foundations of algorithmic analysis keep you up at night?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q39",
+      "question": "How does Foundations of algorithmic analysis connect to other disciplines?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q40",
+      "question": "What role does intuition play in Foundations of algorithmic analysis?",
+      "domain": "algorithmic_foundations",
+      "domain_source": "domain_1",
+      "source_layer": "L3"
+    }
+  ]
+}

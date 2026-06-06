@@ -30,12 +30,22 @@ def emit_acs_manifest(
     system: str,
     axis: str,
     rego_content: Optional[str] = None,
+    enabled: bool = False,
+    enforcement: str = "disabled",
 ) -> dict:
     """Build an ACS manifest dict for one (system, axis) policy.
 
     ``rego_path`` is the relative or absolute path to the .rego file that this
     manifest references. ``rego_content`` is optional but allows the manifest
     to embed a sha256 digest for tamper-evidence.
+
+    Lifecycle fields
+    ----------------
+    ``enabled``     — when False the policy entry is **omitted** from the
+                      ``policies`` dict (PolicyEngine never loads it) and its
+                      id appears in ``omitted_disabled_policies`` instead.
+    ``enforcement`` — ``"enforce"`` → ``default_decision: deny``
+                      ``"monitor"`` or ``"disabled"`` → ``default_decision: allow``
     """
     if not system:
         raise ValueError("system is required")
@@ -57,7 +67,7 @@ def emit_acs_manifest(
             if isinstance(p, str) and p.rstrip("/").endswith("/evaluation")
         )
 
-    return {
+    manifest: dict = {
         "agent_control_specification_version": ACS_VERSION,
         "manifest_schema": MANIFEST_SCHEMA,
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -67,13 +77,25 @@ def emit_acs_manifest(
             "compiler": "tools/l4_agt_compiler@0.1.0-dev",
             "exported_function_count": fn_count,
         },
-        "policies": {
+    }
+
+    if not enabled:
+        # Omit disabled policies from the manifest; note them for visibility
+        manifest["policies"] = {}
+        manifest["omitted_disabled_policies"] = [policy_id]
+    else:
+        default_decision = "deny" if enforcement == "enforce" else "allow"
+        manifest["policies"] = {
             policy_id: {
                 "type": "rego",
                 "path": str(rego_path),
                 "digest": rego_digest,
                 "package": f"governance.{system.replace('-', '_')}.{axis.replace('-', '_')}",
-                "default_decision": "deny",
+                "enabled": enabled,
+                "enforcement": enforcement,
+                "default_decision": default_decision,
             }
-        },
-    }
+        }
+        manifest["omitted_disabled_policies"] = []
+
+    return manifest

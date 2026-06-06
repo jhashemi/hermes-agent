@@ -1,0 +1,255 @@
+{
+  "domain": "ethics_ai",
+  "layer": "L3",
+  "persona": "Jeff Dean",
+  "description": "Ethics in AI and large-scale systems",
+  "question_range": "q1-q35",
+  "response_count": 35,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What ethical obligations do technologists have?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "How do you think about the societal impact of your work?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "Where should we draw lines on technology deployment?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "What ethical framework guides your decisions?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "How do you handle conflicts between profit and ethics?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What technology keeps you up at night?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "How should we regulate emerging technologies?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What's your responsibility for unintended consequences?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How do you think about privacy vs. functionality?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What would you refuse to build?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What ethical obligations do technologists have?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "How do you think about the societal impact of your work?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "Where should we draw lines on technology deployment?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "What ethical framework guides your decisions?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "How do you handle conflicts between profit and ethics?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What technology keeps you up at night?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "How should we regulate emerging technologies?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What's your responsibility for unintended consequences?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How do you think about privacy vs. functionality?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What would you refuse to build?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "What ethical obligations do technologists have?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "How do you think about the societal impact of your work?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "Where should we draw lines on technology deployment?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "What ethical framework guides your decisions?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "How do you handle conflicts between profit and ethics?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "What technology keeps you up at night?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "How should we regulate emerging technologies?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "What's your responsibility for unintended consequences?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "How do you think about privacy vs. functionality?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What would you refuse to build?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "What ethical obligations do technologists have?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "How do you think about the societal impact of your work?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "Where should we draw lines on technology deployment?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "What ethical framework guides your decisions?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "How do you handle conflicts between profit and ethics?",
+      "domain": "ethics_ai",
+      "domain_source": "domain_6",
+      "source_layer": "L3"
+    }
+  ]
+}

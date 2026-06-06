@@ -1,0 +1,208 @@
+{
+  "agent": "donald_knuth",
+  "layer": "L6",
+  "adaptive_qa_protocol": {
+    "agent_id": "donald_knuth",
+    "version": "1.0",
+    "domains": [
+      "Open Source & Community",
+      "Algorithmic Foundations",
+      "CS Education",
+      "Legacy & Vision",
+      "Ethics & Scholarship",
+      "The Art of Programming",
+      "Formal Methods",
+      "Typesetting & Design"
+    ],
+    "question_templates": {
+      "Open Source & Community": {
+        "seed_questions": [
+          "What's your philosophy on making work freely available?",
+          "How did the TeX community evolve?",
+          "What makes a healthy open-source ecosystem?",
+          "Why did you insist on freezing TeX's design?",
+          "What's your view on commercial vs academic software?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Algorithmic Foundations": {
+        "seed_questions": [
+          "What makes an algorithm beautiful?",
+          "How do you approach analyzing algorithm complexity?",
+          "What's the most elegant algorithm ever discovered?",
+          "How has the field of algorithm analysis changed since TAOCP?",
+          "What algorithmic problem keeps you up at night?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "CS Education": {
+        "seed_questions": [
+          "How should computer science be taught?",
+          "What's wrong with how programming is taught today?",
+          "What book should every CS student read?",
+          "How has CS education changed since you started teaching?",
+          "What advice do you give to PhD students?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Legacy & Vision": {
+        "seed_questions": [
+          "What's the most important unsolved problem in CS?",
+          "How do you want TAOCP to be remembered?",
+          "What would you tell a young Donald Knuth?",
+          "What makes a life's work worthwhile?",
+          "If you could solve one more problem, what would it be?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Ethics & Scholarship": {
+        "seed_questions": [
+          "What's the responsibility of a computer scientist?",
+          "How do you decide what to work on?",
+          "What's your stance on software patents?",
+          "How should we handle the social impact of algorithms?",
+          "What ethical obligations come with mathematical knowledge?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "The Art of Programming": {
+        "seed_questions": [
+          "Why 'Art' in the title of your life's work?",
+          "How do you balance mathematical rigor with practical programming?",
+          "What makes code beautiful vs merely correct?",
+          "How has your definition of 'art' in programming evolved?",
+          "What chapter of TAOCP was hardest to write?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Formal Methods": {
+        "seed_questions": [
+          "What role should formal proofs play in programming?",
+          "How do you verify your own algorithms?",
+          "What's the limit of formal verification?",
+          "How do you handle the gap between theory and practice?",
+          "What's your view on type theory vs testing?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Typesetting & Design": {
+        "seed_questions": [
+          "What drove you to create TeX?",
+          "How does typesetting relate to programming?",
+          "What's the connection between visual design and algorithm design?",
+          "Why was literate programming important to you?",
+          "How did creating TeX change your thinking?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      }
+    },
+    "response_quality_threshold": 0.85,
+    "authenticity_threshold": 0.85,
+    "min_response_length": 100
+  },
+  "leadership_framework": {
+    "style": "transformational",
+    "communication_effectiveness": 1.0,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7,
+    "authenticity_basis": 1.0,
+    "quality_basis": 0.985
+  },
+  "reward_wiring": {
+    "extrinsic": {
+      "weight": 0.35,
+      "signals": [
+        "quality_score",
+        "authenticity_score",
+        "domain_coverage"
+      ]
+    },
+    "intrinsic": {
+      "weight": 0.2,
+      "signals": [
+        "coherence_score",
+        "vocabulary_richness",
+        "response_depth"
+      ]
+    },
+    "hindsight": {
+      "weight": 0.15,
+      "signals": [
+        "cross_domain_consistency",
+        "narrative_continuity"
+      ]
+    },
+    "shaped": {
+      "weight": 0.15,
+      "signals": [
+        "leadership_alignment",
+        "executive_function_match"
+      ]
+    },
+    "kpi_health": {
+      "weight": 0.15,
+      "signals": [
+        "system_health_contribution",
+        "pipeline_pass_rate"
+      ]
+    }
+  },
+  "enr6_compliance": {
+    "l0_raw": true,
+    "l1_cleaned": true,
+    "l2_enriched": true,
+    "l3_thematic": true,
+    "l4_assembled": true,
+    "l5_extensions": true,
+    "l6_integrated": true
+  },
+  "overall_scores": {
+    "quality": 0.985,
+    "authenticity": 1.0,
+    "coherence": 1.0,
+    "richness": 1.0,
+    "domain_coverage": 1.0
+  },
+  "processed_at": "2026-05-17T01:38:17.439095"
+}

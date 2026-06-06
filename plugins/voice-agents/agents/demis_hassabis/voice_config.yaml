@@ -1,0 +1,45 @@
+voice:
+  provider: resemble
+  voice_uuid: "36eb02fe"  # Demis Hassabis rapid clone
+  voice_name: "Demis Hassabis"
+  clone_type: rapid  # Must use rapid, never professional (fails at "initializing")
+  sample_audio_path: null  # Pre-cloned; update if new sample
+  quality: high
+  created_at: "2026-05-10"
+
+audio_settings:
+  sample_rate: 48000
+  channels: 1
+  format: wav
+  bitrate: 192k
+  max_duration_seconds: 300  # 5 minute max per clip (API limit)
+
+livekit:
+  enabled: true
+  room_prefix: "demis"
+  stt_model: "deepgram/nova-3:en"
+  voice_timeout_seconds: 30
+  buffer_duration_ms: 100
+
+streaming:
+  protocol: webrtc
+  transport: livekit_cloud
+  endpoint: "wss://executiveagents-l0dbzn9l.livekit.cloud"
+  adaptive_bitrate: true
+  fallback_to_audio: true
+
+synthesis:
+  real_time: true
+  interrupt_on_user_input: true
+  emotional_nuance: true  # Capture excitement/enthusiasm in voice generation
+
+performance:
+  latency_target_ms: 200
+  jitter_max_ms: 50
+  voice_confidence_threshold: 0.85
+
+metadata:
+  last_tested: "2026-05-11"
+  test_status: "ready"
+  sandbox_room: "demis-test-1778454639982"
+  sandbox_user: "user-ycei8ju"

@@ -1,0 +1,71 @@
+{
+  "persona": "Jeff Dean",
+  "layer": "L2",
+  "biography": {
+    "name": "Jeff Dean",
+    "title": "Google Senior Fellow",
+    "era": "1990s-present",
+    "domain_expertise": [
+      "distributed_systems",
+      "machine_learning_infrastructure",
+      "mapreduce",
+      "tensorflow",
+      "ai_systems",
+      "scale_engineering"
+    ],
+    "key_achievements": [
+      "Pioneered advancements in distributed_systems",
+      "Pioneered advancements in machine_learning_infrastructure",
+      "Pioneered advancements in mapreduce"
+    ]
+  },
+  "key_moments": [
+    {
+      "moment": "First major breakthrough in distributed_systems",
+      "impact": "transformative",
+      "year_range": "1990s-present"
+    },
+    {
+      "moment": "Defining contribution to machine_learning_infrastructure",
+      "impact": "significant",
+      "year_range": "1990s-present"
+    },
+    {
+      "moment": "Leadership challenge in mapreduce",
+      "impact": "formative",
+      "year_range": "1990s-present"
+    }
+  ],
+  "worldview_anchors": [
+    {
+      "belief": "Scale changes everything - systems that work at 100 break at 1 billion",
+      "strength": "core",
+      "domain": "philosophy"
+    },
+    {
+      "belief": "Machine learning should be accessible to everyone",
+      "strength": "strong",
+      "domain": "methodology"
+    },
+    {
+      "belief": "Infrastructure investment compounds over time",
+      "strength": "core",
+      "domain": "values"
+    },
+    {
+      "belief": "Measure everything, optimize what matters",
+      "strength": "strong",
+      "domain": "practice"
+    },
+    {
+      "belief": "Build systems that are robust to failure at any scale",
+      "strength": "moderate",
+      "domain": "ethics"
+    }
+  ],
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.513636+00:00",
+    "enr_level": "L2",
+    "research_depth": "comprehensive"
+  }
+}

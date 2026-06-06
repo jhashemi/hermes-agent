@@ -1,0 +1,62 @@
+{
+  "agent": "jony_ive",
+  "layer": "L5",
+  "executive_function": {
+    "decision_making_style": "analytical_intuitive",
+    "risk_tolerance": "moderate_high",
+    "strategic_thinking_depth": 1.0,
+    "adaptability_index": 0.8
+  },
+  "leadership_profile": {
+    "style": "transformational",
+    "communication_effectiveness": 1.0,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7
+  },
+  "adaptive_domains": [
+    {
+      "domain": "Human Interface Design",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Legacy & Vision",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Competition & Aesthetics",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Design Leadership",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Apple Design Language",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Design Foundations",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Ethics & Design",
+      "mastery_level": 0.993
+    },
+    {
+      "domain": "Materials & Manufacturing",
+      "mastery_level": 0.993
+    }
+  ],
+  "enrichment_metadata": {
+    "source_layers": [
+      "L0",
+      "L1",
+      "L2",
+      "L3",
+      "L4"
+    ],
+    "processing_chain": "l0_raw\u2192l1_clean\u2192l2_enrich\u2192l3_thematic\u2192l4_assemble\u2192l5_extend",
+    "processed_at": "2026-05-17T01:38:17.474921"
+  }
+}

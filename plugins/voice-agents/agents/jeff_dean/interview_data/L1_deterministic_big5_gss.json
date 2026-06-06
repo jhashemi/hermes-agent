@@ -1,0 +1,28 @@
+{
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.513596+00:00"
+  },
+  "big5_profile": {
+    "O": 0.9,
+    "C": 0.93,
+    "E": 0.45,
+    "A": 0.78,
+    "N": 0.22
+  },
+  "gss_correlations": {
+    "trust": 0.61,
+    "fairness": 0.63,
+    "helpfulness": 0.69,
+    "conformity": 0.46,
+    "risk_tolerance": 0.68,
+    "achievement": 0.92,
+    "authority_respect": 0.64,
+    "tradition": 0.55
+  },
+  "behavioral_economics": {
+    "loss_aversion": 0.41,
+    "time_preference": 0.56,
+    "social_preferences": 0.55,
+    "risk_preferences": 0.68
+  }
+}
