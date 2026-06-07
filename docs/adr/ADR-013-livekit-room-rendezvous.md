@@ -173,3 +173,106 @@ docs) and is **out of scope** for the contract resolution.
   these once the account-tier issue is resolved.
 - Option 3 (LiveKit-native plugins) remains the recommended long-term
   direction; defer until the HTTP path is validated end-to-end.
+
+---
+
+### Resolution v3 — Option 4: HTTP-streaming pivot (2026-06-07)
+
+**Recon overturned the v2 RCA.** Before re-cloning voices on a different
+tier (Option 2), exhaustive probing revealed two distinct root causes:
+
+1. **The `project_uuid: 9dbceb60` hardcoded in 6+ files was bogus.**
+   It is *not* a project on `jj@syntaxdata.com`. Resemble REST returns
+   `400 User does not have access to this project`. The actual projects
+   on this account are:
+   - `60c8690f` — "executive agents framework" (the right one)
+   - `31dd950f` — "Default"
+   - `a6269985` "Tax", `40dc1fb8`/`4258692e` "DataConnectix"
+
+2. **WebSocket streaming is account-tier gated, not voice-tier gated.**
+   Every voice on the account — custom clones AND Resemble's own stock
+   library voices (Luma, Nova, Atlas, Titan…) — returns
+   `DBCacheError: <model> is not available for this voice` for every
+   model name (`chatterbox-turbo`, `chatterbox`, `ultra`, `turbo`,
+   `rapid_speech`, `sk2turbo`). 26 model-name permutations across both
+   voice variants on both projects: 0/26 produced audio. Re-cloning
+   would not have changed this.
+
+**The HTTP-chunked streaming endpoint works on this tier.** Probed
+`https://f.cluster.resemble.ai/stream` with the correct
+`project_uuid=60c8690f`:
+
+| Voice           | TTFB  | Total | Bytes  | Format                  |
+| --------------- | ----- | ----- | ------ | ----------------------- |
+| Steve Jobs      | 76 ms | 2.4 s | 269 KB | PCM 16-bit mono 22050Hz |
+| Demis Hassabis  | 88 ms | 2.0 s | 244 KB | PCM 16-bit mono 22050Hz |
+
+48kHz and 44.1kHz also work (WAV, parseable RIFF header). Server
+rejects `output_format=pcm` (HTTP 500) — wav-only on this tier; we
+strip the 44-byte RIFF header client-side when raw PCM is needed.
+
+#### Implementation
+
+`ResembleStreamingAdapter` rewritten to use HTTP chunked transfer:
+  - POST to `f.cluster.resemble.ai/stream` with `Authorization: Token`
+  - Streams `Content-Type: audio/wav` chunked response as it arrives
+  - `raw_pcm=True` (default) strips RIFF/WAVE header → pure PCM frames
+    ready for LiveKit `audio_pcm22050` topic
+  - `raw_pcm=False` passes the WAV header through unchanged for
+    consumers that want a parseable file
+  - Quality knobs preserved per call: `sample_rate` (22050/44100/48000),
+    `precision` (PCM_16/PCM_24/PCM_32), `output_format`
+  - 4xx → `_NonTransientError` (no retry); 5xx → transient (retry with
+    exponential backoff, capped at `max_retries`)
+  - Public class name unchanged — `composition.create_streaming_tts_adapter`
+    needs no edits
+  - WS implementation preserved as `ResembleWSStreamingAdapter` (yields
+    nothing, logs a deprecation warning); swap one line in `composition`
+    when the account is upgraded
+
+**Fallback chain (preserved + extended for Option 4):**
+  1. Streaming HTTP `/stream` (low TTFB, primary)
+  2. REST sync `/synthesize` (full file, MP3, fallback 1) — already
+     wired in `StreamSynthesizeHandler` via `ResembleTTSAdapter` →
+     `ResembleTTSClient`
+  3. Async clip API `/projects/{p}/clips` (highest quality, fallback 2)
+     — same client, second tier of `ResembleTTSClient.synthesize()`
+
+Both fallbacks were preserved per user direction: keep non-async
+fallback AND higher-quality option.
+
+#### Files touched
+
+- `executive_agents_platform/src/infrastructure/adapters/resemble_streaming.py`
+  — full rewrite to HTTP-chunked client
+- `executive_agents_platform/src/voice_bridge_service.py` — 6× `9dbceb60` → `60c8690f`
+- `executive_agents_platform/agents/{steve_jobs,demis_hassabis}/voice_config.yaml`
+  — `project_uuid` corrected
+- `executive_agents_platform/poll_voice_build.py` — `9dbceb60` → `60c8690f`
+- `executive_agents_platform/tests/test_resemble_http_streaming.py` — 12 new tests
+  (HTTP chunked response, RIFF stripping, quality knobs, error classification)
+- `executive_agents_platform/tests/test_edge_cases.py` — 2 health-check tests
+  ported from WS to HTTP path; 18 retry/QoS tests stay protocol-agnostic
+- `executive_agents_platform/voice_agents_plugin.py` — relative-import fallback
+  so plugin loads both as `~/.hermes/plugins/voice-agents/...` package and as
+  flat sys.path module (fixes 5 pre-existing test-collection errors)
+- `executive_agents_platform/tests/test_enrich_persona.py` — REPO path → repo-relative
+
+#### Verification
+
+- 12/12 new HTTP-streaming tests green
+- 79/79 pre-existing edge-case tests green (only the 2 WS health-check
+  cases needed the HTTP rewrite)
+- 10/10 retry/transient tests green (protocol-agnostic, untouched)
+- Live smoke test: `f.cluster.resemble.ai/stream` round-trips raw PCM
+  (94 KB, 27 chunks, no RIFF leak) and 48kHz WAV (252 KB, valid header)
+  for Steve Jobs voice end-to-end through `ResembleStreamingAdapter`
+
+#### Carry-overs
+
+- Account-tier upgrade for WS streaming is now an explicit, separate
+  ADR-track item — not blocking voice operation on this account
+- Hermes-agent `livekit_room_agent.py` is unchanged; the bridge contract
+  (`/stream_synthesize` returns chunked PCM bytes) is preserved verbatim
+- Option 3 (LiveKit-native plugins) remains the long-term direction
+
