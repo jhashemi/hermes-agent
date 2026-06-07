@@ -121,3 +121,55 @@ Resolution options (pick one):
 
 Smoke test validated 1–7 of 8 checks against the live LiveKit Cloud
 project; see `scripts/livekit/smoke_test.py`.
+
+### Resolution (2026-06-07): Option 2 + streaming TTS
+
+Adopted **Option 2** with a refinement: instead of overloading
+`/synthesize` for raw bytes, we point the room agent at the platform's
+existing `/stream_synthesize` endpoint (Resemble WebSocket adapter at
+`wss://websocket.cluster.resemble.ai/stream`), so audio reaches the
+LiveKit room as Resemble emits it rather than after the full clip is
+rendered.
+
+Commits:
+
+- `hermes-agent` `731e99a39` — `feat(livekit): Option 2 — stream-synthesize via Resemble WS over /stream_synthesize`
+  - `transcribe_via_bridge`: sends `Content-Type: audio/x-pcm` with
+    `X-Sample-Rate` / `X-Channels` hints (matches LiveKit AudioStream
+    output: 16-bit mono PCM @16kHz).
+  - `stream_synthesize_via_bridge`: new async generator hitting
+    `/stream_synthesize`, yields PCM chunks as they arrive.
+  - `RoomAgent._on_gateway_out` now publishes per-Resemble-chunk PCM
+    frames (TTFB ~200-400ms vs ~Ns for buffered `/synthesize`).
+  - Audio frame topic renamed `audio/mp3` → `audio/pcm22050`.
+  - STT response handler accepts both `{transcript}` (hexagonal) and
+    `{text}` (legacy monolith).
+  - 7/7 livekit_room_agent tests + 27/27 LiveKit-related tests green.
+- `executive_agents_platform` `85bba26` — `feat(voice-bridge): /transcribe raw-bytes overload + Resemble WS protocol fix`
+  - `TranscribeHandler` accepts non-JSON content types as raw bytes; PCM
+    is wrapped in a minimal RIFF/WAVE header before being handed to
+    `STTPort.transcribe(audio_path)`.
+  - `ResembleStreamingAdapter` now sends required `project_uuid` and
+    configurable `model` (defaults `chatterbox-turbo`) in the WS
+    payload, per `docs.resemble.ai/docs/streaming/websocket`.
+
+Verified live: `/transcribe` (raw PCM) and `/stream_synthesize` HTTP
+plumbing both round-trip end-to-end (HTTP 200, `audio/pcm` chunked
+response). Resemble WS server itself rejects every model
+(`ultra`/`chatterbox`/`chatterbox-turbo`) for the current account
+voices with `DBCacheError: <model> is not available for this voice` —
+that is an account-tier issue (streaming requires Business plan per
+docs) and is **out of scope** for the contract resolution.
+
+#### Outstanding before audio fully round-trips
+
+- Resemble account: upgrade to a tier that exposes
+  `chatterbox-turbo` / streaming on the existing voice clones, OR
+  re-clone the voices on a tier that does. Voice metadata claims
+  `streaming: true` but synthesis backend rejects the request.
+- Voice config: `agents/<id>/voice_config.yaml` files store stale
+  `voice_uuid` prefixes; canonical UUIDs in the live account are
+  `0858e915` (Steve Jobs) and `95184f6f` (Demis Hassabis). Refresh
+  these once the account-tier issue is resolved.
+- Option 3 (LiveKit-native plugins) remains the recommended long-term
+  direction; defer until the HTTP path is validated end-to-end.
