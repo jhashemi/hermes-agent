@@ -10,6 +10,7 @@ from tools.livekit_room_agent import (
     AudioFrameBuffer,
     transcribe_via_bridge,
     synthesize_via_bridge,
+    stream_synthesize_via_bridge,
 )
 
 
@@ -52,13 +53,28 @@ async def test_transcribe_via_bridge_posts_to_8193():
 
 @pytest.mark.asyncio
 async def test_synthesize_via_bridge_returns_audio_bytes():
-    expected_audio = b"\xff\xfb" + b"\x00" * 100  # mp3-ish header
+    """Buffered wrapper accumulates streaming chunks into a single bytes blob."""
+    expected_audio = b"\xff\xfb" + b"\x00" * 100  # arbitrary payload
+
+    async def _iter_chunks(_n):
+        # Resemble's WS adapter yields multiple chunks; simulate two.
+        yield expected_audio[:50]
+        yield expected_audio[50:]
 
     async def fake_post(url, *args, **kwargs):
-        assert url == "http://localhost:8193/synthesize"
+        # The buffered wrapper calls the streaming generator, which hits
+        # /stream_synthesize, not /synthesize.
+        assert url == "http://localhost:8193/stream_synthesize"
+        # Body shape: agent_id + text + room (no raw voice_uuid).
+        body = kwargs.get("json") or {}
+        assert body.get("agent_id") == "demis_hassabis"
+        assert body.get("text") == "hello"
+        assert body.get("room") == "hermes-test"
+
         resp = mock.MagicMock()
         resp.status = 200
-        resp.read = mock.AsyncMock(return_value=expected_audio)
+        resp.content = mock.MagicMock()
+        resp.content.iter_chunked = _iter_chunks
         resp.__aenter__ = mock.AsyncMock(return_value=resp)
         resp.__aexit__ = mock.AsyncMock(return_value=None)
         return resp
@@ -68,6 +84,35 @@ async def test_synthesize_via_bridge_returns_audio_bytes():
             "http://localhost:8193", "hello", room="hermes-test", voice="demis_hassabis"
         )
     assert audio == expected_audio
+
+
+@pytest.mark.asyncio
+async def test_stream_synthesize_via_bridge_yields_chunks_in_order():
+    """Streaming generator surfaces Resemble PCM chunks as they arrive."""
+    chunks_in = [b"chunk-A" * 8, b"chunk-B" * 8, b"chunk-C" * 8]
+
+    async def _iter_chunks(_n):
+        for c in chunks_in:
+            yield c
+
+    async def fake_post(url, *args, **kwargs):
+        assert url == "http://localhost:8193/stream_synthesize"
+        resp = mock.MagicMock()
+        resp.status = 200
+        resp.content = mock.MagicMock()
+        resp.content.iter_chunked = _iter_chunks
+        resp.__aenter__ = mock.AsyncMock(return_value=resp)
+        resp.__aexit__ = mock.AsyncMock(return_value=None)
+        return resp
+
+    seen = []
+    with mock.patch("aiohttp.ClientSession.post", side_effect=fake_post):
+        async for chunk in stream_synthesize_via_bridge(
+            "http://localhost:8193", "hello", room="hermes-test", voice="demis_hassabis"
+        ):
+            seen.append(chunk)
+
+    assert seen == chunks_in
 
 
 @pytest.mark.asyncio
@@ -95,11 +140,14 @@ async def test_room_agent_publishes_voice_out_on_transcript():
 
 @pytest.mark.asyncio
 async def test_room_agent_synthesizes_on_gateway_out():
-    """When gateway_out arrives, agent synthesizes and pushes audio to room."""
+    """When gateway_out arrives, agent stream-synthesizes and pushes per-chunk frames."""
     published_frames = []
 
-    async def fake_synth(*args, **kwargs):
-        return b"\xff\xfb" + b"\x00" * 100
+    chunks_in = [b"\xff\xfb" + b"\x00" * 60, b"\xff\xfb" + b"\x00" * 60]
+
+    async def fake_stream(*args, **kwargs):
+        for c in chunks_in:
+            yield c
 
     fake_room = mock.MagicMock()
     fake_room.local_participant.publish_data = mock.AsyncMock()
@@ -108,8 +156,9 @@ async def test_room_agent_synthesizes_on_gateway_out():
     agent._room = fake_room
     agent._publish_audio_frame = mock.AsyncMock(side_effect=lambda b: published_frames.append(b))
 
-    with mock.patch("tools.livekit_room_agent.synthesize_via_bridge", side_effect=fake_synth):
+    with mock.patch("tools.livekit_room_agent.stream_synthesize_via_bridge", side_effect=fake_stream):
         await agent._on_gateway_out({"text": "hi", "room": "hermes-test", "voice": "demis_hassabis"})
 
-    assert len(published_frames) == 1
-    assert published_frames[0].startswith(b"\xff\xfb")
+    # Streaming → one publish per Resemble chunk.
+    assert len(published_frames) == len(chunks_in)
+    assert all(f.startswith(b"\xff\xfb") for f in published_frames)

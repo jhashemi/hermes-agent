@@ -84,12 +84,22 @@ class AudioFrameBuffer:
 
 
 async def transcribe_via_bridge(bridge_http: str, audio_pcm: bytes, room: str) -> str:
-    """POST audio to ADR-008 bridge /transcribe — returns text or ''."""
+    """POST audio to ADR-008 bridge ``/transcribe`` — returns text or ''.
+
+    The agent emits raw 16-bit mono PCM @ 16kHz from LiveKit AudioStream.
+    The bridge accepts non-JSON content types as raw bytes and wraps in WAV
+    using the ``X-Sample-Rate`` / ``X-Channels`` hints we send below.
+    """
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             f"{bridge_http}/transcribe",
             data=audio_pcm,
-            headers={"Content-Type": "audio/wav", "X-Room": room},
+            headers={
+                "Content-Type": "audio/x-pcm",
+                "X-Room": room,
+                "X-Sample-Rate": "16000",
+                "X-Channels": "1",
+            },
             timeout=aiohttp.ClientTimeout(total=15),
         )
         async with resp:
@@ -97,24 +107,52 @@ async def transcribe_via_bridge(bridge_http: str, audio_pcm: bytes, room: str) -
                 logger.warning("STT bridge returned %s", resp.status)
                 return ""
             payload = await resp.json()
-            return (payload or {}).get("text", "")
+            # Hexagonal handler returns ``transcript``; legacy monolith
+            # returned ``text``.  Accept either so we work against both.
+            return (payload or {}).get("transcript", "") or (payload or {}).get("text", "")
+
+
+async def stream_synthesize_via_bridge(
+    bridge_http: str, text: str, room: str, voice: str = "default"
+):
+    """POST text to ADR-008 bridge ``/stream_synthesize`` — yields PCM chunks.
+
+    Async generator. Talks to the Resemble streaming WS adapter via the
+    bridge's chunked HTTP response (``Content-Type: audio/pcm``).  Output
+    is 22050 Hz mono int16 PCM (Resemble's default streaming format).
+
+    The ``voice`` argument is sent as ``agent_id`` so the bridge resolves a
+    Resemble voice_uuid via its existing ``AGENT_ALIASES`` + voice config
+    table — callers pass agent ids like ``demis_hassabis`` / ``jeff_dean``,
+    not raw uuids.
+    """
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(
+            f"{bridge_http}/stream_synthesize",
+            json={"text": text, "agent_id": voice, "room": room},
+            timeout=aiohttp.ClientTimeout(total=60),  # stream open for synthesis duration
+        )
+        async with resp:
+            if resp.status != 200:
+                logger.warning("TTS stream bridge returned %s", resp.status)
+                return
+            # Use 4 KiB read granularity so we publish frames as Resemble emits them.
+            async for chunk in resp.content.iter_chunked(4096):
+                if chunk:
+                    yield chunk
 
 
 async def synthesize_via_bridge(
     bridge_http: str, text: str, room: str, voice: str = "default"
 ) -> bytes:
-    """POST text to ADR-008 bridge /synthesize — returns mp3 bytes."""
-    async with aiohttp.ClientSession() as session:
-        resp = await session.post(
-            f"{bridge_http}/synthesize",
-            json={"text": text, "voice": voice, "room": room},
-            timeout=aiohttp.ClientTimeout(total=20),
-        )
-        async with resp:
-            if resp.status != 200:
-                logger.warning("TTS bridge returned %s", resp.status)
-                return b""
-            return await resp.read()
+    """Buffered convenience wrapper — collects ``stream_synthesize_via_bridge`` into bytes.
+
+    Kept as a single-call surface for non-streaming callers and tests.
+    """
+    out = bytearray()
+    async for chunk in stream_synthesize_via_bridge(bridge_http, text, room, voice):
+        out.extend(chunk)
+    return bytes(out)
 
 
 class RoomAgent:
@@ -138,28 +176,44 @@ class RoomAgent:
         await self._jet.publish(f"voice_bridge.voice_out.{self.room_name}", payload.encode())
 
     async def _on_gateway_out(self, msg: dict) -> None:
-        """Gateway emitted a turn — synthesize and play into the room."""
+        """Gateway emitted a turn — stream-synthesize and play into the room.
+
+        Uses ``stream_synthesize_via_bridge`` so we publish PCM frames as
+        Resemble emits them rather than waiting for the full clip to render.
+        For an N-second utterance, first audio reaches the room in ~200-400ms
+        rather than ~N seconds with the buffered ``/synthesize`` path.
+        """
         text = msg.get("text", "")
         if not text:
             return
         voice = msg.get("voice", self._voice)
-        audio = await synthesize_via_bridge(self.bridge_http, text, self.room_name, voice)
-        if audio:
-            await self._publish_audio_frame(audio)
+        chunks = 0
+        async for chunk in stream_synthesize_via_bridge(
+            self.bridge_http, text, self.room_name, voice
+        ):
+            if chunk:
+                await self._publish_audio_frame(chunk)
+                chunks += 1
+        if chunks == 0:
+            logger.warning(
+                "stream_synthesize yielded 0 chunks for room=%s voice=%s",
+                self.room_name, voice,
+            )
 
     async def _publish_audio_frame(self, audio: bytes) -> None:
         """Push audio bytes into the LiveKit room as a published track.
 
-        For the first iteration we use LiveKit's data channel for mp3
-        delivery; the receiving client decodes + plays. A follow-up pass
-        will publish a real audio track via livekit.rtc.AudioSource for
-        true peer playback.
+        For the first iteration we use LiveKit's data channel for PCM
+        delivery; the receiving client decodes + plays. Topic
+        ``audio/pcm22050`` matches the Resemble streaming format (22050 Hz
+        mono int16). A follow-up pass will publish a real audio track via
+        ``livekit.rtc.AudioSource`` for true peer playback.
         """
         if self._room is None:
             logger.warning("audio frame dropped — room not connected")
             return
         await self._room.local_participant.publish_data(
-            audio, kind="reliable", topic="audio/mp3"
+            audio, kind="reliable", topic="audio/pcm22050"
         )
 
     async def run(self, livekit_url: str, token: str) -> None:
