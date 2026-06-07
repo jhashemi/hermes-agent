@@ -89,3 +89,35 @@ user speaks → LiveKit room → audio frames → livekit_room_agent → Deepgra
   Defer; user can toggle via existing `/voice` settings.
 - How to handle tool-call output that's too long to speak? Truncate at 500
   chars + "see Telegram for the full output". Defer to a UX iteration.
+
+## Follow-ups discovered during Task 5 smoke test (2026-06-07)
+
+The room-agent → ADR-008 voice bridge contract drifted between the two
+implementations. Smoke test validated everything except this round-trip;
+the bridge HTTP layer answers but with a different schema than
+`tools/livekit_room_agent.py` expects:
+
+| Endpoint | room_agent sends | voice_bridge_service expects |
+|---|---|---|
+| `POST /transcribe` | raw PCM body, `Content-Type: audio/wav` | JSON `{audio_url: str}` |
+| `POST /synthesize` request | JSON `{text, voice, room}` | JSON `{text, voice_uuid, agent_id, project_uuid?}` |
+| `POST /synthesize` response | raw mp3 body | JSON `{audio_path, format, voice_uuid}` |
+
+Resolution options (pick one):
+
+1. **Adapter shim in room_agent**: upload PCM to a short-lived URL (S3 presign
+   or local /tmp HTTP), call `/transcribe` with that URL; map our
+   `voice` → ADR-008 `voice_uuid` via a small lookup table; fetch
+   `audio_path` from a sidecar file server and stream as audio frames.
+2. **Add raw-bytes overload to voice_bridge_service**: accept
+   `Content-Type: audio/wav` directly in `/transcribe` and return raw mp3
+   from `/synthesize` when `Accept: audio/mpeg`. Lower-friction for
+   downstream callers; small Python addition in
+   `voice_twins/src/voice_bridge_service.py`.
+3. **Build the LiveKit-native bridge** (recommended long-term): replace the
+   HTTP round-trip with direct Deepgram + Resemble plugin participants in
+   the LiveKit room (LiveKit agents pattern). Removes the bridge from the
+   audio path entirely.
+
+Smoke test validated 1–7 of 8 checks against the live LiveKit Cloud
+project; see `scripts/livekit/smoke_test.py`.
