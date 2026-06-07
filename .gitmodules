@@ -1,3 +1,15 @@
 [submodule "tinker-atropos"]
 	path = tinker-atropos
 	url = https://github.com/nousresearch/tinker-atropos
+[submodule "projects/hermes-kanban"]
+	path = projects/hermes-kanban
+	url = https://github.com/jhashemi/hermes-kanban.git
+	branch = master
+[submodule "projects/hermes-orchestration"]
+	path = projects/hermes-orchestration
+	url = https://github.com/jhashemi/hermes-orchestration.git
+	branch = master
+[submodule "projects/hermes-framework-wiring"]
+	path = projects/hermes-framework-wiring
+	url = https://github.com/jhashemi/hermes-framework-wiring.git
+	branch = master

@@ -70,3 +70,9 @@ mini-swe-agent/
 result
 website/static/api/skills-index.json
 models-dev-upstream/
+
+# Orphan extracted-but-not-yet-submoduled project leftovers (build artifacts only:
+# htmlcov/, .pytest_cache/, data/). Keeping the directory locally for reference
+# but excluded from the parent repo to avoid noise. If/when this becomes a real
+# submodule, remove this entry and add a .gitmodules section.
+projects/okr-executive-system/
