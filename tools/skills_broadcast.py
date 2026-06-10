@@ -32,6 +32,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path("/home/ubuntu/hermes-agent")))
 from tools.skill_file_install import install_skill_file  # type: ignore
 
+# ADR-011 vein library — best-effort import; absent in some test envs.
+sys.path.insert(0, "/home/ubuntu/.hermes/scripts")
+try:
+    from hermes_telemetry import Vein  # type: ignore[import-not-found]
+except Exception:
+    Vein = None  # type: ignore[assignment]
+
 import nats  # nats-py
 
 NATS_SERVERS = os.environ.get(
@@ -139,21 +146,48 @@ async def cmd_subscribe():
     nc = await nats.connect(servers=NATS_SERVERS, name=f"skills-sub-{HOST}", max_reconnect_attempts=-1)
     js = nc.jetstream()
     print(f"[skills-sub] connected; subscribing on {STREAM}/{SUBJECT_ROOT}.>", flush=True)
+
+    # ADR-011 vein: piggyback on the existing NATS connection.
+    vein = None
+    if Vein is not None:
+        try:
+            vein = Vein.for_system("hermes-skills-broadcast", node_id=HOST, nc=nc)
+            await vein.tick(phase="boot")
+        except Exception as e:
+            print(f"[skills-sub] vein init failed: {e}", flush=True)
+            vein = None
+
     sub = await js.pull_subscribe(
         f"{SUBJECT_ROOT}.>",
         durable=f"skills-sub-{HOST}",
         stream=STREAM,
     )
+    last_tick = time.time()
     while True:
+        # Heartbeat tick every 60s so the aggregator learns our cadence
+        # (this loop spends most of its time blocked in fetch, so we
+        # tick lazily right after fetch returns).
+        if vein is not None and time.time() - last_tick >= 60.0:
+            try:
+                await vein.tick(phase="run")
+            except Exception:
+                pass
+            last_tick = time.time()
         try:
             msgs = await sub.fetch(batch=10, timeout=30)
         except asyncio.TimeoutError:
             continue
         except Exception as e:
             print(f"[skills-sub] fetch error: {e}", flush=True)
+            if vein is not None:
+                try:
+                    await vein.error("fetch_failed", detail=str(e)[:120], retriable=True)
+                except Exception:
+                    pass
             await asyncio.sleep(2)
             continue
         for msg in msgs:
+            t0 = time.time()
             try:
                 env = json.loads(msg.data)
                 name = env["name"]; origin = env["origin"]; sha = env["sha256"]
@@ -176,8 +210,25 @@ async def cmd_subscribe():
                 )
                 print(f"[skills-sub] {name} from {origin}: verdict={report.verdict} path={report.install_path}", flush=True)
                 await msg.ack()
+                if vein is not None:
+                    try:
+                        await vein.latency_ms(
+                            (time.time() - t0) * 1000.0,
+                            op="install_skill",
+                            verdict=str(report.verdict),
+                        )
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"[skills-sub] msg error: {e}", flush=True)
+                if vein is not None:
+                    try:
+                        await vein.error(
+                            "install_failed",
+                            detail=str(e)[:120], retriable=False,
+                        )
+                    except Exception:
+                        pass
                 # term so we don't block the consumer; broadcasts are replayable
                 try:
                     await msg.term()
