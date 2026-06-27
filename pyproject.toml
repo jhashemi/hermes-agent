@@ -332,6 +332,12 @@ all = [
   "hermes-agent[google]",
   "hermes-agent[web]",
   "hermes-agent[youtube]",
+  "hermes-agent[livekit]",
+]
+
+livekit = [
+  "livekit>=0.17,<2.0",
+  "livekit-api>=0.7,<2.0",
 ]
 
 [build-system]

@@ -1,0 +1,31 @@
+# Vendor jl4-service via Docker.
+#
+# The image must be available as ghcr.io/smucclaw/jl4-service:latest (per
+# ADR-011 §"Policy Catalog & jl4-service") OR built locally from the
+# l4-research repo at /home/ubuntu/l4-research/l4-ide/Dockerfile.jl4-service.
+#
+# Native-build fallback (no Docker): set JL4_NATIVE_BUILD=1 and run
+#     cabal run jl4-service -- --port 8080
+# from /home/ubuntu/l4-research/l4-ide/. (Native build is ~30min on a fresh box.)
+
+services:
+  jl4-service:
+    # Try the canonical published image first.
+    image: ghcr.io/smucclaw/jl4-service:latest
+    # Comment image: above and uncomment build: to use the local Dockerfile:
+    # build:
+    #   context: /home/ubuntu/l4-research/l4-ide
+    #   dockerfile: Dockerfile.jl4-service
+    container_name: hermes-jl4-service
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      JL4_PORT: "8080"
+      RUST_LOG: "info"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s

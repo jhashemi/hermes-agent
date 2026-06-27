@@ -1,0 +1,165 @@
+INSTALLATION QUICK REFERENCE
+═════════════════════════════════════════════════════════════════════════════
+
+STEP 1: VERIFY FILES (30 seconds)
+─────────────────────────────────────────────────────────────────────────────
+✓ /home/ubuntu/hermes-agent/gateway/builtin_hooks/voice_agent_hook.py
+✓ /home/ubuntu/hermes-agent/gateway/builtin_hooks/__init__.py
+
+Command:
+  ls -lh /home/ubuntu/hermes-agent/gateway/builtin_hooks/
+
+Should show:
+  voice_agent_hook.py  (15 KB)
+  __init__.py          (1.8 KB)
+
+
+STEP 2: EDIT gateway/run.py (3 minutes)
+─────────────────────────────────────────────────────────────────────────────
+File: /home/ubuntu/hermes-agent/gateway/run.py
+
+Location 1: At startup (search for "def main()" or "async def main()")
+Add these 3 lines:
+
+  from gateway.builtin_hooks import initialize_builtin_hooks
+  await initialize_builtin_hooks()
+
+
+Location 2: In _handle_message() method (search for "async def _handle_message")
+Add these 5 lines at the START of the method:
+
+  from gateway.builtin_hooks.voice_agent_hook import get_hook_manager
+  manager = get_hook_manager()
+  hook_result = await manager.before_message_processing(event, self)
+  if hook_result is not None:
+      await self.send_message(event.user_id, hook_result, reply_to=event)
+      return
+
+
+STEP 3: SET ENVIRONMENT VARIABLES (1 minute)
+─────────────────────────────────────────────────────────────────────────────
+File: ~/.hermes/.env
+
+Add these 4 variables:
+
+  export RESEMBLE_API_KEY="your_key"
+  export DEEPGRAM_API_KEY="your_key"
+  export LIVEKIT_API_KEY="your_key"
+  export LIVEKIT_API_SECRET="your_secret"
+
+Or via command line:
+  echo 'export RESEMBLE_API_KEY="..."' >> ~/.hermes/.env
+  echo 'export DEEPGRAM_API_KEY="..."' >> ~/.hermes/.env
+  echo 'export LIVEKIT_API_KEY="..."' >> ~/.hermes/.env
+  echo 'export LIVEKIT_API_SECRET="..."' >> ~/.hermes/.env
+
+
+STEP 4: VERIFY CHANGES (1 minute)
+─────────────────────────────────────────────────────────────────────────────
+Check modifications:
+  grep -n "initialize_builtin_hooks" /home/ubuntu/hermes-agent/gateway/run.py
+  
+Check environment:
+  cat ~/.hermes/.env | grep RESEMBLE
+
+
+STEP 5: RESTART GATEWAY (30 seconds)
+─────────────────────────────────────────────────────────────────────────────
+  hermes gateway restart
+
+
+STEP 6: VERIFY INSTALLATION (30 seconds)
+─────────────────────────────────────────────────────────────────────────────
+Check logs:
+  hermes logs --follow --gateway | head -50
+
+Should see:
+  [voice-hook] Voice bridge initialized
+  [hooks] Initialization complete
+
+
+STEP 7: TEST (1 minute)
+─────────────────────────────────────────────────────────────────────────────
+In WhatsApp, send:
+  /load-demis
+
+Expected response:
+  ✓ Loaded demis_hassabis
+
+Then send audio message:
+Expected: Voice response with transcription
+
+
+═════════════════════════════════════════════════════════════════════════════
+TOTAL TIME: ~5-10 minutes
+═════════════════════════════════════════════════════════════════════════════
+
+INSTALLATION TROUBLESHOOTING
+─────────────────────────────────────────────────────────────────────────────
+
+Problem: Hook files not found
+Solution: 
+  ls /home/ubuntu/hermes-agent/gateway/builtin_hooks/
+  If missing, copy from executive_agents_platform/
+
+Problem: gateway/run.py won't start
+Solution:
+  python3 -m py_compile /home/ubuntu/hermes-agent/gateway/run.py
+  Check syntax errors in the 8 lines you added
+
+Problem: Environment variables not set
+Solution:
+  cat ~/.hermes/.env
+  Add missing variables manually
+
+Problem: Voice commands don't work
+Solution:
+  hermes logs --follow --gateway | grep voice-hook
+  Check for errors in logs
+
+Problem: Audio messages not processed
+Solution:
+  Check that /load-demis worked first
+  Verify environment variables are set
+  Check logs for Deepgram/Resemble errors
+
+
+ROLLBACK
+─────────────────────────────────────────────────────────────────────────────
+If something breaks:
+
+1. Remove the 8 lines you added to gateway/run.py
+2. Restart gateway: hermes gateway restart
+3. Check logs: hermes logs --follow --gateway
+
+
+VERIFY INSTALLATION CHECKLIST
+─────────────────────────────────────────────────────────────────────────────
+☐ Hook files exist in /gateway/builtin_hooks/
+☐ 3 lines added at startup in gateway/run.py
+☐ 5 lines added in _handle_message() in gateway/run.py
+☐ 4 environment variables in ~/.hermes/.env
+☐ Gateway restarts without errors
+☐ Logs show [voice-hook] messages
+☐ /load-demis command works in WhatsApp
+☐ Audio messages are processed
+☐ Voice responses are generated
+
+
+SUPPORT
+─────────────────────────────────────────────────────────────────────────────
+Documentation:
+  /home/ubuntu/executive_agents_platform/INSTALLATION_GUIDE.md
+  /home/ubuntu/executive_agents_platform/SOLID_DESIGN_GUIDE.md
+  /home/ubuntu/executive_agents_platform/SOLID_DEPLOYMENT_GUIDE.md
+
+Installer script:
+  python3 /home/ubuntu/executive_agents_platform/install_voice_bridge.py --help
+
+Logs:
+  hermes logs --follow --gateway
+  hermes logs --follow --gateway | grep voice-hook
+
+═════════════════════════════════════════════════════════════════════════════
+READY TO INSTALL? Follow the 7 steps above. Takes ~5-10 minutes.
+═════════════════════════════════════════════════════════════════════════════

@@ -1,0 +1,325 @@
+{
+  "domain": "the_art_of_programming",
+  "layer": "L3",
+  "persona": "Donald Knuth",
+  "description": "Programming as art and craft",
+  "question_range": "q1-q45",
+  "response_count": 45,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What does excellence in Programming as art and craft look like?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "How do you balance speed and quality in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "What tools have been most transformative for Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "How do you approach debugging problems in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "What separates good Programming as art and craft from great Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "How has your approach to Programming as art and craft changed over your career?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "What tradeoffs are inherent in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "How do you measure success in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "What habits have made you better at Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What would you do differently in Programming as art and craft if starting over?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What does excellence in Programming as art and craft look like?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "How do you balance speed and quality in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "What tools have been most transformative for Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "How do you approach debugging problems in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "What separates good Programming as art and craft from great Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "How has your approach to Programming as art and craft changed over your career?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "What tradeoffs are inherent in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "How do you measure success in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "What habits have made you better at Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What would you do differently in Programming as art and craft if starting over?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "What does excellence in Programming as art and craft look like?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "How do you balance speed and quality in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "What tools have been most transformative for Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "How do you approach debugging problems in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "What separates good Programming as art and craft from great Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "How has your approach to Programming as art and craft changed over your career?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "What tradeoffs are inherent in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "How do you measure success in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "What habits have made you better at Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What would you do differently in Programming as art and craft if starting over?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "What does excellence in Programming as art and craft look like?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "How do you balance speed and quality in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "What tools have been most transformative for Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "How do you approach debugging problems in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "What separates good Programming as art and craft from great Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q36",
+      "question": "How has your approach to Programming as art and craft changed over your career?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q37",
+      "question": "What tradeoffs are inherent in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q38",
+      "question": "How do you measure success in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q39",
+      "question": "What habits have made you better at Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q40",
+      "question": "What would you do differently in Programming as art and craft if starting over?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q41",
+      "question": "What does excellence in Programming as art and craft look like?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q42",
+      "question": "How do you balance speed and quality in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q43",
+      "question": "What tools have been most transformative for Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q44",
+      "question": "How do you approach debugging problems in Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q45",
+      "question": "What separates good Programming as art and craft from great Programming as art and craft?",
+      "domain": "the_art_of_programming",
+      "domain_source": "domain_2",
+      "source_layer": "L3"
+    }
+  ]
+}

@@ -1,0 +1,322 @@
+{
+  "agent": "jeff_dean",
+  "layer": "L3",
+  "domain_count": 8,
+  "domains": {
+    "Distributed Systems": {
+      "name": "Distributed Systems",
+      "questions": [
+        {
+          "question": "What was the key insight behind Google's early infrastructure?",
+          "response_length": 188,
+          "quality_score": 0.94,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did MapReduce change distributed computing?",
+          "response_length": 192,
+          "quality_score": 0.96,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes Bigtable's design elegant?",
+          "response_length": 202,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you handle partial failure in distributed systems?",
+          "response_length": 254,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the most underappreciated distributed systems concept?",
+          "response_length": 257,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.98,
+      "avg_authenticity": 1.0,
+      "total_words": 1093,
+      "question_count": 5
+    },
+    "Scale Engineering": {
+      "name": "Scale Engineering",
+      "questions": [
+        {
+          "question": "How do you design systems that scale 10x each year?",
+          "response_length": 228,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the relationship between scale and system simplicity?",
+          "response_length": 258,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you debug systems processing billions of requests?",
+          "response_length": 289,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the cost of consistency vs availability at scale?",
+          "response_length": 328,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does Google's infrastructure differ from what people imagine?",
+          "response_length": 419,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1522,
+      "question_count": 5
+    },
+    "ML Infrastructure": {
+      "name": "ML Infrastructure",
+      "questions": [
+        {
+          "question": "What drove the creation of TensorFlow?",
+          "response_length": 203,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you think about ML system design vs traditional systems?",
+          "response_length": 248,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the key to efficient distributed training?",
+          "response_length": 261,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should ML infrastructure evolve for foundation models?",
+          "response_length": 288,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the relationship between systems thinking and ML?",
+          "response_length": 321,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1321,
+      "question_count": 5
+    },
+    "AI Systems Design": {
+      "name": "AI Systems Design",
+      "questions": [
+        {
+          "question": "How do you approach designing systems you can't fully predict?",
+          "response_length": 228,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the key to making AI systems reliable?",
+          "response_length": 262,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should AI infrastructure differ from traditional cloud?",
+          "response_length": 296,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes Gemini's infrastructure unique?",
+          "response_length": 269,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you think about the compute needs of future AI?",
+          "response_length": 366,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1421,
+      "question_count": 5
+    },
+    "Technical Leadership": {
+      "name": "Technical Leadership",
+      "questions": [
+        {
+          "question": "How do you manage thousands of engineers across Google?",
+          "response_length": 232,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your approach to technical decision-making at scale?",
+          "response_length": 225,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you stay technically relevant as a senior leader?",
+          "response_length": 250,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes an engineering organization effective?",
+          "response_length": 255,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you evaluate and grow technical talent?",
+          "response_length": 295,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1257,
+      "question_count": 5
+    },
+    "Ethics & AI": {
+      "name": "Ethics & AI",
+      "questions": [
+        {
+          "question": "How should we think about AI's environmental impact?",
+          "response_length": 202,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's Google's responsibility in AI development?",
+          "response_length": 234,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you balance open research with competitive advantage?",
+          "response_length": 276,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What safeguards should AI systems have?",
+          "response_length": 271,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should the AI community handle dual-use concerns?",
+          "response_length": 338,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1321,
+      "question_count": 5
+    },
+    "Competition & Infrastructure": {
+      "name": "Competition & Infrastructure",
+      "questions": [
+        {
+          "question": "How does Google's infrastructure advantage translate to AI?",
+          "response_length": 229,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your response to the GPU shortage challenge?",
+          "response_length": 242,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you compete with specialized AI hardware?",
+          "response_length": 249,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What infrastructure innovation matters most for AI?",
+          "response_length": 231,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you think about custom silicon vs commodity hardware?",
+          "response_length": 242,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1193,
+      "question_count": 5
+    },
+    "Legacy & Vision": {
+      "name": "Legacy & Vision",
+      "questions": [
+        {
+          "question": "What computing problem would you most like to solve?",
+          "response_length": 166,
+          "quality_score": 0.83,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should the next generation think about systems design?",
+          "response_length": 219,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the most important unsolved systems problem?",
+          "response_length": 190,
+          "quality_score": 0.95,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you want your work to be remembered?",
+          "response_length": 210,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What would you build with unlimited resources?",
+          "response_length": 298,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.956,
+      "avg_authenticity": 1.0,
+      "total_words": 1083,
+      "question_count": 5
+    }
+  },
+  "overall_quality": 0.992,
+  "overall_authenticity": 1.0,
+  "processed_at": "2026-05-17T01:38:17.454788"
+}

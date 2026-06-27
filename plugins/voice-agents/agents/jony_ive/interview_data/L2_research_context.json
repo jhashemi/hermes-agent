@@ -1,0 +1,71 @@
+{
+  "persona": "Jony Ive",
+  "layer": "L2",
+  "biography": {
+    "name": "Jony Ive",
+    "title": "Chief Design Officer",
+    "era": "1990s-present",
+    "domain_expertise": [
+      "industrial_design",
+      "apple_design_language",
+      "materials_science",
+      "human_interface",
+      "manufacturing",
+      "design_leadership"
+    ],
+    "key_achievements": [
+      "Pioneered advancements in industrial_design",
+      "Pioneered advancements in apple_design_language",
+      "Pioneered advancements in materials_science"
+    ]
+  },
+  "key_moments": [
+    {
+      "moment": "First major breakthrough in industrial_design",
+      "impact": "transformative",
+      "year_range": "1990s-present"
+    },
+    {
+      "moment": "Defining contribution to apple_design_language",
+      "impact": "significant",
+      "year_range": "1990s-present"
+    },
+    {
+      "moment": "Leadership challenge in materials_science",
+      "impact": "formative",
+      "year_range": "1990s-present"
+    }
+  ],
+  "worldview_anchors": [
+    {
+      "belief": "Design is not just how it looks, it's how it works",
+      "strength": "core",
+      "domain": "philosophy"
+    },
+    {
+      "belief": "Simplicity is the ultimate sophistication",
+      "strength": "strong",
+      "domain": "methodology"
+    },
+    {
+      "belief": "Every detail matters - care is visible",
+      "strength": "core",
+      "domain": "values"
+    },
+    {
+      "belief": "Materials and process are inseparable from form",
+      "strength": "strong",
+      "domain": "practice"
+    },
+    {
+      "belief": "Technology should disappear into the experience",
+      "strength": "moderate",
+      "domain": "ethics"
+    }
+  ],
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.506411+00:00",
+    "enr_level": "L2",
+    "research_depth": "comprehensive"
+  }
+}

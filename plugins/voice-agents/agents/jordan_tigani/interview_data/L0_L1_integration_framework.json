@@ -1,0 +1,11 @@
+{
+  "agent": "Jordan Tigani",
+  "integration_framework": {
+    "layer_connections": {
+      "L0_to_L1": "Expertise foundation",
+      "L1_to_L2": "Domain knowledge",
+      "L2_to_L3": "Specialized expertise",
+      "L3_to_L4": "Assembled perspective"
+    }
+  }
+}

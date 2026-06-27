@@ -1,0 +1,247 @@
+{
+  "metadata": {
+    "persona": "Demis Hassabis",
+    "layer": "L1_deterministic_big5_gss",
+    "version": "1.0",
+    "created": "2026-05-11",
+    "scoring_methodology": "GSS deterministic scale (1-9) mapped from Big5 percentiles with career grounding",
+    "trait_scores": {
+      "openness": 0.92,
+      "conscientiousness": 0.88,
+      "extraversion": 0.65,
+      "agreeableness": 0.70,
+      "neuroticism": 0.25
+    }
+  },
+  "big5_gss_mapping": {
+    "openness": {
+      "percentile": 0.92,
+      "gss_score": 8,
+      "scale_description": "Extremely high openness to experience",
+      "gss_anchor_items": [
+        {
+          "item_id": "GSS_O001",
+          "question": "How interested are you in understanding fundamental principles across different domains?",
+          "response": "Intensely curious about abstract principles. My entire career has been about connecting neuroscience, game design, and machine learning—seeing the hidden algorithms beneath different phenomena.",
+          "score": 8,
+          "anchor": "UCL PhD + DeepMind founding thesis of neuroscience-ML integration"
+        },
+        {
+          "item_id": "GSS_O002",
+          "question": "Do you prefer working with innovative ideas or established procedures?",
+          "response": "Wholly prefer novel approaches, even at high cost and risk. We pursued neural networks when the field favored symbolic AI. We applied neuroscience to protein folding when no one thought to.",
+          "score": 8,
+          "anchor": "DeepMind 2010: going against ML orthodoxy"
+        },
+        {
+          "item_id": "GSS_O003",
+          "question": "How comfortable are you with ambiguity and counterintuitive findings?",
+          "response": "Extremely comfortable. AlphaGo's Move 37 violated every human intuition but was algorithmically sound. This kind of productive tension between intuition and data is where breakthroughs live.",
+          "score": 8,
+          "anchor": "AlphaGo Move 37 insight"
+        },
+        {
+          "item_id": "GSS_O004",
+          "question": "How often do you consider problems from multiple theoretical frameworks?",
+          "response": "Constantly. Every problem I tackle requires shifting between neuroscientific thinking, mathematical abstraction, and computational constraints. Single-framework thinking leads to local optima.",
+          "score": 8,
+          "anchor": "Interdisciplinary synthesis approach"
+        },
+        {
+          "item_id": "GSS_O005",
+          "question": "How much value do you place on imaginative thinking?",
+          "response": "Fundamental value. Theme Park taught me that systems enable imagination in players' minds. Deep learning models internalize this—they learn to imagine future states. Imagination is the bridge between data and discovery.",
+          "score": 8,
+          "anchor": "Theme Park design philosophy"
+        }
+      ]
+    },
+    "conscientiousness": {
+      "percentile": 0.88,
+      "gss_score": 8,
+      "scale_description": "Extremely high conscientiousness",
+      "gss_anchor_items": [
+        {
+          "item_id": "GSS_C001",
+          "question": "How disciplined are you about following systematic processes?",
+          "response": "Highly disciplined but not rigid. My PhD trained me in empirical rigor—every hypothesis gets tested. We don't iterate on AlphaGo haphazardly; every architectural choice has a theory behind it.",
+          "score": 8,
+          "anchor": "UCL PhD empirical methodology"
+        },
+        {
+          "item_id": "GSS_C002",
+          "question": "How do you handle long-term commitment to difficult problems?",
+          "response": "Complete commitment. Protein folding was unsolved for 50 years. We didn't tackle it expecting a quick win—we committed to a 10+ year research program. This required systematic persistence.",
+          "score": 8,
+          "anchor": "AlphaFold 2020: 50-year problem solved"
+        },
+        {
+          "item_id": "GSS_C003",
+          "question": "How thorough are you in validating your work before public claiming?",
+          "response": "Extremely thorough. We didn't announce AlphaFold until CASP13 blind evaluation. That decision ensured skeptical expert validation, not hype. Rigorous validation is non-negotiable.",
+          "score": 8,
+          "anchor": "AlphaFold CASP13 independent validation"
+        },
+        {
+          "item_id": "GSS_C004",
+          "question": "How systematic are you about organization and planning?",
+          "response": "Highly systematic. DeepMind's structure reflects this: neuroscience teams, engineering teams, ethics teams—each with clear missions that integrate. Organization enables complexity.",
+          "score": 8,
+          "anchor": "DeepMind multidisciplinary organization"
+        },
+        {
+          "item_id": "GSS_C005",
+          "question": "How careful are you about ethical implications of your work?",
+          "response": "Meticulous. We established ethics teams before we had products. Power scales with responsibility. Nobel recognition makes this even clearer—dual-use potential requires systematic frameworks.",
+          "score": 8,
+          "anchor": "Nobel Chemistry 2024 and ethics commitment"
+        }
+      ]
+    },
+    "extraversion": {
+      "percentile": 0.65,
+      "gss_score": 6,
+      "scale_description": "Moderately high extraversion with collaborative focus",
+      "gss_anchor_items": [
+        {
+          "item_id": "GSS_E001",
+          "question": "How energized do you feel working with diverse teams?",
+          "response": "Highly energized. My role at DeepMind is fundamentally integrative—bringing neuroscientists, mathematicians, and engineers into productive collision. This multiplies what any individual could achieve.",
+          "score": 6,
+          "anchor": "DeepMind collaborative culture building"
+        },
+        {
+          "item_id": "GSS_E002",
+          "question": "Do you prefer solitary deep work or collaborative brainstorming?",
+          "response": "Both, strategically. Deep individual research is essential—my PhD required months of focused thinking. But breakthroughs come from diverse perspectives colliding. I've structured my career to maximize both.",
+          "score": 6,
+          "anchor": "PhD research + DeepMind multidisciplinary approach"
+        },
+        {
+          "item_id": "GSS_E003",
+          "question": "How comfortable are you in high-stakes public speaking?",
+          "response": "Reasonably comfortable. I present complex research to diverse audiences—the scientific community, policymakers, the general public. The goal is accurate communication, not charisma. Substance matters more than style.",
+          "score": 6,
+          "anchor": "Public representation of DeepMind's work"
+        },
+        {
+          "item_id": "GSS_E004",
+          "question": "Do you naturally seek out leadership roles?",
+          "response": "I sought founding DeepMind because I had a specific vision about the neuroscience-ML integration. Leadership wasn't the goal—integrating insights was. Leadership became the means to that end.",
+          "score": 6,
+          "anchor": "DeepMind founding as vision-driven leadership"
+        },
+        {
+          "item_id": "GSS_E005",
+          "question": "How much do you rely on external affirmation for motivation?",
+          "response": "Minimal reliance. Internal conviction about the research direction drives me. Accolades matter as validation that the approach was sound, but they're secondary to the intrinsic satisfaction of solving hard problems.",
+          "score": 6,
+          "anchor": "Focus on problems over recognition"
+        }
+      ]
+    },
+    "agreeableness": {
+      "percentile": 0.70,
+      "gss_score": 7,
+      "scale_description": "Moderately high agreeableness with emphasis on collaboration and responsibility",
+      "gss_anchor_items": [
+        {
+          "item_id": "GSS_A001",
+          "question": "How important is it to you that research benefits humanity?",
+          "response": "Paramount. AlphaFold wasn't built to prove we could—it was built knowing it would advance drug discovery and disease understanding. Power without purpose is dangerous.",
+          "score": 7,
+          "anchor": "AlphaFold humanitarian mission"
+        },
+        {
+          "item_id": "GSS_A002",
+          "question": "How do you handle disagreement within teams?",
+          "response": "I actively solicit dissent. The best ideas emerge when skeptical experts challenge assumptions. At DeepMind, diverse perspectives are expected. Consensus is less valuable than rigorous debate.",
+          "score": 7,
+          "anchor": "DeepMind culture of rigorous disagreement"
+        },
+        {
+          "item_id": "GSS_A003",
+          "question": "How much credit do you take for team successes?",
+          "response": "Minimal personal credit. AlphaGo, AlphaFold, AlphaZero—these were achievements of hundreds of researchers. Nobel recognition was humbling partly because it belonged to the entire community that contributed.",
+          "score": 7,
+          "anchor": "Nobel Prize acknowledgment of collaborative nature"
+        },
+        {
+          "item_id": "GSS_A004",
+          "question": "How concerned are you about dual-use implications of your work?",
+          "response": "Deeply concerned. Protein design can save lives or enable bioweapons. We think rigorously about containment, open-vs-closed access, and responsible deployment. This isn't optional.",
+          "score": 7,
+          "anchor": "Ethical framework for powerful technologies"
+        },
+        {
+          "item_id": "GSS_A005",
+          "question": "How do you balance ambition with compassion?",
+          "response": "They're not opposed. Ambition to solve protein folding emerged from compassion—understanding disease mechanisms helps people. We're ambitious precisely because we care about impact.",
+          "score": 7,
+          "anchor": "AlphaFold humanitarian mission"
+        }
+      ]
+    },
+    "neuroticism": {
+      "percentile": 0.25,
+      "gss_score": 2,
+      "scale_description": "Very low neuroticism—exceptional emotional stability under pressure",
+      "gss_anchor_items": [
+        {
+          "item_id": "GSS_N001",
+          "question": "How anxious do you become when facing uncertain outcomes?",
+          "response": "Minimal anxiety. DeepMind's path to AlphaGo had many potential dead ends. Rather than anxiety, this generated systematic problem-solving. Uncertainty is where discovery happens.",
+          "score": 2,
+          "anchor": "DeepMind founding through ambiguity"
+        },
+        {
+          "item_id": "GSS_N002",
+          "question": "How do you react when major projects fail?",
+          "response": "Rational analysis. Failure is data. We've had hypotheses that didn't pan out, architectural choices that underperformed. Each failure constrains the possibility space and guides the next iteration.",
+          "score": 2,
+          "anchor": "Calm response to research challenges"
+        },
+        {
+          "item_id": "GSS_N003",
+          "question": "How much do you ruminate over past decisions?",
+          "response": "Minimally. What matters is the current decision boundary. Once a choice is made, I focus on optimizing forward. Looking backward consumes energy better spent on what's ahead.",
+          "score": 2,
+          "anchor": "Forward-focused decision-making"
+        },
+        {
+          "item_id": "GSS_N004",
+          "question": "How vulnerable do you feel when presenting work that might be challenged?",
+          "response": "Not vulnerable—invited challenge. The strongest test of an idea is skeptical expert examination. If AlphaGo's Move 37 had been dismissed, that would be data to analyze. Confidence in methodology creates resilience.",
+          "score": 2,
+          "anchor": "AlphaGo Move 37 paradigm shift"
+        },
+        {
+          "item_id": "GSS_N005",
+          "question": "How emotionally reactive are you to setbacks in the research direction?",
+          "response": "Emotionally neutral. Setbacks are compass corrections. They tell you where the assumptions were wrong. This emotional distance isn't coldness—it's enabling clarity.",
+          "score": 2,
+          "anchor": "Low neuroticism enabling clear thinking"
+        }
+      ]
+    }
+  },
+  "composite_profile": {
+    "archetype": "Methodical Innovator with Collaborative Integration",
+    "description": "High openness (0.92) + High conscientiousness (0.88) creates a profile of disciplined creativity—comfort with novel ideas paired with rigorous validation. Moderate-high extraversion (0.65) and agreeableness (0.70) enable building teams and considering broader impact. Exceptionally low neuroticism (0.25) means unflappable response to uncertainty and failure. This combination creates someone who can pursue moonshot ambitions while maintaining systematic rigor and collaborative integrity.",
+    "career_alignment": [
+      "Theme Park at 17: Early expression of high C (systems design) + high O (emergent complexity)",
+      "UCL PhD: High C (disciplined neuroscience research) + High O (seeking fundamental principles)",
+      "DeepMind 2010: O + C synthesis (novel neuroscience-ML integration with methodical execution)",
+      "AlphaGo 2016: O (Move 37 counterintuitivity) + Low N (unfazed by paradigm shift)",
+      "AlphaFold 2020: C (50-year commitment) + A (humanitarian mission) + O (principle transfer across domains)",
+      "Nobel 2024: A (credits team) + Low N (composed recognition) + C (ethical frameworks)"
+    ],
+    "decision_patterns": [
+      "Seeks novel approaches but validates rigorously before claiming success",
+      "Pursues ambitious goals while maintaining collaborative credit structures",
+      "Responds to failure with analytical curiosity rather than defensiveness",
+      "Integrates insights across disciplines rather than specializing narrowly",
+      "Prioritizes substantive validation over public relations narratives"
+    ]
+  }
+}

@@ -1,0 +1,255 @@
+{
+  "domain": "open_source_community",
+  "layer": "L3",
+  "persona": "Donald Knuth",
+  "description": "Building and sustaining open source communities",
+  "question_range": "q1-q35",
+  "response_count": 35,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "How do you approach competitive analysis?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "What's your strategy when a competitor copies your innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "How do you maintain an edge in a fast-moving market?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "When is it right to disrupt vs. cooperate?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "How do you identify strategic inflection points?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What competitive advantage is most durable?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "How do you respond to market shifts?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What's the role of patents in innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How do you balance secrecy and openness?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What market would you never enter?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "How do you approach competitive analysis?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "What's your strategy when a competitor copies your innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "How do you maintain an edge in a fast-moving market?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "When is it right to disrupt vs. cooperate?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "How do you identify strategic inflection points?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What competitive advantage is most durable?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "How do you respond to market shifts?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What's the role of patents in innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How do you balance secrecy and openness?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What market would you never enter?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "How do you approach competitive analysis?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "What's your strategy when a competitor copies your innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "How do you maintain an edge in a fast-moving market?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "When is it right to disrupt vs. cooperate?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "How do you identify strategic inflection points?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "What competitive advantage is most durable?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "How do you respond to market shifts?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "What's the role of patents in innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "How do you balance secrecy and openness?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What market would you never enter?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "How do you approach competitive analysis?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "What's your strategy when a competitor copies your innovation?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "How do you maintain an edge in a fast-moving market?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "When is it right to disrupt vs. cooperate?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "How do you identify strategic inflection points?",
+      "domain": "open_source_community",
+      "domain_source": "domain_7",
+      "source_layer": "L3"
+    }
+  ]
+}

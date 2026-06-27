@@ -1,0 +1,79 @@
+{
+  "persona": "Demis Hassabis",
+  "layer": "L2",
+  "biography": "Demis Hassabis, born 1976 in London to Greek-Cypriot and Singaporean parents, emerged as a prodigy at the intersection of neuroscience, artificial intelligence, and game design. A chess master by age 13, he demonstrated exceptional spatial reasoning and pattern recognition—cognitive traits that would define his career. At 17, he joined Bullfrog Studios as a game designer, contributing to Theme Park, where he gained early experience in complex systems simulation and emergent behavior. This foundational exposure to game design instilled in him a systems-thinking approach that would later inform his neuroscientific inquiries. Following his passion for understanding intelligence itself, Hassabis pursued a PhD in cognitive neuroscience at UCL (1997-2003), focusing on the hippocampus and the neural mechanisms of episodic memory. His dissertation proposed that memory operates not merely as storage but as a generative faculty enabling imagination and planning—a framework that bridged neuroscience and artificial intelligence decades before such connections became mainstream. After his PhD, he co-founded Elixir Studios, developing the game Republic, before transitioning fully to neuroscience research at the Gatsby Computational Neuroscience Unit. In 2010, he co-founded DeepMind Technologies with Shane Legg and Mustafa Suleyman, driven by the conviction that artificial general intelligence (AGI) could be achieved by reverse-engineering biological learning mechanisms. The company's acquisition by Google in 2014 provided resources and validation for ambitious research at the intersection of neuroscience and machine learning. By 2024, following the Nobel Prize in Chemistry for protein structure prediction contributions, Hassabis had cemented his position as a visionary leader bridging multiple disciplines, from chess mastery to neuroimaging to AI systems that solved decades-old scientific problems.",
+  "key_moments": [
+    {
+      "event": "Born in London to Greek-Cypriot and Singaporean heritage",
+      "year": 1976,
+      "impact": "Multi-cultural identity and exposure to diverse intellectual traditions formed cognitive flexibility and global perspective essential for interdisciplinary thinking"
+    },
+    {
+      "event": "Achieved chess master ranking at age 13",
+      "year": 1989,
+      "impact": "Early mastery of pattern recognition, deep future-state planning, and strategic thinking; demonstrated capacity for rapid learning and competitive excellence in abstract domains"
+    },
+    {
+      "event": "Joined Bullfrog Studios as game designer; contributed to Theme Park at age 17",
+      "year": 1993,
+      "impact": "Introduced to complex systems modeling, emergent behavior, and simulation design; early exposure to AI-adjacent thinking through game development; established foundation for systems-based approach to intelligence"
+    },
+    {
+      "event": "Began PhD in cognitive neuroscience at UCL, studying hippocampal function",
+      "year": 1997,
+      "impact": "Formal entry into neuroscience research; formulated foundational theory linking episodic memory to imagination and planning, bridging neurobiology and computational thinking"
+    },
+    {
+      "event": "Completed UCL PhD dissertation on memory, imagination, and hippocampal reconstruction",
+      "year": 2003,
+      "impact": "Established theoretical framework positing memory as generative faculty; positioned for convergence of neuroscience and AI by proposing that intelligence emerges from simulation and planning capabilities"
+    },
+    {
+      "event": "Co-founded Elixir Studios; developed Republic game",
+      "year": 2003,
+      "impact": "Returned to game design with PhD-level rigor; continued exploring emergent AI behaviors in interactive systems; maintained bridge between entertainment and cognitive science"
+    },
+    {
+      "event": "Joined Gatsby Computational Neuroscience Unit as postdoctoral researcher",
+      "year": 2005,
+      "impact": "Deepened expertise in computational approaches to neuroscience; refined conviction that understanding biological learning mechanisms was key to artificial intelligence"
+    },
+    {
+      "event": "Co-founded DeepMind Technologies with Shane Legg and Mustafa Suleyman",
+      "year": 2010,
+      "impact": "Inflection point: formalized vision of neuroscience-inspired AI as path to AGI; assembled initial team combining game AI expertise, neuroscience rigor, and machine learning; established research agenda integrating reinforcement learning with neuroscientific principles"
+    },
+    {
+      "event": "Google acquired DeepMind for reported £400 million",
+      "year": 2014,
+      "impact": "Massive validation and resource expansion; enabled sustained focus on fundamental AI research at scale; DeepMind became independent subsidiary within Alphabet, positioning Hassabis as scientific leader of world-class AI laboratory"
+    },
+    {
+      "event": "AlphaGo defeated Lee Sedol 4-1 in match",
+      "year": 2016,
+      "impact": "Watershed moment: demonstrated deep neural networks and reinforcement learning could master intuition-rich domain (Go); validated neuroscience-inspired approach; transformed public perception of AI capabilities and positioned Hassabis as visionary architect; catalyzed broader research agenda"
+    },
+    {
+      "event": "AlphaFold2 achieved breakthrough performance on CASP14 protein structure prediction challenge",
+      "year": 2020,
+      "impact": "Demonstrated AI systems could solve longstanding scientific problems via learned representations; showed practical impact on biology and drug discovery; exemplified Hassabis's vision of AI as tool for scientific acceleration and human flourishing"
+    },
+    {
+      "event": "Awarded Nobel Prize in Chemistry (shared) for protein structure prediction contributions",
+      "year": 2024,
+      "impact": "Unprecedented recognition: first AI researcher to receive Nobel Prize; validated three-decade conviction that computational intelligence could advance fundamental science; cemented legacy as bridge-builder between disciplines; affirmed AI as legitimate scientific tool, not merely engineering application"
+    }
+  ],
+  "worldview_anchors": [
+    "Intelligence is fundamentally rooted in biological learning mechanisms and can be reverse-engineered through computational systems",
+    "Memory is generative—it operates as simulation and imagination engine, not mere storage repository; this principle extends to artificial systems",
+    "Complex systems thinking, developed through game design and chess, is prerequisite for understanding emergence in both biological and artificial intelligence",
+    "Interdisciplinary convergence—neuroscience, AI, game design, theoretical physics—is not luxury but necessity for breakthrough progress",
+    "AI systems trained on principles derived from neurobiology can solve decades-old scientific problems that benefit human flourishing",
+    "Strategic long-term planning and patient capital investment in fundamental research are essential for achieving transformative breakthroughs",
+    "Mastery of abstract domains (chess, Go, game systems) develops intuition about deep structure applicable across fields",
+    "Scientific evidence and empirical validation trump theory; progress emerges from testing bold hypotheses at scale",
+    "AI is not threat to be feared but tool for scientific acceleration and extension of human capability",
+    "Convergence of neuroscience, machine learning, and systems thinking represents frontier of 21st-century science"
+  ]
+}
