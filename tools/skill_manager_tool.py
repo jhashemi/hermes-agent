@@ -112,6 +112,77 @@ MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
 
 
+def _broadcast_skill_to_cluster(name: str) -> None:
+    """Fire-and-forget cluster broadcast for a skill that was just created or updated.
+
+    Bound by L4 policy ``hermes-skills-broadcast/runtime.l4 § skill-broadcast-hook-coverage``:
+    EVERY code path that creates or updates a skill MUST broadcast. This was
+    previously satisfied only by the bg-review hook in ``run_agent.py``; the
+    direct ``skill_manage`` mutation paths (create/edit/patch/write_file)
+    were the open gap that caused the 2026-06-06 ``l4-governance-compilation``
+    miss until it was manually republished.
+
+    Resolves the local skill directory under both layouts (top-level and
+    category-nested), then publishes via ``tools.skills_broadcast.cmd_publish``
+    in a daemon thread so a NATS hiccup, missing skill dir, or import failure
+    cannot break the calling tool's return value or block the caller.
+
+    Deletions are intentionally NOT broadcast — see L4 policy
+    ``hermes-skills-broadcast/governance.l4 § skill-deletion-not-permitted-via-broadcast``.
+    """
+    if not name or not isinstance(name, str):
+        return
+
+    import threading
+
+    def _do_broadcast() -> None:
+        try:
+            import asyncio
+            import sys as _sys
+            from pathlib import Path as _Path
+            _broadcast_root = _Path("/home/ubuntu/hermes-agent")
+            if str(_broadcast_root) not in _sys.path:
+                _sys.path.insert(0, str(_broadcast_root))
+            from tools import skills_broadcast as _sb  # type: ignore
+
+            # Top-level layout: ~/.hermes/skills/<name>/SKILL.md
+            direct = _sb.SKILLS_DIR / name
+            skill_dir = direct if (direct / "SKILL.md").exists() else None
+            if skill_dir is None:
+                # Category-nested: ~/.hermes/skills/<category>/<name>/SKILL.md
+                for entry in _sb.SKILLS_DIR.iterdir():
+                    if not entry.is_dir() or entry.name.startswith("."):
+                        continue
+                    candidate = entry / name
+                    if (candidate / "SKILL.md").exists():
+                        skill_dir = candidate
+                        break
+            if skill_dir is None:
+                logger.debug(
+                    "skill broadcast (skill_manage): %s has no SKILL.md under %s; skipping",
+                    name,
+                    _sb.SKILLS_DIR,
+                )
+                return
+            try:
+                asyncio.run(_sb.cmd_publish(skill_dir))
+                logger.info(
+                    "skill broadcast (skill_manage): published %s to cluster", name
+                )
+            except Exception as e:
+                logger.warning(
+                    "skill broadcast (skill_manage): publish %s failed: %s", name, e
+                )
+        except Exception as e:
+            logger.debug("skill broadcast thread aborted: %s", e)
+
+    threading.Thread(
+        target=_do_broadcast,
+        daemon=True,
+        name=f"skill-manage-broadcast-{name}",
+    ).start()
+
+
 def _containing_skills_root(skill_path: Path) -> Path:
     """Return the skills root directory (local or external_dirs entry) that
     contains ``skill_path``.  Falls back to the local ``SKILLS_DIR`` if no
@@ -418,6 +489,7 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
         "path": str(skill_dir.relative_to(SKILLS_DIR)),
         "skill_md": str(skill_md),
     }
+    _broadcast_skill_to_cluster(name)
     if category:
         result["category"] = category
     result["hint"] = (
@@ -453,11 +525,13 @@ def _edit_skill(name: str, content: str) -> Dict[str, Any]:
             _atomic_write_text(skill_md, original_content)
         return {"success": False, "error": scan_error}
 
-    return {
+    result = {
         "success": True,
         "message": f"Skill '{name}' updated.",
         "path": str(existing["path"]),
     }
+    _broadcast_skill_to_cluster(name)
+    return result
 
 
 def _patch_skill(
@@ -548,10 +622,12 @@ def _patch_skill(
         _atomic_write_text(target, original_content)
         return {"success": False, "error": scan_error}
 
-    return {
+    result = {
         "success": True,
         "message": f"Patched {'SKILL.md' if not file_path else file_path} in skill '{name}' ({match_count} replacement{'s' if match_count > 1 else ''}).",
     }
+    _broadcast_skill_to_cluster(name)
+    return result
 
 
 def _delete_skill(name: str, absorbed_into: Optional[str] = None) -> Dict[str, Any]:
@@ -656,11 +732,13 @@ def _write_file(name: str, file_path: str, file_content: str) -> Dict[str, Any]:
             target.unlink(missing_ok=True)
         return {"success": False, "error": scan_error}
 
-    return {
+    result = {
         "success": True,
         "message": f"File '{file_path}' written to skill '{name}'.",
         "path": str(target),
     }
+    _broadcast_skill_to_cluster(name)
+    return result
 
 
 def _remove_file(name: str, file_path: str) -> Dict[str, Any]:

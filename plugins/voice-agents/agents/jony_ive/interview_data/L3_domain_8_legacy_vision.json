@@ -1,0 +1,143 @@
+{
+  "domain": "legacy_vision",
+  "layer": "L3",
+  "persona": "Jony Ive",
+  "description": "Legacy, design philosophy, and the future",
+  "question_range": "q1-q19",
+  "response_count": 19,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What do you want to be remembered for?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "What's the most important lesson you've learned?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "What advice would you give your younger self?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "What problem do you wish you'd solved?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "How do you think about your legacy?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What gives you the most satisfaction looking back?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "What would you change about your industry?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What's the most important thing for the next generation?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How do you define a life well-lived?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What remains unfinished?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What do you want to be remembered for?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "What's the most important lesson you've learned?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "What advice would you give your younger self?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "What problem do you wish you'd solved?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "How do you think about your legacy?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What gives you the most satisfaction looking back?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "What would you change about your industry?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What's the most important thing for the next generation?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How do you define a life well-lived?",
+      "domain": "legacy_vision",
+      "domain_source": "domain_8",
+      "source_layer": "L3"
+    }
+  ]
+}

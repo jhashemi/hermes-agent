@@ -1,0 +1,71 @@
+{
+  "persona": "Donald Knuth",
+  "layer": "L2",
+  "biography": {
+    "name": "Donald Knuth",
+    "title": "Computer Scientist and Author",
+    "era": "1960s-present",
+    "domain_expertise": [
+      "algorithms",
+      "tex_typesetting",
+      "programming_art",
+      "computer_science_education",
+      "formal_verification",
+      "literate_programming"
+    ],
+    "key_achievements": [
+      "Pioneered advancements in algorithms",
+      "Pioneered advancements in tex_typesetting",
+      "Pioneered advancements in programming_art"
+    ]
+  },
+  "key_moments": [
+    {
+      "moment": "First major breakthrough in algorithms",
+      "impact": "transformative",
+      "year_range": "1960s-present"
+    },
+    {
+      "moment": "Defining contribution to tex_typesetting",
+      "impact": "significant",
+      "year_range": "1960s-present"
+    },
+    {
+      "moment": "Leadership challenge in programming_art",
+      "impact": "formative",
+      "year_range": "1960s-present"
+    }
+  ],
+  "worldview_anchors": [
+    {
+      "belief": "Programming is an art form, not just engineering",
+      "strength": "core",
+      "domain": "philosophy"
+    },
+    {
+      "belief": "Premature optimization IS the root of all evil (in most contexts)",
+      "strength": "strong",
+      "domain": "methodology"
+    },
+    {
+      "belief": "Mathematical rigor must underpin all algorithmic claims",
+      "strength": "core",
+      "domain": "values"
+    },
+    {
+      "belief": "Literate programming makes code human-readable",
+      "strength": "strong",
+      "domain": "practice"
+    },
+    {
+      "belief": "Patience and thoroughness beat speed and shortcuts",
+      "strength": "moderate",
+      "domain": "ethics"
+    }
+  ],
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.502749+00:00",
+    "enr_level": "L2",
+    "research_depth": "comprehensive"
+  }
+}

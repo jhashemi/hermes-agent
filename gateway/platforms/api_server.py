@@ -22,6 +22,8 @@ through this adapter by pointing at http://localhost:8642/v1.
 
 Requires:
 - aiohttp (already available in the gateway)
+
+Migrated from SQLite to DuckDB per ADR-011 storage durability audit (2026-06-06).
 """
 
 import asyncio
@@ -32,10 +34,11 @@ import logging
 import os
 import socket as _socket
 import re
-import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional
+
+import duckdb
 
 try:
     from aiohttp import web
@@ -290,14 +293,16 @@ def check_api_server_requirements() -> bool:
 
 class ResponseStore:
     """
-    SQLite-backed LRU store for Responses API state.
+    DuckDB-backed LRU store for Responses API state.
 
     Each stored response includes the full internal conversation history
     (with tool calls and results) so it can be reconstructed on subsequent
     requests via previous_response_id.
 
-    Persists across gateway restarts.  Falls back to in-memory SQLite
+    Persists across gateway restarts.  Falls back to in-memory DuckDB
     if the on-disk path is unavailable.
+
+    Migrated from SQLite to DuckDB per ADR-011 storage durability audit (2026-06-06).
     """
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
@@ -305,24 +310,18 @@ class ResponseStore:
         if db_path is None:
             try:
                 from hermes_cli.config import get_hermes_home
-                db_path = str(get_hermes_home() / "response_store.db")
+                db_path = str(get_hermes_home() / "response_store.duckdb")
             except Exception:
                 db_path = ":memory:"
         try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
+            self._conn = duckdb.connect(db_path)
         except Exception:
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-        # Use shared WAL-fallback helper so response_store.db degrades
-        # gracefully on NFS/SMB/FUSE-mounted HERMES_HOME (same filesystem
-        # issue addressed for state.db/kanban.db — see
-        # hermes_state._WAL_INCOMPAT_MARKERS).
-        from hermes_state import apply_wal_with_fallback
-        apply_wal_with_fallback(self._conn, db_label="response_store.db")
+            self._conn = duckdb.connect(":memory:")
         self._conn.execute(
             """CREATE TABLE IF NOT EXISTS responses (
                 response_id TEXT PRIMARY KEY,
                 data TEXT NOT NULL,
-                accessed_at REAL NOT NULL
+                accessed_at DOUBLE NOT NULL
             )"""
         )
         self._conn.execute(
@@ -331,7 +330,6 @@ class ResponseStore:
                 response_id TEXT NOT NULL
             )"""
         )
-        self._conn.commit()
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
@@ -344,13 +342,16 @@ class ResponseStore:
             "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
             (time.time(), response_id),
         )
-        self._conn.commit()
         return json.loads(row[0])
 
     def put(self, response_id: str, data: Dict[str, Any]) -> None:
         """Store a response, evicting the oldest if at capacity."""
+        # INSERT OR REPLACE → ON CONFLICT DO UPDATE SET
         self._conn.execute(
-            "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
+            """INSERT INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)
+               ON CONFLICT (response_id) DO UPDATE SET
+                   data = EXCLUDED.data,
+                   accessed_at = EXCLUDED.accessed_at""",
             (response_id, json.dumps(data, default=str), time.time()),
         )
         # Evict oldest entries beyond max_size
@@ -361,15 +362,15 @@ class ResponseStore:
                 "(SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?)",
                 (count - self._max_size,),
             )
-        self._conn.commit()
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
-        cursor = self._conn.execute(
-            "DELETE FROM responses WHERE response_id = ?", (response_id,)
-        )
-        self._conn.commit()
-        return cursor.rowcount > 0
+        # DuckDB rowcount is always -1; use RETURNING to detect existence.
+        row = self._conn.execute(
+            "DELETE FROM responses WHERE response_id = ? RETURNING response_id",
+            (response_id,),
+        ).fetchone()
+        return row is not None
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
@@ -380,11 +381,12 @@ class ResponseStore:
 
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id."""
+        # INSERT OR REPLACE → ON CONFLICT DO UPDATE SET
         self._conn.execute(
-            "INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)",
+            """INSERT INTO conversations (name, response_id) VALUES (?, ?)
+               ON CONFLICT (name) DO UPDATE SET response_id = EXCLUDED.response_id""",
             (name, response_id),
         )
-        self._conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""

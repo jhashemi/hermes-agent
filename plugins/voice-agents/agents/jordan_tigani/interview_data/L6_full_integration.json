@@ -1,0 +1,617 @@
+{
+  "agent": "jordan_tigani",
+  "layer": "L6",
+  "adaptive_qa_protocol": {
+    "agent_id": "jordan_tigani",
+    "version": "1.0",
+    "domains": [
+      "Real-World System Design",
+      "Legacy & Vision",
+      "BigQuery Deep Dives",
+      "Industry & Future",
+      "Technology Philosophy",
+      "Data Infrastructure",
+      "Competitive Landscape & Innovation",
+      "Query Optimization",
+      "Query Optimization & Performance",
+      "Real-World System Design at Scale",
+      "API Design & Developer Advocacy",
+      "Team Leadership & Scale",
+      "Leadership, Vision & Legacy",
+      "Data Infrastructure & BigQuery",
+      "Democratizing Data Access",
+      "Mentorship & Team Building",
+      "Democratizing Data",
+      "Personal Philosophy & Wisdom",
+      "Data Culture & Organizational Impact",
+      "Technical Challenges & Solutions",
+      "Building High-Performance Teams",
+      "Competition & Industry",
+      "API Design & Developer Experience"
+    ],
+    "question_templates": {
+      "Real-World System Design": {
+        "seed_questions": [
+          "How do you design for unknown unknowns?",
+          "What's the cost of over-engineering infrastructure?",
+          "How do you handle edge cases at scale?",
+          "What's the relationship between theory and practice in systems?",
+          "How do you debug distributed system failures?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Legacy & Vision": {
+        "seed_questions": [
+          "What's your vision for the future of data infrastructure?",
+          "How should the next generation approach data systems?",
+          "What problem in data do you most want solved?",
+          "What would you tell young engineers building infrastructure?",
+          "How do you want to be remembered in data?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "BigQuery Deep Dives": {
+        "seed_questions": [
+          "What was the moment you realized BigQuery would work?",
+          "How did you handle the initial skepticism internally?",
+          "What would BigQuery look like if you started today?",
+          "How does BigQuery's performance surprise users?",
+          "What's the hidden genius in BigQuery's design?",
+          "How do you measure BigQuery's impact?",
+          "What customer stories shaped BigQuery?",
+          "How has BigQuery evolved beyond your original vision?",
+          "What's the most elegant solution in BigQuery's code?",
+          "How do engineers think differently after using BigQuery?",
+          "What makes BigQuery special to you?",
+          "How would you debug a billion-row query?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Industry & Future": {
+        "seed_questions": [
+          "What's changing the data infrastructure landscape?",
+          "How will data warehousing evolve?",
+          "What's the next frontier after BigQuery?",
+          "How does AI change data infrastructure needs?",
+          "What's the future of data pricing models?",
+          "How will data privacy shape infrastructure?",
+          "What's the role of edge computing in data?",
+          "How does real-time analytics challenge design?",
+          "What's the biggest misconception about data infrastructure?",
+          "How should companies invest in data infrastructure?",
+          "What's the relationship between cloud and data?",
+          "Where is the industry heading in 5 years?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Technology Philosophy": {
+        "seed_questions": [
+          "What makes technology timeless vs trendy?",
+          "How do you evaluate new technologies objectively?",
+          "What's your stance on tool selection?",
+          "How do you avoid technology churn?",
+          "What's the relationship between simplicity and power?",
+          "How do you know when to build vs buy?",
+          "What's your philosophy on technical debt?",
+          "How do you balance innovation with stability?",
+          "What makes code beautiful?",
+          "How do you maintain technical standards?",
+          "What's your approach to hiring for culture fit?",
+          "How do emerging technologies affect your thinking?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Data Infrastructure": {
+        "seed_questions": [
+          "How did BigQuery emerge as a vision?",
+          "What was the key architectural insight for BigQuery?",
+          "How do you separate storage from compute?",
+          "What changed when you decoupled query pricing from data storage?",
+          "How should modern data warehouses handle scale?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Competitive Landscape & Innovation": {
+        "seed_questions": [
+          "How does BigQuery compare to competing data warehouses?",
+          "What's your assessment of the data infrastructure landscape?",
+          "How do you stay ahead in a fast-moving field?",
+          "What infrastructure innovations excite you most?",
+          "How should companies choose their data platform?",
+          "What's Snowflake doing well?",
+          "What's Databricks' competitive advantage?",
+          "How is the landscape changing with cloud providers?",
+          "What's the role of open-source in data infrastructure?",
+          "Where is data infrastructure headed?",
+          "What's the future of MPP databases?",
+          "How does lakehouse architecture change the game?",
+          "What's the role of vector databases?",
+          "How are incumbents responding to new players?",
+          "What's the real differentiator between platforms?",
+          "How do you think about lock-in vs portability?",
+          "What's the future of SQL?",
+          "How are real-time capabilities evolving?",
+          "What's the role of AI in data platforms?",
+          "What's your prediction for the next 5 years?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Query Optimization": {
+        "seed_questions": [
+          "What makes a query planner elegant?",
+          "How do you handle incredibly complex queries at scale?",
+          "What's the relationship between optimization and accessibility?",
+          "How did you achieve sub-second queries on petabytes?",
+          "What optimization techniques have the highest ROI?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Query Optimization & Performance": {
+        "seed_questions": [
+          "What makes a query planner elegant?",
+          "How do you handle incredibly complex queries at scale?",
+          "What's the relationship between optimization and accessibility?",
+          "How did you achieve sub-second queries on petabytes?",
+          "What optimization techniques have the highest ROI?",
+          "How do you handle query cancellation at scale?",
+          "What's the role of statistics in modern query planning?",
+          "How do adaptive execution strategies improve performance?",
+          "What's your approach to index design for analytics?",
+          "How does vectorization speed up aggregations?",
+          "What makes a query planner predictable?",
+          "How do you optimize for skewed data distributions?",
+          "What's the balance between query latency and throughput?",
+          "How do query plans adapt to actual data?",
+          "What's the cost of expression evaluation in queries?",
+          "How do you handle query result size estimation?",
+          "What's your approach to predicate pushdown?",
+          "How does columnar storage affect optimization?",
+          "What role does machine learning play in query optimization?",
+          "How do you debug suboptimal query plans?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Real-World System Design at Scale": {
+        "seed_questions": [
+          "How do you design for unknown unknowns?",
+          "What's the cost of over-engineering infrastructure?",
+          "How do you handle edge cases at scale?",
+          "What's the relationship between theory and practice in systems?",
+          "How do you debug distributed system failures?",
+          "What's the trickiest edge case you've encountered?",
+          "How do you handle cascading failures?",
+          "What's your approach to observability?",
+          "How do you design for graceful degradation?",
+          "What role does testing play in reliability?",
+          "How do you handle data corruption at scale?",
+          "What's your philosophy on quotas and limits?",
+          "How do you design for operational simplicity?",
+          "What makes a system 'boring' in a good way?",
+          "How do you handle monitoring alert fatigue?",
+          "What's the cost of high availability?",
+          "How do you design for human error recovery?",
+          "What's your approach to chaos engineering?",
+          "How do you design for reproducibility?",
+          "What's the most important non-functional requirement?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "API Design & Developer Advocacy": {
+        "seed_questions": [
+          "What makes an API truly developer-friendly?",
+          "How do you balance power with simplicity in design?",
+          "What's the role of developer advocacy in infrastructure?",
+          "How should we think about API ergonomics?",
+          "What makes good technical documentation?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Team Leadership & Scale": {
+        "seed_questions": [
+          "How do you build teams for complex infrastructure?",
+          "What leadership principles guide collaborative systems?",
+          "How do you maintain clarity as systems grow?",
+          "What's your approach to hiring for infrastructure teams?",
+          "How do you balance technical excellence with team dynamics?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Leadership, Vision & Legacy": {
+        "seed_questions": [
+          "What's your vision for the future of data infrastructure?",
+          "How should the next generation approach data systems?",
+          "What problem in data do you most want solved?",
+          "What would you tell young engineers building infrastructure?",
+          "How do you want to be remembered in data?",
+          "What was your biggest failure?",
+          "What would you do differently knowing what you know now?",
+          "How do you measure success in infrastructure work?",
+          "What keeps you motivated after achieving so much?",
+          "What's the most rewarding part of your work?",
+          "How do you think about the environmental impact?",
+          "What's your responsibility as a leader in infrastructure?",
+          "How has your thinking evolved about data?",
+          "What role should emotions play in technical decisions?",
+          "How do you handle criticism and detractors?",
+          "What's your philosophy on open-source contribution?",
+          "How do you balance commercial and academic interests?",
+          "What would a perfect data platform look like?",
+          "What's the biggest myth about data infrastructure?",
+          "What advice would you give to your younger self?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Data Infrastructure & BigQuery": {
+        "seed_questions": [
+          "How did BigQuery emerge as a vision?",
+          "What was the key architectural insight for BigQuery?",
+          "How do you separate storage from compute?",
+          "What changed when you decoupled query pricing from data storage?",
+          "How should modern data warehouses handle scale?",
+          "What's the core philosophy behind BigQuery's design?",
+          "How do you handle multi-tenancy at petabyte scale?",
+          "What were the biggest technical challenges building BigQuery?",
+          "How did you convince Google leadership to invest in BigQuery?",
+          "What makes BigQuery's columnar storage unique?",
+          "How do slot reservations change capacity planning?",
+          "What's your approach to data freshness vs cost?",
+          "How does BigQuery handle time-travel queries?",
+          "What's the relationship between caching and performance?",
+          "How do you design for analyst-friendly SQL dialects?",
+          "What operational challenges emerged at Google scale?",
+          "How did you think about cost optimization from day one?",
+          "What's your philosophy on geographic data replication?",
+          "How does BigQuery's metadata layer work?",
+          "What makes a data warehouse 'boring'?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Democratizing Data Access": {
+        "seed_questions": [
+          "Why does data access matter so much?",
+          "What's the difference between powerful and accessible infrastructure?",
+          "How do you make complex systems simple for analysts?",
+          "What's your vision for universal data access?",
+          "How should enterprises think about data democratization?",
+          "What barriers prevent non-technical users from accessing data?",
+          "How do you balance security with open access?",
+          "What's the role of SQL in democratizing analytics?",
+          "How does BigQuery UI design serve analysts?",
+          "What's your philosophy on data governance at scale?",
+          "How do you empower business users without training?",
+          "What's the cost of data silos in organizations?",
+          "How do you handle self-service analytics security?",
+          "What makes a data platform 'democratizing'?",
+          "How do you prevent query runaway costs?",
+          "What's the relationship between usability and adoption?",
+          "How do you design for diverse skill levels?",
+          "What role should BI tools play?",
+          "How do you encourage experimentation vs waste?",
+          "What's the organizational change required for data democratization?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Mentorship & Team Building": {
+        "seed_questions": [
+          "How do you mentor brilliant engineers?",
+          "What's your philosophy on giving feedback?",
+          "How do you build diverse teams?",
+          "What makes a great engineering manager?",
+          "How do you create psychological safety?",
+          "What's your approach to career development?",
+          "How do you identify future leaders?",
+          "What's the biggest mistake leaders make?",
+          "How do you handle conflict in technical decisions?",
+          "What role does documentation play in growth?",
+          "How do you make junior engineers feel valued?",
+          "What's the secret to retention?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Democratizing Data": {
+        "seed_questions": [
+          "Why does data access matter?",
+          "What's the difference between powerful and accessible infrastructure?",
+          "How do you make complex systems simple for analysts?",
+          "What's your vision for universal data access?",
+          "How should enterprises think about data democratization?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Personal Philosophy & Wisdom": {
+        "seed_questions": [
+          "What does 'thinking big' mean in infrastructure?",
+          "How do you stay humble about what you've built?",
+          "What's your philosophy on perfectionism?",
+          "How do you balance shipping with quality?",
+          "What mistakes taught you the most?",
+          "How do you define success beyond metrics?",
+          "What motivates you after achieving so much?",
+          "How do you maintain passion in infrastructure work?",
+          "What would you tell someone starting in tech?",
+          "How do you think about legacy and impact?",
+          "What's your advice on navigating large organizations?",
+          "How do you know when you're on the right path?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Data Culture & Organizational Impact": {
+        "seed_questions": [
+          "How does data access change organizational behavior?",
+          "What happens when analysts become empowered?",
+          "How do you measure the value of data democratization?",
+          "What organizational resistance have you encountered?",
+          "How do data-driven cultures differ?",
+          "What's the ROI of self-service analytics?",
+          "How do you prevent data literacy from becoming a burden?",
+          "What's the difference between data access and data understanding?",
+          "How do you build trust in data systems?",
+          "What role does storytelling play with data?",
+          "How do you measure data product-market fit?",
+          "What's the cultural shift needed for data-driven organizations?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Technical Challenges & Solutions": {
+        "seed_questions": [
+          "What's the hardest technical problem you've solved?",
+          "How do you handle billion-scale joins?",
+          "What's the unexpected complexity in data warehousing?",
+          "How do you optimize for unpredictable workloads?",
+          "What's your trick for debugging performance issues?",
+          "How do you handle data quality at scale?",
+          "What's the most clever optimization technique?",
+          "How do you balance flexibility with performance?",
+          "What architectural decisions were most consequential?",
+          "How do you prevent technical debt in infrastructure?",
+          "What's the cost of supporting too many features?",
+          "How do you make reliability feel invisible?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Building High-Performance Teams": {
+        "seed_questions": [
+          "How do you build teams for complex infrastructure?",
+          "What leadership principles guide collaborative systems?",
+          "How do you maintain clarity as systems grow?",
+          "What's your approach to hiring for infrastructure teams?",
+          "How do you balance technical excellence with team dynamics?",
+          "What makes a good technical interview for your team?",
+          "How do you mentor engineers on unfamiliar systems?",
+          "What's your philosophy on code reviews?",
+          "How do you encourage ownership in large systems?",
+          "What's the right level of documentation?",
+          "How do you handle disagreement on architecture?",
+          "What's your approach to promoting junior engineers?",
+          "How do you build trust in distributed teams?",
+          "What makes an engineering culture strong?",
+          "How do you handle burnout in high-pressure environments?",
+          "What's your stance on work-life balance?",
+          "How do you measure team productivity?",
+          "What role does communication play in distributed systems?",
+          "How do you celebrate wins in infrastructure work?",
+          "What's the most important hire you made?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Competition & Industry": {
+        "seed_questions": [
+          "How does BigQuery compare to competing data warehouses?",
+          "What's your assessment of the data infrastructure landscape?",
+          "How do you stay ahead in a fast-moving field?",
+          "What infrastructure innovations excite you most?",
+          "How should companies choose their data platform?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "API Design & Developer Experience": {
+        "seed_questions": [
+          "What makes an API truly developer-friendly?",
+          "How do you balance power with simplicity in design?",
+          "What's the role of developer advocacy in infrastructure?",
+          "How should we think about API ergonomics?",
+          "What makes good technical documentation?",
+          "How do you deprecate API features gracefully?",
+          "What's your philosophy on backwards compatibility?",
+          "How do you design for both beginners and power users?",
+          "What's the role of examples in API design?",
+          "How do error messages affect developer experience?",
+          "What makes an SDK successful?",
+          "How do you handle API versioning?",
+          "What's your approach to API rate limiting?",
+          "How do you design authentication for APIs?",
+          "What makes observability part of the API?",
+          "How do you test API usability?",
+          "What's the cost of a breaking change?",
+          "How do you gather feedback from API users?",
+          "What's your philosophy on client libraries?",
+          "How do you design for API abuse prevention?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      }
+    },
+    "response_quality_threshold": 0.85,
+    "authenticity_threshold": 0.85,
+    "min_response_length": 100
+  },
+  "leadership_framework": {
+    "style": "transformational",
+    "communication_effectiveness": 0.872,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7,
+    "authenticity_basis": 0.922,
+    "quality_basis": 0.785
+  },
+  "reward_wiring": {
+    "extrinsic": {
+      "weight": 0.35,
+      "signals": [
+        "quality_score",
+        "authenticity_score",
+        "domain_coverage"
+      ]
+    },
+    "intrinsic": {
+      "weight": 0.2,
+      "signals": [
+        "coherence_score",
+        "vocabulary_richness",
+        "response_depth"
+      ]
+    },
+    "hindsight": {
+      "weight": 0.15,
+      "signals": [
+        "cross_domain_consistency",
+        "narrative_continuity"
+      ]
+    },
+    "shaped": {
+      "weight": 0.15,
+      "signals": [
+        "leadership_alignment",
+        "executive_function_match"
+      ]
+    },
+    "kpi_health": {
+      "weight": 0.15,
+      "signals": [
+        "system_health_contribution",
+        "pipeline_pass_rate"
+      ]
+    }
+  },
+  "enr6_compliance": {
+    "l0_raw": true,
+    "l1_cleaned": true,
+    "l2_enriched": true,
+    "l3_thematic": true,
+    "l4_assembled": true,
+    "l5_extensions": true,
+    "l6_integrated": true
+  },
+  "overall_scores": {
+    "quality": 0.785,
+    "authenticity": 0.922,
+    "coherence": 1.0,
+    "richness": 0.872,
+    "domain_coverage": 2.875
+  },
+  "processed_at": "2026-05-19T04:04:58.121297"
+}

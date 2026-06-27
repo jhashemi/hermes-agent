@@ -4235,6 +4235,18 @@ class DiscordAdapter(BasePlatformAdapter):
                 if not ext and content_type:
                     mime_to_ext = {v: k for k, v in SUPPORTED_DOCUMENT_TYPES.items()}
                     ext = mime_to_ext.get(content_type, "")
+                # ADR-009: route .skill files to the install pipeline before
+                # the generic SUPPORTED_DOCUMENT_TYPES check.
+                if ext == ".skill" or (att.filename and att.filename.lower().endswith(".skill")):
+                    skill_msg = await _try_handle_discord_skill_file(att, message)
+                    if skill_msg is not None:
+                        # Send the install report back to the channel
+                        try:
+                            await message.channel.send(skill_msg)
+                        except Exception as e:
+                            logger.warning("[Discord] could not send skill report: %s", e)
+                        # Don't add to media_urls — file already processed
+                        continue
                 if ext not in SUPPORTED_DOCUMENT_TYPES:
                     logger.warning(
                         "[Discord] Unsupported document type '%s' (%s), skipping",
@@ -4413,6 +4425,51 @@ class DiscordAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 # Discord UI Components (outside the adapter class)
 # ---------------------------------------------------------------------------
+
+
+async def _try_handle_discord_skill_file(att, message) -> Optional[str]:
+    """ADR-009: download a .skill attachment and route through install_skill_file().
+
+    Returns the user-facing message string (✅/⚠️/❌) on success, or None if
+    the attachment could not be downloaded.
+    """
+    try:
+        from tools.skill_file_install import install_skill_file
+    except Exception as e:
+        logger.warning("[Discord] skill install pipeline unavailable: %s", e)
+        return None
+
+    sender_id = ""
+    try:
+        if message.author is not None:
+            sender_id = str(message.author.id)
+    except Exception:
+        pass
+
+    filename = att.filename or "untitled.skill"
+
+    try:
+        payload = await att.read()
+    except Exception as e:
+        logger.warning("[Discord] could not download .skill attachment: %s", e, exc_info=True)
+        return None
+
+    try:
+        report = install_skill_file(
+            payload=bytes(payload),
+            filename=filename,
+            sender_id=sender_id,
+            platform="discord",
+        )
+    except Exception as e:
+        logger.exception("[Discord] install_skill_file unexpected failure: %s", e)
+        return f"❌ Skill install failed: {e}"
+
+    logger.info(
+        "[Discord] .skill verdict=%s sender=%s filename=%s",
+        report.verdict, sender_id, filename,
+    )
+    return report.user_message
 
 
 def _component_check_auth(

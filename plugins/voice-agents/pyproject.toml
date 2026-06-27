@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "executive-voice-agents"
+version = "1.0.0"
+description = "Executive voice agent platform for Hermes Gateway with 8 memory systems"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "Hermes Agent"},
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+voice = [
+    "resemble>=0.3",
+    "deepgram-sdk>=3.0",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.entry-points."hermes.plugins"]
+voice-agents = "voice_agents_plugin:on_load"
+
+[tool.setuptools.packages.find]
+include = ["loader*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.json"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[project.urls]
+Homepage = "https://github.com/nousresearch/executive-voice-agents"

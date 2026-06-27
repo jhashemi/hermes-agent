@@ -235,6 +235,12 @@ def _get_provider(stt_config: dict) -> str:
             )
             return "none"
 
+        if provider == "deepgram":
+            if get_env_value("DEEPGRAM_API_KEY"):
+                return "deepgram"
+            logger.warning("STT provider 'deepgram' configured but DEEPGRAM_API_KEY not set")
+            return "none"
+
         if provider == "groq":
             if _HAS_OPENAI and get_env_value("GROQ_API_KEY"):
                 return "groq"
@@ -539,6 +545,47 @@ def _transcribe_local_command(file_path: str, model_name: str) -> Dict[str, Any]
 # ---------------------------------------------------------------------------
 
 
+def _transcribe_deepgram(file_path: str, model_name: str) -> Dict[str, Any]:
+    """Transcribe using Deepgram cloud STT (no local CPU). Uses DEEPGRAM_API_KEY.
+
+    Added 2026-06-27: local faster-whisper on the 2-vCPU node saturated the box;
+    Deepgram offloads transcription entirely and is more accurate. Stdlib-only.
+    """
+    api_key = get_env_value("DEEPGRAM_API_KEY")
+    if not api_key:
+        return {"success": False, "transcript": "", "error": "DEEPGRAM_API_KEY not set"}
+    import json as _json
+    import urllib.request as _ur
+    import urllib.error as _ue
+    ext = Path(file_path).suffix.lower().lstrip(".") or "ogg"
+    ctype = {
+        "ogg": "audio/ogg", "oga": "audio/ogg", "opus": "audio/ogg",
+        "wav": "audio/wav", "mp3": "audio/mpeg", "m4a": "audio/mp4",
+        "mp4": "audio/mp4", "flac": "audio/flac", "webm": "audio/webm",
+    }.get(ext, "audio/ogg")
+    mdl = model_name or "nova-2"
+    url = f"https://api.deepgram.com/v1/listen?model={mdl}&smart_format=true&punctuate=true"
+    try:
+        with open(file_path, "rb") as fh:
+            data = fh.read()
+        req = _ur.Request(url, data=data, method="POST", headers={
+            "Authorization": f"Token {api_key}", "Content-Type": ctype})
+        with _ur.urlopen(req, timeout=30) as resp:
+            payload = _json.loads(resp.read().decode("utf-8"))
+        alt = payload["results"]["channels"][0]["alternatives"][0]
+        transcript_text = (alt.get("transcript") or "").strip()
+        logger.info("Transcribed %s via Deepgram (%s, %d chars)",
+                    Path(file_path).name, mdl, len(transcript_text))
+        return {"success": True, "transcript": transcript_text, "provider": "deepgram"}
+    except _ue.HTTPError as e:
+        try: body = e.read().decode("utf-8")[:200]
+        except Exception: body = ""
+        return {"success": False, "transcript": "", "error": f"Deepgram HTTP {e.code}: {body}"}
+    except Exception as e:
+        logger.error("Deepgram transcription failed: %s", e, exc_info=True)
+        return {"success": False, "transcript": "", "error": f"Transcription failed: {e}"}
+
+
 def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
     """Transcribe using Groq Whisper API (free tier available)."""
     api_key = get_env_value("GROQ_API_KEY")
@@ -834,6 +881,9 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
             model or local_cfg.get("model", DEFAULT_LOCAL_MODEL)
         )
         return _transcribe_local_command(file_path, model_name)
+
+    if provider == "deepgram":
+        return _transcribe_deepgram(file_path, model or "nova-2")
 
     if provider == "groq":
         model_name = model or DEFAULT_GROQ_STT_MODEL

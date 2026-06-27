@@ -1,0 +1,322 @@
+{
+  "agent": "jony_ive",
+  "layer": "L3",
+  "domain_count": 8,
+  "domains": {
+    "Design Foundations": {
+      "name": "Design Foundations",
+      "questions": [
+        {
+          "question": "What makes a design feel inevitable?",
+          "response_length": 202,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you know when a design is 'right'?",
+          "response_length": 203,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the relationship between form and function?",
+          "response_length": 192,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does constraint enable creativity?",
+          "response_length": 188,
+          "quality_score": 0.94,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the most misunderstood aspect of design?",
+          "response_length": 198,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.988,
+      "avg_authenticity": 1.0,
+      "total_words": 983,
+      "question_count": 5
+    },
+    "Apple Design Language": {
+      "name": "Apple Design Language",
+      "questions": [
+        {
+          "question": "How did the original iMac design come about?",
+          "response_length": 193,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What was the design thinking behind the iPhone?",
+          "response_length": 230,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did you maintain design coherence across products?",
+          "response_length": 214,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What made the unibody MacBook possible?",
+          "response_length": 229,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did Apple's design process differ from other companies?",
+          "response_length": 260,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1126,
+      "question_count": 5
+    },
+    "Materials & Manufacturing": {
+      "name": "Materials & Manufacturing",
+      "questions": [
+        {
+          "question": "Why did you pursue aluminum so aggressively?",
+          "response_length": 214,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does material choice shape the user experience?",
+          "response_length": 248,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the relationship between manufacturing and design?",
+          "response_length": 259,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did you work with Steve on manufacturing decisions?",
+          "response_length": 290,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What manufacturing innovation are you most proud of?",
+          "response_length": 295,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1306,
+      "question_count": 5
+    },
+    "Human Interface Design": {
+      "name": "Human Interface Design",
+      "questions": [
+        {
+          "question": "How should technology respond to human touch?",
+          "response_length": 172,
+          "quality_score": 0.86,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes a digital interaction feel natural?",
+          "response_length": 191,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you design for emotion?",
+          "response_length": 195,
+          "quality_score": 0.975,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the difference between designing for utility and delight?",
+          "response_length": 195,
+          "quality_score": 0.975,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does spatial design affect user experience?",
+          "response_length": 191,
+          "quality_score": 0.955,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.953,
+      "avg_authenticity": 1.0,
+      "total_words": 944,
+      "question_count": 5
+    },
+    "Design Leadership": {
+      "name": "Design Leadership",
+      "questions": [
+        {
+          "question": "How did you build and lead the Apple design team?",
+          "response_length": 255,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your approach to giving design feedback?",
+          "response_length": 274,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you protect design vision in a product-driven company?",
+          "response_length": 311,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes a great design partnership?",
+          "response_length": 289,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did Steve Jobs change your approach to design?",
+          "response_length": 331,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1460,
+      "question_count": 5
+    },
+    "Ethics & Design": {
+      "name": "Ethics & Design",
+      "questions": [
+        {
+          "question": "What responsibility do designers have for addiction?",
+          "response_length": 202,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should we design technology that respects attention?",
+          "response_length": 231,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the environmental cost of premium design?",
+          "response_length": 236,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you balance beauty and sustainability?",
+          "response_length": 242,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What ethical line won't you cross in design?",
+          "response_length": 227,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1138,
+      "question_count": 5
+    },
+    "Competition & Aesthetics": {
+      "name": "Competition & Aesthetics",
+      "questions": [
+        {
+          "question": "How do you respond when competitors copy your designs?",
+          "response_length": 225,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes Apple's aesthetic distinct from Samsung's?",
+          "response_length": 262,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you maintain design leadership in a commodity market?",
+          "response_length": 310,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the cost of chasing trends vs setting them?",
+          "response_length": 270,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does culture affect design perception?",
+          "response_length": 328,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1395,
+      "question_count": 5
+    },
+    "Legacy & Vision": {
+      "name": "Legacy & Vision",
+      "questions": [
+        {
+          "question": "What would you design if you had no constraints?",
+          "response_length": 198,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should design evolve in the AI era?",
+          "response_length": 217,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the future of physical design in a digital world?",
+          "response_length": 239,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you want to be remembered as a designer?",
+          "response_length": 258,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the most important lesson design has taught you?",
+          "response_length": 246,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1158,
+      "question_count": 5
+    }
+  },
+  "overall_quality": 0.993,
+  "overall_authenticity": 1.0,
+  "processed_at": "2026-05-17T01:38:17.472457"
+}

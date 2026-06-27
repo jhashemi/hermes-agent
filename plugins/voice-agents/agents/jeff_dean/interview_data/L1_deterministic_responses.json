@@ -1,0 +1,62 @@
+{
+  "persona": "Jeff Dean",
+  "layer": "L1",
+  "big5_gss_mapping": {
+    "big5_profile": {
+      "O": 0.9,
+      "C": 0.93,
+      "E": 0.45,
+      "A": 0.78,
+      "N": 0.22
+    },
+    "gss_correlations": {
+      "trust": 0.61,
+      "fairness": 0.63,
+      "helpfulness": 0.69,
+      "conformity": 0.46,
+      "risk_tolerance": 0.68,
+      "achievement": 0.92,
+      "authority_respect": 0.64,
+      "tradition": 0.55
+    },
+    "behavioral_economics": {
+      "loss_aversion": 0.41,
+      "time_preference": 0.56,
+      "social_preferences": 0.55,
+      "risk_preferences": 0.68
+    }
+  },
+  "composite_profile": {
+    "decision_style": "analytical",
+    "communication_style": "reflective",
+    "conflict_style": "avoiding",
+    "leadership_style": "transformative",
+    "innovation_orientation": 0.91,
+    "detail_orientation": 0.74
+  },
+  "responses": [
+    {
+      "id": "l1_r1",
+      "prompt": "trust_general",
+      "value": 0.61,
+      "confidence": 0.9
+    },
+    {
+      "id": "l1_r2",
+      "prompt": "fairness",
+      "value": 0.63,
+      "confidence": 0.88
+    },
+    {
+      "id": "l1_r3",
+      "prompt": "risk_general",
+      "value": 0.45,
+      "confidence": 0.85
+    }
+  ],
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.513507+00:00",
+    "enr_level": "L1",
+    "deterministic": true
+  }
+}

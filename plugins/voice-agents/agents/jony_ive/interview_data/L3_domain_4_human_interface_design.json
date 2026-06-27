@@ -1,0 +1,255 @@
+{
+  "domain": "human_interface_design",
+  "layer": "L3",
+  "persona": "Jony Ive",
+  "description": "Human-centered interface design",
+  "question_range": "q1-q35",
+  "response_count": 35,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What does excellence in Human-centered interface design look like?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "How do you balance speed and quality in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "What tools have been most transformative for Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "How do you approach debugging problems in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "What separates good Human-centered interface design from great Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "How has your approach to Human-centered interface design changed over your career?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "What tradeoffs are inherent in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "How do you measure success in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "What habits have made you better at Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What would you do differently in Human-centered interface design if starting over?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What does excellence in Human-centered interface design look like?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "How do you balance speed and quality in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "What tools have been most transformative for Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "How do you approach debugging problems in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "What separates good Human-centered interface design from great Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "How has your approach to Human-centered interface design changed over your career?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "What tradeoffs are inherent in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "How do you measure success in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "What habits have made you better at Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What would you do differently in Human-centered interface design if starting over?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "What does excellence in Human-centered interface design look like?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "How do you balance speed and quality in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "What tools have been most transformative for Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "How do you approach debugging problems in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "What separates good Human-centered interface design from great Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "How has your approach to Human-centered interface design changed over your career?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "What tradeoffs are inherent in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "How do you measure success in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "What habits have made you better at Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What would you do differently in Human-centered interface design if starting over?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "What does excellence in Human-centered interface design look like?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "How do you balance speed and quality in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "What tools have been most transformative for Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "How do you approach debugging problems in Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "What separates good Human-centered interface design from great Human-centered interface design?",
+      "domain": "human_interface_design",
+      "domain_source": "domain_4",
+      "source_layer": "L3"
+    }
+  ]
+}

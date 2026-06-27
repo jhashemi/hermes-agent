@@ -1,0 +1,80 @@
+agents:
+  demis_hassabis:
+    path: agents/demis_hassabis
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: production
+    voice_ready: true
+    interview_complete: true
+    questions: 289
+    quality: 0.92
+    authenticity: 0.92
+    
+  steve_jobs:
+    path: agents/steve_jobs
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: production
+    voice_ready: false  # Voice clone not yet created
+    interview_complete: true
+    questions: 289
+    quality: 0.90
+    authenticity: 0.92
+  
+  donald_knuth:
+    path: agents/donald_knuth
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: pending
+    voice_ready: false
+    interview_complete: false
+    questions: 141  # Partial (141/289)
+    quality: null
+    authenticity: null
+  
+  jony_ive:
+    path: agents/jony_ive
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: pending
+    voice_ready: false
+    interview_complete: false
+    questions: 0
+    quality: null
+    authenticity: null
+  
+  jeff_dean:
+    path: agents/jeff_dean
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: pending
+    voice_ready: false
+    interview_complete: false
+    questions: 0
+    quality: null
+    authenticity: null
+  
+  jordan_tigani:
+    path: agents/jordan_tigani
+    profile_file: agent_profile.yaml
+    voice_config_file: voice_config.yaml
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    status: pending
+    voice_ready: false
+    interview_complete: false
+    questions: 220  # Partial (220/289)
+    quality: null
+    authenticity: null
+
+metadata:
+  total_agents: 6
+  production_ready: 2  # Demis + Steve
+  voice_enabled: 1     # Demis
+  interview_complete: 2
+  last_updated: "2026-05-11T08:45:00Z"
+  platform_version: "1.0.0"
