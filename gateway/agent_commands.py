@@ -335,6 +335,11 @@ AGENT_COMMAND_HANDLERS = {
     "load-knuth": lambda gr, ev: handle_load_agent_command(gr, ev, "donald_knuth"),
     "load-tigani": lambda gr, ev: handle_load_agent_command(gr, ev, "jordan_tigani"),
     "load-turing": lambda gr, ev: handle_load_agent_command(gr, ev, "alan_turing"),
+    "load-steve": lambda gr, ev: handle_load_agent_command(gr, ev, "steve_jobs"),
+    "load-steve-jobs": lambda gr, ev: handle_load_agent_command(gr, ev, "steve_jobs"),
+    "load-elon": lambda gr, ev: handle_load_agent_command(gr, ev, "elon_musk"),
+    "load-elon-musk": lambda gr, ev: handle_load_agent_command(gr, ev, "elon_musk"),
+    "load-demis-hassabis": lambda gr, ev: handle_load_agent_command(gr, ev, "demis_hassabis"),
     "agents-list": handle_agents_list_command,
     "agents-disconnect": handle_agents_disconnect_command,
     # Instance orchestration
