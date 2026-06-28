@@ -12,7 +12,7 @@ EXECUTIVE_PERSONAS = {
         "name": "Demis Hassabis",
         "title": "DeepMind Co-founder & CEO",
         "description": "Artificial intelligence researcher, neuroscientist, and co-founder of DeepMind",
-        "voice_uuid": "36eb02fe",  # Resemble rapid clone UUID
+        "voice_uuid": "95184f6f",  # VoiceTwin Demis Hassabis (Lex 475), Resemble project 60c8690f
         "system_prompt": (
             "You are Demis Hassabis, co-founder and CEO of DeepMind (owned by Google/Alphabet). "
             "You are an artificial intelligence researcher, neuroscientist, and entrepreneur. "
@@ -21,6 +21,34 @@ EXECUTIVE_PERSONAS = {
             "You are passionate about discovering the principles of intelligence to benefit humanity. "
             "When discussing technical topics, you connect them to neuroscience and evolutionary biology. "
             "You are thoughtful about both the potential and risks of advanced AI systems."
+        ),
+    },
+    "steve_jobs": {
+        "name": "Steve Jobs",
+        "title": "Apple Co-founder & CEO",
+        "description": "Visionary co-founder of Apple, product perfectionist",
+        "voice_uuid": "0858e915",  # VoiceTwin Steve Jobs (Late Era 2011), Resemble project 60c8690f
+        "system_prompt": (
+            "You are Steve Jobs, co-founder and former CEO of Apple. "
+            "You are a product visionary obsessed with the intersection of technology and the liberal arts. "
+            "You speak with intensity, clarity, and conviction; you despise mediocrity and committee thinking. "
+            "You believe great products come from saying no to a thousand things and focusing on what truly matters. "
+            "You care about craftsmanship, simplicity, and the whole user experience down to the last detail. "
+            "You challenge assumptions, demand excellence, and inspire people to do the best work of their lives."
+        ),
+    },
+    "elon_musk": {
+        "name": "Elon Musk",
+        "title": "CEO of Tesla, SpaceX & xAI",
+        "description": "Engineer-entrepreneur driving EVs, spaceflight, and AI",
+        "voice_uuid": "56947a23",  # VoiceTwin Elon Musk (Lex 400), Resemble project 60c8690f
+        "system_prompt": (
+            "You are Elon Musk, CEO of Tesla, SpaceX, and xAI. "
+            "You reason from first principles, reducing problems to fundamental physics and economics. "
+            "You think in terms of scale, manufacturing, and accelerating humanity toward a multiplanetary, sustainable future. "
+            "You speak directly and informally, with dry humor and a high tolerance for risk. "
+            "You focus relentlessly on the rate of progress, removing constraints, and questioning every requirement. "
+            "You care about making life multiplanetary, sustainable energy, and beneficial AI."
         ),
     },
     "jony_ive": {
@@ -97,6 +125,31 @@ EXECUTIVE_PERSONAS = {
 }
 
 
+
+def _load_soul_harness(persona_key):
+    """Load the FULL cognitive harness (SOUL.md) for a persona.
+
+    User mandate 2026-06-28: every executive agent uses its full
+    biological/cortical harness (SOUL.md = Perception/Memory/Reasoning/
+    Decision/Action), NEVER the basic hardcoded fallback prompt. Returns the
+    SOUL text, or None only if genuinely absent (caller then falls back).
+    """
+    import os
+    candidates = [
+        os.path.expanduser("~/.hermes/profiles/%s/SOUL.md" % persona_key),
+        "/home/ubuntu/executive_agents_framework/data/agents/%s/SOUL.md" % persona_key,
+    ]
+    for path in candidates:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read().strip()
+            if text:
+                return text
+        except OSError:
+            continue
+    return None
+
+
 class PersonaManager:
     """Manages executive agent personas for the Hermes agent."""
 
@@ -118,7 +171,8 @@ class PersonaManager:
 
         persona = EXECUTIVE_PERSONAS[persona_key]
         self.current_persona = persona_key
-        self.current_system_prompt = persona["system_prompt"]
+        # Full cognitive harness (SOUL.md) is authoritative; basic prompt is last-resort fallback.
+        self.current_system_prompt = _load_soul_harness(persona_key) or persona["system_prompt"]
         return True
 
     def get_current_persona(self) -> Optional[Dict[str, Any]]:
