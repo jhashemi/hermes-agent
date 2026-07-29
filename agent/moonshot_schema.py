@@ -217,6 +217,12 @@ def is_moonshot_model(model: str | None) -> bool:
     Detection by model name covers Nous / OpenRouter / other aggregators that
     route to Moonshot's inference, where the base URL is the aggregator's, not
     ``api.moonshot.ai``.
+
+    Also matches the bare ``k3`` and ``k3-256k`` model IDs exposed by the
+    ``kimi-for-coding`` provider (api.kimi.com/coding/v1). These are the K3
+    reasoning model on the coding-optimized endpoint — they do NOT start with
+    ``kimi-`` and contain no ``moonshot`` substring, so they need an explicit
+    check here so tool-schema sanitization applies on the coding route too.
     """
     if not model:
         return False
@@ -224,6 +230,11 @@ def is_moonshot_model(model: str | None) -> bool:
     # Last path segment (covers aggregator-prefixed slugs)
     tail = bare.rsplit("/", 1)[-1]
     if tail.startswith("kimi-") or tail == "kimi":
+        return True
+    # kimi-for-coding endpoint bare model IDs (k3, k3-256k, kimi-for-coding[-highspeed])
+    if tail in ("k3", "k3-256k") or tail.startswith("k3-"):
+        return True
+    if tail.startswith("kimi-for-coding"):
         return True
     # Vendor-prefixed forms commonly used on aggregators
     if "moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"):
