@@ -422,6 +422,16 @@ DEFAULT_CONTEXT_LENGTHS = {
     "solar-pro3": 131072,
     "solar-pro2": 65536,
     "solar-mini": 32768,
+    # Kimi K3 on the kimi-for-coding endpoint (api.kimi.com/coding/v1)
+    # Verified 2026-07-29 via GET /v1/models:
+    #   k3              → 1048576 (1M context — the flagship K3 reasoning model)
+    #   k3-256k         → 262144  (256K variant — cheaper tier)
+    #   kimi-for-coding → 262144  (legacy coding endpoint model)
+    #   kimi-for-coding-highspeed → 262144 (high-speed lane)
+    "k3": 1048576,
+    "k3-256k": 262144,
+    "kimi-for-coding": 262144,
+    "kimi-for-coding-highspeed": 262144,
     # Tencent — Hy3 Preview (Hunyuan) with 256K context window.
     # OpenRouter live metadata reports 262144 (256 × 1024); align the
     # static fallback so cache and offline both agree (issue #22268).
