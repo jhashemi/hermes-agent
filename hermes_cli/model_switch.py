@@ -930,19 +930,36 @@ def switch_model(
     if not validation.get("accepted"):
         override = False
         if user_providers:
-            # user_providers is a dict: {provider_slug: config_dict}
-            for slug, cfg in user_providers.items():
-                if slug == target_provider:
-                    cfg_models = cfg.get("models", {})
-                    # Direct membership works for dict (keys) and list (strings)
-                    if new_model in cfg_models:
+            # user_providers may be a dict ({slug: {models: [...]}}) or a list
+            # of dicts ([{provider: ..., model: ...}, ...]) depending on config
+            # schema. Handle both shapes — see RCA in test_model_switch.py.
+            user_providers_iter = None
+            if isinstance(user_providers, dict):
+                user_providers_iter = user_providers.items()
+            elif isinstance(user_providers, list):
+                # List shape: each entry has 'provider' and 'model' keys
+                for entry in user_providers:
+                    if not isinstance(entry, dict):
+                        continue
+                    entry_provider = entry.get("provider", "")
+                    entry_model = entry.get("model", "")
+                    if entry_provider == target_provider and entry_model == new_model:
                         override = True
                         break
-                    # Also accept if models is a list of dicts with 'name' field
-                    if isinstance(cfg_models, list):
-                        if any(m.get("name") == new_model for m in cfg_models if isinstance(m, dict)):
+                user_providers_iter = None  # already handled via list iteration
+            if user_providers_iter:
+                for slug, cfg in user_providers_iter:
+                    if slug == target_provider:
+                        cfg_models = cfg.get("models", {})
+                        # Direct membership works for dict (keys) and list (strings)
+                        if new_model in cfg_models:
                             override = True
                             break
+                        # Also accept if models is a list of dicts with 'name' field
+                        if isinstance(cfg_models, list):
+                            if any(m.get("name") == new_model for m in cfg_models if isinstance(m, dict)):
+                                override = True
+                                break
         # Also check custom_providers list — models declared there should be accepted
         # even if the remote /v1/models endpoint doesn't list them.
         if not override and custom_providers and isinstance(custom_providers, list):

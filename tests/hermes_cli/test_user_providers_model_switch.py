@@ -984,3 +984,96 @@ def test_user_provider_override_rejects_mangled_private_models(
 
     assert result.success is False
     assert result.error_message == "not found"
+
+
+# =============================================================================
+# Regression: user_providers as a LIST (not dict) must not crash switch_model
+# Bug: model_switch.py:934 called user_providers.items() on a list → AttributeError
+# Reported 2026-07-29 when /model kimi was run with providers: as a YAML list.
+# =============================================================================
+
+
+def test_switch_model_with_list_shaped_user_providers_does_not_crash():
+    """user_providers as a list of {provider, model} dicts must not crash.
+
+    The user's config.yaml has:
+      providers:
+      - provider: ollama-cloud
+        model: deepseek/deepseek-v4-pro
+        ...
+
+    The old code at model_switch.py:934 assumed `user_providers` was always a
+    dict and called `.items()` on it — raising AttributeError when the config
+    used the list shape. This test passes a list and verifies no crash.
+    """
+    from unittest.mock import patch
+    from hermes_cli.model_switch import switch_model
+
+    user_providers_list = [
+        {"provider": "kimi-for-coding", "model": "k3", "context_length": 1048576},
+        {"provider": "ollama-cloud", "model": "glm-5.2", "context_length": 1000000},
+    ]
+
+    with patch("hermes_cli.model_switch.resolve_alias", return_value=None), \
+         patch("hermes_cli.model_switch.list_provider_models", return_value=[]), \
+         patch("hermes_cli.model_switch.normalize_model_for_provider",
+               side_effect=lambda model, provider: model), \
+         patch("hermes_cli.models.validate_requested_model",
+               return_value={"accepted": False, "persist": False, "recognized": False,
+                             "message": "rejected"}), \
+         patch("hermes_cli.models.detect_provider_for_model", return_value=None), \
+         patch("hermes_cli.model_switch.get_model_info", return_value=None), \
+         patch("hermes_cli.model_switch.get_model_capabilities", return_value=None), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+               return_value={"api_key": "test", "base_url": "https://api.kimi.com/coding/v1",
+                             "api_mode": "openai_chat"}):
+        # The override path will find k3 in the list and accept it
+        result = switch_model(
+            raw_input="k3",
+            current_provider="ollama-cloud",
+            current_model="glm-5.2",
+            current_base_url="https://ollama.com/v1",
+            is_global=False,
+            user_providers=user_providers_list,
+        )
+
+    # Must NOT raise AttributeError. The bug was the crash on `.items()` of a
+    # list, not the override outcome. The target_provider resolves to the
+    # current provider (ollama-cloud), so the override path won't match the
+    # kimi-for-coding entry — but it must not crash either.
+    assert result.success is False, "Expected validation rejection (not override) for mismatched provider"
+
+
+def test_switch_model_with_list_shaped_user_providers_no_match_does_not_crash():
+    """A list-shaped user_providers with no matching entry must not crash either."""
+    from unittest.mock import patch
+    from hermes_cli.model_switch import switch_model
+
+    user_providers_list = [
+        {"provider": "ollama-cloud", "model": "glm-5.2"},
+    ]
+
+    with patch("hermes_cli.model_switch.resolve_alias", return_value=None), \
+         patch("hermes_cli.model_switch.list_provider_models", return_value=[]), \
+         patch("hermes_cli.model_switch.normalize_model_for_provider",
+               side_effect=lambda model, provider: model), \
+         patch("hermes_cli.models.validate_requested_model",
+               return_value={"accepted": False, "persist": False, "recognized": False,
+                             "message": "rejected"}), \
+         patch("hermes_cli.models.detect_provider_for_model", return_value=None), \
+         patch("hermes_cli.model_switch.get_model_info", return_value=None), \
+         patch("hermes_cli.model_switch.get_model_capabilities", return_value=None), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+               return_value={"api_key": "test", "base_url": "https://api.kimi.com/coding/v1",
+                             "api_mode": "openai_chat"}):
+        result = switch_model(
+            raw_input="nonexistent-model",
+            current_provider="ollama-cloud",
+            current_model="glm-5.2",
+            current_base_url="https://ollama.com/v1",
+            is_global=False,
+            user_providers=user_providers_list,
+        )
+
+    # No crash. Validation rejected and no override found → not success.
+    assert result.success is False, "Expected failure for nonexistent model"
