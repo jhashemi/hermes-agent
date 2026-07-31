@@ -412,6 +412,18 @@ DEFAULT_CONTEXT_LENGTHS = {
     # still hit the generic 256K fallback.
     "kimi-k3": 1_048_576,
     "kimi": 262144,
+    # Kimi — platform.kimi.ai canonical model IDs (2026-07-31)
+    # Source: https://platform.kimi.ai/docs/models
+    # kimi-k2.7-code:        dedicated coding model, 256K context
+    # kimi-k2.7-code-highspeed: high-speed coding, ~180 tok/s, 256K context
+    # kimi-k2.6:             multimodal, thinking+non-thinking, dialogue+Agent, 256K
+    # kimi-k2.5:             multimodal, open-source SoTA, thinking+non-thinking, 256K
+    # kimi-k2 series:        deprecated May 25, 2026
+    # moonshot-v1 series:    sunset Aug 31, 2026 (new-user blocked already)
+    "kimi-k2.7-code": 262144,
+    "kimi-k2.7-code-highspeed": 262144,
+    "kimi-k2.6": 262144,
+    "kimi-k2.5": 262144,
     # Upstage Solar — api.upstage.ai/v1/models does not return context_length,
     # so these fallbacks keep token budgeting / compression from probing down
     # to the 128k default. Ids are matched longest-first, so dated variants
@@ -451,6 +463,19 @@ DEFAULT_CONTEXT_LENGTHS = {
     "moonshotai/Kimi-K2.5": 262144,
     "moonshotai/Kimi-K2.6": 262144,
     "moonshotai/Kimi-K2-Thinking": 262144,
+    # Kimi K3 and K2.7 — aggregator-prefixed forms (OpenRouter, HuggingFace, etc.)
+    # Source: https://openrouter.ai/moonshotai/kimi-k3 (Jul 16 2026, $3/$15 per 1M)
+    "moonshotai/kimi-k3": 1048576,
+    "moonshotai/Kimi-K3": 1048576,
+    "moonshotai/kimi-k2.7-code": 262144,
+    "moonshotai/Kimi-K2.7-Code": 262144,
+    "moonshotai/kimi-k2.7-code-highspeed": 262144,
+    # moonshot/* provider-prefixed forms (platform.kimi.ai native provider prefix)
+    "moonshot/kimi-k3": 1048576,
+    "moonshot/kimi-k2.7-code": 262144,
+    "moonshot/kimi-k2.7-code-highspeed": 262144,
+    "moonshot/kimi-k2.6": 262144,
+    "moonshot/kimi-k2.5": 262144,
     "MiniMaxAI/MiniMax-M2.5": 204800,
     "XiaomiMiMo/MiMo-V2-Flash": 262144,
     "mimo-v2-pro": 1048576,

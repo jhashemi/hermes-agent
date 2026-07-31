@@ -45,6 +45,20 @@ class TestMoonshotModelDetection:
             "kimi-for-coding-highspeed",
             "K3",  # case-insensitive
             "K3-256K",
+            # platform.kimi.ai canonical K3 and K2.7 model IDs (added 2026-07-31)
+            # Source: https://platform.kimi.ai/docs/models
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.5",
+            "KIMI-K3",
+            "moonshotai/kimi-k3",
+            "moonshotai/Kimi-K3",
+            "moonshot/kimi-k3",
+            "moonshot/kimi-k2.7-code",
+            "moonshot/kimi-k2.6",
+            "openrouter/moonshotai/kimi-k3",
+            "nous/moonshotai/kimi-k3",
         ],
     )
     def test_positive_matches(self, model):

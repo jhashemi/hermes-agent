@@ -257,6 +257,16 @@ def is_moonshot_model(model: str | None) -> bool:
     reasoning model on the coding-optimized endpoint — they do NOT start with
     ``kimi-`` and contain no ``moonshot`` substring, so they need an explicit
     check here so tool-schema sanitization applies on the coding route too.
+
+    K3 API contract notes (platform.kimi.ai, 2026-07-16):
+    - ``kimi-k3`` always reasons at ``reasoning_effort: "max"`` — the model
+      has no non-reasoning mode.
+    - Sampling overrides (``temperature``, ``top_p``, ``n``,
+      ``presence_penalty``, ``frequency_penalty``) are **fixed by the provider**
+      and must NOT be sent — the API rejects them.  The kimi-for-coding endpoint
+      (``k3``, ``k3-256k``) already had this constraint; ``kimi-k3`` inherits it.
+    - ``kimi-k2.7-code`` and ``kimi-k2.7-code-highspeed`` also always reason but
+      accept both ``thinking`` and ``reasoning_effort`` fields being omitted.
     """
     if not model:
         return False
