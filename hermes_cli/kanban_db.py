@@ -94,6 +94,10 @@ from toolsets import get_toolset_names
 
 _log = logging.getLogger(__name__)
 
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -8120,6 +8124,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    node_router=None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -8154,6 +8159,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            node_router=node_router,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -8170,6 +8176,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            node_router=node_router,
         )
         # Still under the dispatch lock: opportunistically truncate the WAL
         # at a coarse interval so it cannot grow unbounded between restarts.
@@ -8190,6 +8197,7 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    node_router=None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -8218,6 +8226,13 @@ def _dispatch_once_locked(
     ``spawn_fn`` defaults to ``_default_spawn``. Tests pass a stub.
     ``board`` pins workspace/log/db resolution for this tick to a specific
     board. When omitted, the current-board resolution chain is used.
+
+    ``node_router`` is an optional callable ``(task_id, assignee) ->
+    Optional[str]`` that returns a target node name (e.g. "hermes1") for
+    cluster-aware dispatch. When None or returning None, the task is spawned
+    locally (the existing path). When returning a node name that differs
+    from the local node, the task is spawned via SSH on that remote node.
+    This is the integration point for the LLM cluster dispatcher.
     """
     # Reap zombie children from previously spawned workers. See
     # reap_worker_zombies() for the full rationale.
@@ -8456,6 +8471,18 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
+        # Determine target node via cluster router (advisory — LLM may route
+        # to a different node). When None, spawn locally (default path).
+        target_node = None
+        if node_router is not None:
+            try:
+                target_node = node_router(claimed.id, claimed.assignee or "")
+            except Exception as exc:
+                logger.warning(
+                    "[dispatch] node_router failed for %s: %s; "
+                    "spawning locally", claimed.id, exc,
+                )
+                target_node = None
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
@@ -8464,7 +8491,9 @@ def _dispatch_once_locked(
             import inspect
             try:
                 sig = inspect.signature(_spawn)
-                if "board" in sig.parameters:
+                if "target_node" in sig.parameters:
+                    pid = _spawn(claimed, str(workspace), board=board, target_node=target_node)
+                elif "board" in sig.parameters:
                     pid = _spawn(claimed, str(workspace), board=board)
                 else:
                     pid = _spawn(claimed, str(workspace))
@@ -8872,6 +8901,7 @@ def _default_spawn(
     workspace: str,
     *,
     board: Optional[str] = None,
+    target_node: Optional[str] = None,
 ) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -8884,6 +8914,11 @@ def _default_spawn(
     ``HERMES_KANBAN_DB`` / ``HERMES_KANBAN_BOARD`` / workspaces_root env
     vars all resolve to the same board the dispatcher claimed the task
     from. Workers cannot accidentally see other boards.
+
+    ``target_node`` is an advisory routing hint from the LLM cluster
+    dispatcher. When set to a remote node name (e.g. "hermes1"), the
+    worker is spawned via SSH on that node instead of locally. When None
+    or equal to the local node name, the existing local spawn path is used.
     """
     import subprocess
     if not task.assignee:
@@ -9049,6 +9084,69 @@ def _default_spawn(
     log_path = log_dir / f"{task.id}.log"
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(log_path, rotate_bytes, backup_count)
+
+    # ── Cluster routing ──────────────────────────────────────────────
+    # If target_node is set and differs from the local node, spawn the
+    # worker on the remote node via SSH. This is the integration point
+    # for the LLM cluster dispatcher: it decides which node runs the
+    # task, and _default_spawn routes the worker accordingly.
+    LOCAL_NODE_ID = os.environ.get("HERMES_CLUSTER_LOCAL_NODE", "hermes2")
+    if target_node and target_node != LOCAL_NODE_ID:
+        # Remote spawn via SSH
+        from gateway.cluster_dispatch import spawn_on_remote, _NODE_HOSTS
+        host = _NODE_HOSTS.get(target_node)
+        if host is None:
+            # target_node is the local node or unknown — fall back to local
+            logger.warning(
+                "[dispatch] target_node=%r has no SSH host mapping; "
+                "spawning locally", target_node,
+            )
+        else:
+            # Validate that the remote node is reachable (basic SSH probe).
+            # If the probe fails, fall back to local spawn rather than
+            # blocking the dispatch loop. The audit trail in the LLM
+            # dispatcher's DuckDB already records the routing decision.
+            try:
+                import subprocess as _sp
+                probe = _sp.run(
+                    ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     host, "true"],
+                    capture_output=True, timeout=8,
+                )
+                if probe.returncode != 0:
+                    logger.warning(
+                        "[dispatch] SSH probe to %s (%s) failed (rc=%d); "
+                        "spawning locally instead",
+                        target_node, host, probe.returncode,
+                    )
+                else:
+                    # Remote node reachable — spawn via SSH
+                    pid = spawn_on_remote(
+                        task_id=task.id,
+                        assignee=task.assignee or "",
+                        workspace=workspace,
+                        board=resolved_board,
+                        target_node=target_node,
+                        log_path=str(log_path),
+                        skills=list(task.skills) if task.skills else None,
+                        env_extra={
+                            k: v for k, v in env.items()
+                            if k.startswith("HERMES_")
+                        },
+                    )
+                    logger.info(
+                        "[dispatch] spawned task %s on remote node %s "
+                        "(pid=%s)", task.id, target_node, pid,
+                    )
+                    return pid
+            except Exception as exc:
+                logger.warning(
+                    "[dispatch] SSH spawn to %s failed: %s; "
+                    "falling back to local spawn",
+                    target_node, exc,
+                )
+                # Fall through to local spawn below
+    # ── End cluster routing ─────────────────────────────────────────
 
     # Use 'a' so a re-run on unblock appends rather than overwrites.
     log_f = open(log_path, "ab")

@@ -426,6 +426,8 @@ async function startSocket() {
         console.log('\n📱 Scan this QR code with WhatsApp on your phone:\n');
         qrcode.generate(qr, { small: true });
         console.log('\nWaiting for scan...\n');
+        // Also save as PNG for remote scanning
+        import('qrcode').then(QRCode => QRCode.default.toFile('/tmp/wa-qr.png', qr, { width: 400, margin: 2 })).then(() => console.log('\n🖼️  QR saved to /tmp/wa-qr.png')).catch(e => console.log('PNG save failed:', e.message));
       }
     }
 
