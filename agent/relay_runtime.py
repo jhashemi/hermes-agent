@@ -60,6 +60,74 @@ def _scope_op_executor():
     return _SCOPE_OP_EXECUTOR
 
 
+def _run_bounded_on_exit_thread(fn: Callable[[], Any], timeout: float) -> Any:
+    """Bounded fallback lane for interpreter shutdown.
+
+    When the shared executor refuses new futures (interpreter shutdown),
+    the operation still must not run unbounded on the calling thread: a
+    wedged native call would block process exit forever — the same defect
+    class this module exists to prevent, on the exit lane.  Run it on a
+    fresh daemon thread with a bounded join; on breach the daemon worker
+    is abandoned exactly like the executor lane abandons its worker.
+    """
+    result: list[Any] = []
+    error: list[BaseException] = []
+
+    def _target() -> None:
+        try:
+            result.append(fn())
+        except BaseException as exc:  # noqa: BLE001 - propagated below
+            error.append(exc)
+
+    worker = threading.Thread(
+        target=_target, daemon=True, name="relay-scope-op-exit"
+    )
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(
+            f"Relay scope operation exceeded {timeout}s during interpreter "
+            "shutdown; abandoning the native call so process exit can proceed"
+        )
+    if error:
+        raise error[0]
+    return result[0] if result else None
+
+
+def pop_relay_scope(
+    relay: Any,
+    handle: Any,
+    *,
+    output: Any = None,
+    metadata: Any = None,
+    timestamp: Any = None,
+) -> Any:
+    """Pop a Relay scope without passing kwargs the binding rejects.
+
+    NeMo Relay ``scope.pop`` gained ``metadata`` in 0.4+. Older wheels (e.g.
+    0.3.x) raise ``TypeError: pop() got an unexpected keyword argument
+    'metadata'`` when Hermes finalization forwards runtime metadata. Filter to
+    parameters the live binding accepts so turn/session close can complete.
+    """
+    pop = relay.scope.pop
+    kwargs: dict[str, Any] = {}
+    if output is not None:
+        kwargs["output"] = output
+    if metadata is not None:
+        kwargs["metadata"] = metadata
+    if timestamp is not None:
+        kwargs["timestamp"] = timestamp
+    try:
+        params = inspect.signature(pop).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if params and not any(
+        param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()
+    ):
+        kwargs = {key: value for key, value in kwargs.items() if key in params}
+    return pop(handle, **kwargs)
+
+
 @dataclass
 class RelaySession:
     """One isolated Relay scope stack owned by a Hermes session."""
@@ -439,7 +507,8 @@ class RelayRuntime:
                 return a_uuid is not None and a_uuid == b_uuid
 
             try:
-                self.relay.scope.pop(
+                pop_relay_scope(
+                    self.relay,
                     handle,
                     output=close_output,
                     metadata=metadata,
@@ -460,7 +529,8 @@ class RelayRuntime:
                 ):
                     break
                 try:
-                    self.relay.scope.pop(
+                    pop_relay_scope(
+                        self.relay,
                         top,
                         output={
                             "outcome": "cancelled",
@@ -484,7 +554,8 @@ class RelayRuntime:
                     handle,
                 )
             try:
-                self.relay.scope.pop(
+                pop_relay_scope(
+                    self.relay,
                     handle,
                     output=close_output,
                     metadata=metadata,
