@@ -8947,14 +8947,12 @@ def _default_spawn(
     # profile-specific config entirely.  Fixes profile-scoped fallback_providers
     # being invisible to kanban workers.
     from hermes_cli.profiles import resolve_profile_env
-    try:
-        env["HERMES_HOME"] = resolve_profile_env(profile_arg)
-    except FileNotFoundError:
-        # Profile dir doesn't exist — defer resolution to the CLI's
-        # _apply_profile_override() via HERMES_PROFILE (set below).
-        # This only happens in test fixtures where the isolated
-        # HERMES_HOME never had profiles created.
-        pass
+    # NOTE: We intentionally do NOT set HERMES_HOME to the profile directory.
+    # Setting HERMES_HOME to a profile-scoped path breaks model connections
+    # because the profile dir lacks the root .env (API keys), skills/,
+    # plugins/, and other infrastructure. The -p flag already activates the
+    # profile's config.yaml via _apply_profile_override(). The worker inherits
+    # the gateway's HERMES_HOME (root .hermes) which has everything needed.
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
