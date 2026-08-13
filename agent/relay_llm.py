@@ -256,6 +256,7 @@ def stream_current(
     finalizer: Callable[[], Any],
     metadata: dict[str, Any] | None = None,
     defer_logical_completion: bool = False,
+    completed_response_predicate: Callable[[Any], bool] | None = None,
 ) -> Any:
     """Run a provider stream under the inherited Hermes turn when present."""
     turn = relay_runtime.active_turn()
@@ -270,6 +271,7 @@ def stream_current(
         finalizer=finalizer,
         metadata=metadata,
         defer_logical_completion=defer_logical_completion,
+        completed_response_predicate=completed_response_predicate,
     )
 
 
@@ -290,7 +292,7 @@ def stream(
     defer_logical_completion: bool = False,
 ) -> "ManagedLlmStream":
     """Return a synchronous view of one Relay-managed provider stream."""
-    return ManagedLlmStream(
+    managed = ManagedLlmStream(
         request,
         stream_factory,
         session_id=session_id,
@@ -305,6 +307,15 @@ def stream(
         metadata=metadata,
         defer_logical_completion=defer_logical_completion,
     )
+    if completed_response_predicate is not None:
+        # Relay may defer the provider callback until the first stream pull.
+        # Prime once so adapters that ignore stream=True can still return their
+        # completed response directly. A real first chunk is buffered.
+        managed._prime_completed_response()
+        completed = getattr(managed, "final_response", None)
+        if completed is not None:
+            return completed
+    return managed
 
 
 class ManagedLlmStream(Iterator[Any]):
@@ -342,6 +353,7 @@ class ManagedLlmStream(Iterator[Any]):
         self._relay_observes_chunks = False
         self._provider_completed = False
         self._raw_chunks: list[tuple[Any, Any]] = []
+        self._prefetched_chunks: list[Any] = []
         self.output_modified = False
         callback_context = contextvars.copy_context()
 
@@ -497,9 +509,20 @@ class ManagedLlmStream(Iterator[Any]):
     def __iter__(self) -> "ManagedLlmStream":
         return self
 
+    def _prime_completed_response(self) -> None:
+        """Advance once while preserving a genuine first chunk."""
+        if self._closed or self._prefetched_chunks:
+            return
+        try:
+            self._prefetched_chunks.append(next(self))
+        except StopIteration:
+            pass
+
     def __next__(self) -> Any:
         if self._closed:
             raise StopIteration
+        if self._prefetched_chunks:
+            return self._prefetched_chunks.pop()
         if self._loop is None:
             try:
                 chunk = next(self._stream)
@@ -600,6 +623,7 @@ class ManagedLlmStream(Iterator[Any]):
         if self._closed:
             return
         self._closed = True
+        self._prefetched_chunks.clear()
         loop = self._loop
         self._loop = None
         if loop is None:
