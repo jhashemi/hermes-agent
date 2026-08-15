@@ -64,6 +64,8 @@ class TestFrameworkWrapperModule:
             "Container",
             "KanbanWorkerExecutiveAgentActor",
             "DedicatedSubjectWriter",
+            "create_event_bus",
+            "NullEventBus",
             "LldapConfig",
             "get_directory_port_type",
             "get_lldap_adapter",
@@ -300,7 +302,7 @@ class TestIntegration:
         """Every framework class export must be a type. Factory functions are OK."""
         from hermes_agent import framework_wrapper
         # Factory functions are not classes — they're callable functions
-        _FUNCTION_EXPORTS = {"get_directory_port_type", "get_lldap_adapter"}
+        _FUNCTION_EXPORTS = {"get_directory_port_type", "get_lldap_adapter", "create_event_bus"}
         for name in framework_wrapper.__all__:
             obj = getattr(framework_wrapper, name)
             if name in _FUNCTION_EXPORTS:

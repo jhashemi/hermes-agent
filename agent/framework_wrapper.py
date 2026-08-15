@@ -81,6 +81,16 @@ DedicatedSubjectWriter = _try_import(
     "DedicatedSubjectWriter",
 )
 
+# EventBus factory + null fallback
+create_event_bus = _try_import(
+    "executive_agents.infrastructure.adapters.nats_event_bus",
+    "create_event_bus",
+)
+NullEventBus = _try_import(
+    "executive_agents.infrastructure.adapters.nats_event_bus",
+    "NullEventBus",
+)
+
 
 # ---- Sentinel for "argument not supplied" --------------------------------
 _UNSET = object()
@@ -232,6 +242,9 @@ __all__ = [
     "KanbanWorkerExecutiveAgentActor",
     # NATS typed write companion
     "DedicatedSubjectWriter",
+    # EventBus factory + null fallback
+    "create_event_bus",
+    "NullEventBus",
     # Hermes-facing LLDAP factory
     "LldapConfig",
     "get_directory_port_type",
