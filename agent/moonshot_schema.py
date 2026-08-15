@@ -15,6 +15,9 @@ and MoonshotAI/kimi-cli#1595:
 2. When ``anyOf`` is used, ``type`` must be on the ``anyOf`` children, not
    the parent.  Presence of both causes "type should be defined in anyOf
    items instead of the parent schema".
+3. Every object schema must carry a ``required`` array, even an empty one.
+   Standard JSON Schema allows omitting it; Moonshot 400s with
+   "required must be an array".
 
 The ``#/definitions/...`` → ``#/$defs/...`` rewrite for draft-07 refs is
 handled separately in ``tools/mcp_tool._normalize_mcp_input_schema`` so it
@@ -122,7 +125,7 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
     # empty, drop it entirely.
     if "enum" in repaired and isinstance(repaired["enum"], list):
         node_type = repaired.get("type")
-        if node_type in ("string", "integer", "number", "boolean"):
+        if node_type in {"string", "integer", "number", "boolean"}:
             cleaned = [v for v in repaired["enum"]
                        if v is not None and v != ""]
             if cleaned:
@@ -130,12 +133,42 @@ def _repair_schema(node: Any, is_schema: bool = True) -> Any:
             else:
                 repaired.pop("enum")
 
+    # Rule 4: object schemas must carry a `required` array, even when empty.
+    if repaired.get("type") == "object":
+        repaired = _ensure_required_array(repaired)
+
     return repaired
+
+
+def _ensure_required_array(node: Dict[str, Any]) -> Dict[str, Any]:
+    """Guarantee an object schema carries a ``required`` array (Moonshot rule).
+
+    Standard JSON Schema lets you omit ``required`` when nothing is required;
+    Moonshot 400s on that ("required must be an array").  Ensure the key is a
+    list.  When ``properties`` is known, prune ``required`` entries that don't
+    name a real property — defensive against dangling names, which Moonshot
+    also rejects.  Mutates and returns ``node``.
+    """
+    props = node.get("properties")
+    req = node.get("required")
+    if isinstance(req, list):
+        if isinstance(props, dict):
+            node["required"] = [r for r in req if r in props]
+    else:
+        node["required"] = []
+    return node
 
 
 def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
     """Infer a reasonable ``type`` if this schema node has none."""
-    if "type" in node and node["type"] not in (None, ""):
+    node_type = node.get("type")
+    if isinstance(node_type, list):
+        concrete = next(
+            (t for t in node_type if isinstance(t, str) and t not in {"", "null"}),
+            "string",
+        )
+        return {**node, "type": concrete}
+    if "type" in node and node_type not in {None, ""}:
         return node
 
     # Heuristic: presence of ``properties`` → object, ``items`` → array, ``enum``
@@ -167,17 +200,18 @@ def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
     applied.  Input is not mutated.
     """
     if not isinstance(parameters, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     repaired = _repair_schema(copy.deepcopy(parameters), is_schema=True)
     if not isinstance(repaired, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     # Top-level must be an object schema
     if repaired.get("type") != "object":
         repaired["type"] = "object"
     if "properties" not in repaired:
         repaired["properties"] = {}
+    _ensure_required_array(repaired)
 
     return repaired
 
@@ -217,6 +251,22 @@ def is_moonshot_model(model: str | None) -> bool:
     Detection by model name covers Nous / OpenRouter / other aggregators that
     route to Moonshot's inference, where the base URL is the aggregator's, not
     ``api.moonshot.ai``.
+
+    Also matches the bare ``k3`` and ``k3-256k`` model IDs exposed by the
+    ``kimi-for-coding`` provider (api.kimi.com/coding/v1). These are the K3
+    reasoning model on the coding-optimized endpoint — they do NOT start with
+    ``kimi-`` and contain no ``moonshot`` substring, so they need an explicit
+    check here so tool-schema sanitization applies on the coding route too.
+
+    K3 API contract notes (platform.kimi.ai, 2026-07-16):
+    - ``kimi-k3`` always reasons at ``reasoning_effort: "max"`` — the model
+      has no non-reasoning mode.
+    - Sampling overrides (``temperature``, ``top_p``, ``n``,
+      ``presence_penalty``, ``frequency_penalty``) are **fixed by the provider**
+      and must NOT be sent — the API rejects them.  The kimi-for-coding endpoint
+      (``k3``, ``k3-256k``) already had this constraint; ``kimi-k3`` inherits it.
+    - ``kimi-k2.7-code`` and ``kimi-k2.7-code-highspeed`` also always reason but
+      accept both ``thinking`` and ``reasoning_effort`` fields being omitted.
     """
     if not model:
         return False
@@ -224,6 +274,15 @@ def is_moonshot_model(model: str | None) -> bool:
     # Last path segment (covers aggregator-prefixed slugs)
     tail = bare.rsplit("/", 1)[-1]
     if tail.startswith("kimi-") or tail == "kimi":
+        return True
+    # Kimi Coding Plan serves K3 under the bare slug ``k3`` (plus dated /
+    # suffixed variants like ``k3.1`` or ``k3-turbo``).
+    if tail == "k3" or tail.startswith(("k3.", "k3-")):
+        return True
+    # kimi-for-coding endpoint bare model IDs (k3, k3-256k, kimi-for-coding[-highspeed])
+    if tail in ("k3", "k3-256k") or tail.startswith("k3-"):
+        return True
+    if tail.startswith("kimi-for-coding"):
         return True
     # Vendor-prefixed forms commonly used on aggregators
     if "moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"):
