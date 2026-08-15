@@ -19,15 +19,21 @@ import time
 import uuid
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-from .resolver import ActivationContext, AGENTS
+from .resolver import ActivationContext
 from .cognitive_memory import query_cognitive_memory, format_memory_context
 
 logger = logging.getLogger(__name__)
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~") + "/.hermes"))
 AUDIT_PATH = HERMES_HOME / "cognitive_audit.jsonl"
+
+# Display truncation limits for context formatting
+MAX_HISTORY_SUMMARY_CHARS = 80
+MAX_COMMAND_PREVIEW_CHARS = 200
+MAX_LOG_PREVIEW_CHARS = 100
+MAX_BIO_CHARS = 200
 
 
 @dataclass
@@ -135,7 +141,7 @@ def run_activation_cycle(
     if history:
         recent = history[-4:]
         history_summary = "; ".join(
-            f"{m.get('role','?')}: {str(m.get('content',''))[:80]}"
+            f"{m.get('role','?')}: {str(m.get('content',''))[:MAX_HISTORY_SUMMARY_CHARS]}"
             for m in recent
         )
 
@@ -146,7 +152,7 @@ def run_activation_cycle(
             profile_summary = f"expertise={','.join(str(e) for e in expertise[:4])}"
 
     observe_content = (
-        f"Command: '{command[:200]}' | "
+        f"Command: '{command[:MAX_COMMAND_PREVIEW_CHARS]}' | "
         f"Agent: {full_name} ({persona_id}) | "
         f"Reason: {ctx.reason} | "
         f"Confidence: {ctx.confidence:.2f} | "
@@ -156,7 +162,7 @@ def run_activation_cycle(
         f"Style: {template['observe_style']}"
     )
     cycle.append(CognitiveState(step="observe", content=observe_content, ts=now))
-    logger.debug("[activation] observe: %s", observe_content[:100])
+    logger.debug("[activation] observe: %s", observe_content[:MAX_LOG_PREVIEW_CHARS])
 
     # ── Step 2: REASON ────────────────────────────────────────────────────
     # Query cognitive memory (KR2)
@@ -199,12 +205,12 @@ def run_activation_cycle(
         "activation_id": activation_id,
         "agent_id": agent_dir,
         "decision_type": "agent_activation",
-        "reasoning": f"Activated {full_name} for command: '{command[:100]}'. {ctx.reason}",
+        "reasoning": f"Activated {full_name} for command: '{command[:MAX_LOG_PREVIEW_CHARS]}'. {ctx.reason}",
         "outcome": f"cycle_initiated persona={persona_id} confidence={ctx.confidence:.2f}",
         "confidence": ctx.confidence,
         "via_raci": ctx.via_raci,
         "ts": now,
-        "command_preview": command[:100],
+        "command_preview": command[:MAX_LOG_PREVIEW_CHARS],
     }
     _write_audit(decision_record)
 
@@ -246,7 +252,7 @@ def run_activation_cycle(
 
     profile = ctx.profile or {}
     if profile:
-        bio = str(profile.get("bio", "")).replace("\n", " ").strip()[:200]
+        bio = str(profile.get("bio", "")).replace("\n", " ").strip()[:MAX_BIO_CHARS]
         if bio:
             context_parts.append(f"[{full_name} Profile] {bio} [/Profile]")
 
@@ -256,7 +262,7 @@ def run_activation_cycle(
         activation_id=activation_id,
         persona_id=persona_id,
         full_name=full_name,
-        command=command[:200],
+        command=command[:MAX_COMMAND_PREVIEW_CHARS],
         cycle=cycle,
         memory_context=memory_context,
         injected_context=injected_context,

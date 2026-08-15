@@ -14,7 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 _PLATFORM_BASE_ENV = os.environ.get("EXECUTIVE_AGENTS_PLATFORM", "/home/ubuntu/executive_agents_platform")
 PLATFORM_BASE = Path(_PLATFORM_BASE_ENV)
 AGENTS_BASE = PLATFORM_BASE / "agents"
+
+# Display truncation limits
+MAX_REASONING_CHARS = 200
+MAX_TIMESTAMP_CHARS = 10
+MAX_BIO_CHARS = 300
+MAX_EXPERTISE_DOMAINS = 5
+MAX_PERSONALITY_TRAITS = 4
 
 # Typical locations for cognitive audit trails (env-overridable)
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~") + "/.hermes"))
@@ -156,14 +163,14 @@ def format_memory_context(
     lines = [f"[{persona_name} Cognitive Memory — {len(records)} relevant decisions]"]
     for i, rec in enumerate(records, 1):
         dt = rec.get("decision_type", "decision")
-        reasoning = rec.get("reasoning", rec.get("outcome", ""))[:200]
+        reasoning = rec.get("reasoning", rec.get("outcome", ""))[:MAX_REASONING_CHARS]
         confidence = rec.get("confidence", "?")
         ts = rec.get("ts", rec.get("timestamp", ""))
         if ts:
             try:
                 ts_str = str(int(float(ts)))
             except (ValueError, TypeError):
-                ts_str = str(ts)[:10]
+                ts_str = str(ts)[:MAX_TIMESTAMP_CHARS]
         else:
             ts_str = ""
         line = f"  {i}. [{dt}] {reasoning}"
@@ -172,7 +179,7 @@ def format_memory_context(
         if ts_str:
             line += f" @{ts_str}"
         lines.append(line)
-    lines.append(f"[/Memory]")
+    lines.append("[/Memory]")
     return "\n".join(lines)
 
 
@@ -187,16 +194,16 @@ def _load_profile_context(agent_dir: str) -> str:
             return ""
         lines = []
         if profile.get("bio"):
-            bio = str(profile["bio"]).replace("\n", " ").strip()[:300]
+            bio = str(profile["bio"]).replace("\n", " ").strip()[:MAX_BIO_CHARS]
             lines.append(f"Bio: {bio}")
         if profile.get("expertise_domains"):
             domains = profile["expertise_domains"]
             if isinstance(domains, list):
-                lines.append(f"Expertise: {', '.join(domains[:5])}")
+                lines.append(f"Expertise: {', '.join(domains[:MAX_EXPERTISE_DOMAINS])}")
         if profile.get("personality_traits"):
             traits = profile["personality_traits"]
             if isinstance(traits, list):
-                lines.append(f"Traits: {', '.join(traits[:4])}")
+                lines.append(f"Traits: {', '.join(traits[:MAX_PERSONALITY_TRAITS])}")
         return "\n".join(lines) if lines else ""
     except Exception as e:
         logger.debug("[cognitive_memory] Could not load profile %s: %s", agent_dir, e)

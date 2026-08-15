@@ -182,7 +182,7 @@ def resolve_active_agent(
             full_name=info["full_name"],
             agent_dir=info["agent_dir"],
             confidence=0.98,
-            reason=f"explicit alias mention in command",
+            reason="explicit alias mention in command",
             profile=profile,
         )
 

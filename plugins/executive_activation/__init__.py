@@ -14,12 +14,10 @@ KR4: activation_cycle.run_activation_cycle() — full cognitive cycle
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional
 
 from .resolver import resolve_active_agent, AGENTS
 from .activation_cycle import run_activation_cycle
-from .cognitive_memory import query_cognitive_memory, format_memory_context
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +175,6 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any = None, session_store: An
         msg = event.get("message", {})
         text = (msg.get("text") or msg.get("body") or "").strip()
         user_id = str(event.get("user_id") or event.get("from") or "")
-        chat_id = str(event.get("chat_id") or event.get("chat") or "")
 
         if not text:
             return None

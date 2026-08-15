@@ -24,7 +24,10 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
+
+if TYPE_CHECKING:
+    from agent.framework_wrapper import LldapConfig
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +85,7 @@ def _load_config_from_yaml() -> dict[str, Any]:
         return {}
 
 
-def _resolve_config() -> "LldapConfig":  # noqa: F821
+def _resolve_config() -> "LldapConfig":
     """Merge LLDAP config from all sources into an LldapConfig.
 
     Precedence: runtime env > .env file > config.yaml > defaults.
