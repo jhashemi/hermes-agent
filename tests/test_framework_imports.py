@@ -54,7 +54,7 @@ class TestFrameworkWrapperModule:
         )
 
     def test_wrapper_all_exports_defined(self):
-        """__all__ must list all 6 expected exports."""
+        """__all__ must list all expected exports."""
         from hermes_agent import framework_wrapper
         expected = {
             "LldapAdapter",
@@ -63,6 +63,9 @@ class TestFrameworkWrapperModule:
             "ExecutiveAgentActor",
             "Container",
             "KanbanWorkerExecutiveAgentActor",
+            "LldapConfig",
+            "get_directory_port_type",
+            "get_lldap_adapter",
         }
         assert expected == set(framework_wrapper.__all__)
 
@@ -287,10 +290,17 @@ class TestIntegration:
         assert DedicatedSubjectWriter is not None
 
     def test_all_wrapper_exports_are_types(self):
-        """Every name in __all__ must be a class (type), not a module or function."""
+        """Every framework class export must be a type. Factory functions are OK."""
         from hermes_agent import framework_wrapper
+        # Factory functions are not classes — they're callable functions
+        _FUNCTION_EXPORTS = {"get_directory_port_type", "get_lldap_adapter"}
         for name in framework_wrapper.__all__:
             obj = getattr(framework_wrapper, name)
-            assert isinstance(obj, type), (
-                f"Expected {name!r} to be a class, got {type(obj)!r}"
-            )
+            if name in _FUNCTION_EXPORTS:
+                assert callable(obj), (
+                    f"Expected {name!r} to be callable, got {type(obj)!r}"
+                )
+            else:
+                assert isinstance(obj, type), (
+                    f"Expected {name!r} to be a class, got {type(obj)!r}"
+                )

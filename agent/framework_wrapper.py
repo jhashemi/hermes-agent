@@ -1,36 +1,85 @@
-"""framework_wrapper.py — Thin bridge from hermes-agent to executive-agents-framework.
+"""framework_wrapper.py — Unified bridge from hermes-agent to executive-agents-framework.
 
-Provides hermes-agent-facing config and factory functions for LLDAP integration.
+Provides:
+  1. sys.path setup — adds EAF src to sys.path on import
+  2. Framework re-exports — LldapAdapter, LDAPAgentLocator, NATSEventBus,
+     ExecutiveAgentActor, Container (AgentContainer), KanbanWorkerExecutiveAgentActor
+  3. Hermes-facing LLDAP config + factory — LldapConfig, get_lldap_adapter(),
+     get_directory_port_type()
+
 Lazy-imports framework classes so this module can be imported even when the
-framework package is not installed (it fails at call-time instead of import time).
+framework package is not installed (fails at call-time instead of import time).
 
-Canonical framework path:
+Canonical framework paths:
   executive_agents.infrastructure.adapters.directory.lldap_adapter
-  - LldapConfig
-  - LldapAdapter
+  executive_agents.infrastructure.adapters.directory.ldap_agent_locator
+  executive_agents.infrastructure.adapters.nats_event_bus
+  executive_agents.agents.kanban_worker_executive_agent_actor
+  executive_agents.composition.container
   executive_agents.ports.directory.ldap_directory_port
-  - LdapDirectoryPort
-
-Config resolution order (12-factor precedence):
-  1. Explicit kwargs to LldapConfig()
-  2. LLDAP_* / EAF_LLDAP_* environment variables
-  3. Values from ~/.hermes/.env
-  4. Values from lldap: section in ~/.hermes/config.yaml
-  5. Compile-time defaults
 """
 from __future__ import annotations
 
+import importlib
 import logging
 import os
+import sys
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# ---- Add framework src to sys.path ─────────────────────────────────────────
+_FRAMEWORK_SRC = os.environ.get(
+    "EXECUTIVE_AGENTS_FRAMEWORK_SRC",
+    "/home/ubuntu/executive_agents_framework/src",
+)
+if os.path.isdir(_FRAMEWORK_SRC) and _FRAMEWORK_SRC not in sys.path:
+    sys.path.insert(0, _FRAMEWORK_SRC)
+
+
+# ---- Lazy import helper ────────────────────────────────────────────────────
+def _try_import(module_path: str, name: str):
+    """Import a name from a module, returning None if not available."""
+    try:
+        mod = importlib.import_module(module_path)
+        return getattr(mod, name)
+    except (ImportError, AttributeError) as e:
+        logger.debug("framework_wrapper: could not import %s from %s: %s", name, module_path, e)
+        return None
+
+
+# ---- Framework re-exports ─────────────────────────────────────────────────
+LldapAdapter = _try_import(
+    "executive_agents.infrastructure.adapters.directory.lldap_adapter",
+    "LldapAdapter",
+)
+LDAPAgentLocator = _try_import(
+    "executive_agents.infrastructure.adapters.directory.ldap_agent_locator",
+    "LDAPAgentLocator",
+)
+NATSEventBus = _try_import(
+    "executive_agents.infrastructure.adapters.nats_event_bus",
+    "NATSEventBus",
+)
+Container = _try_import(
+    "executive_agents.composition.container",
+    "AgentContainer",
+)
+ExecutiveAgentActor = _try_import(
+    "executive_agents.agents.kanban_worker_executive_agent_actor",
+    "ExecutiveAgentActor",
+)
+KanbanWorkerExecutiveAgentActor = _try_import(
+    "executive_agents.agents.kanban_worker_executive_agent_actor",
+    "KanbanWorkerActor",
+)
+
 
 # ---- Sentinel for "argument not supplied" --------------------------------
 _UNSET = object()
 
 
-# ---- Lazy import bookkeeping -------------------------------------------
+# ---- Lazy import bookkeeping for LLDAP factory functions ─────────────────
 _LldapAdapter_cls: Any = None
 _LldapConfig_cls: Any = None
 _LdapDirectoryPort_cls: Any = None
@@ -165,7 +214,16 @@ def get_directory_port_type() -> Any:
     return _LdapDirectoryPort_cls
 
 
+# ---- __all__ ─────────────────────────────────────────────────────────────
 __all__ = [
+    # Framework re-exports
+    "LldapAdapter",
+    "LDAPAgentLocator",
+    "NATSEventBus",
+    "ExecutiveAgentActor",
+    "Container",
+    "KanbanWorkerExecutiveAgentActor",
+    # Hermes-facing LLDAP factory
     "LldapConfig",
     "get_directory_port_type",
     "get_lldap_adapter",
