@@ -86,9 +86,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Merged feat/voice-bridge-converged (48 custom commits) with upstream main.
   Resolved file-move conflicts where gateway/platforms/{discord,telegram,whatsapp}.py
   were moved to plugins/platforms/{discord,telegram,whatsapp}/adapter.py.
-- EAF master synced across cluster (h1 + h2 at commit 1c7f97fb).
+- EAF master synced across cluster (h1 + h2 at commit 88875f0d).
 - hermes-agent feat/voice-bridge-converged synced across cluster (h1 + h2 at
-  commit 4ba612b4f).
+  commit 03206d2ef).
+
+### Technical Debt Reduction — 2026-08-15
+
+- **Eliminated framework_wrapper duplication**: Merged agent/framework_wrapper.py
+  (canonical, 244 lines) and src/hermes_agent/framework_wrapper.py (test-facing)
+  into a single file in agent/. The src/ version is now a 2-line re-export.
+  Unified __all__ includes all 9 exports: 6 framework re-exports + 3 LLDAP factory
+  functions.
+- **EAF as proper editable install**: executive-agents-framework is now installed
+  as a pip editable package in both cluster venvs (was only working via manual
+  sys.path insertion before). The sys.path fallback remains for environments
+  where EAF isn't pip-installed.
+- **src/hermes_agent/ thin re-exports**: agent_bootstrap.py and framework_wrapper.py
+  in src/hermes_agent/ are now 2-line re-exports of the canonical files in agent/.
+  Eliminates 348 lines of duplicate code.
+- **Updated test contracts**: test_framework_imports.py now expects 9 __all__ exports
+  (was 6) and handles factory functions as callable in test_all_wrapper_exports_are_types.
 
 ## [1.0.0] - 2026-05-11
 
