@@ -1,7 +1,7 @@
 """Unified import interface for executive-agents-framework components.
 
 This module consolidates all critical framework imports to one place,
-elimuating duplicate imports across the codebase and simplifying
+eliminating duplicate imports across the codebase and simplifying
 future refactoring.
 
 On import, adds the framework src directory to sys.path so that
@@ -68,11 +68,18 @@ Container = _try_import(
     "executive_agents.composition.container",
     "AgentContainer",
 )
-ExecutiveAgentActor = _try_import(
-    "executive_agents.actors.executive_agent_actor",
+
+# ExecutiveAgentActor and KanbanWorkerActor live in the same module
+_executive_agent_actor = _try_import(
+    "executive_agents.agents.kanban_worker_executive_agent_actor",
     "ExecutiveAgentActor",
 )
-KanbanWorkerExecutiveAgentActor = _try_import(
-    "executive_agents.actors.kanban_worker_actor",
-    "KanbanWorkerExecutiveAgentActor",
+_kanban_worker_actor = _try_import(
+    "executive_agents.agents.kanban_worker_executive_agent_actor",
+    "KanbanWorkerActor",
 )
+
+# The wrapper exports KanbanWorkerActor under the name KanbanWorkerExecutiveAgentActor
+# (the test verifies they are the same object).
+ExecutiveAgentActor = _executive_agent_actor
+KanbanWorkerExecutiveAgentActor = _kanban_worker_actor

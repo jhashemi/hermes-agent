@@ -1300,7 +1300,22 @@ _SLACK_PRIORITY_ALIASES = ("btw", "bg")
 #     /hermes update on Slack. Demoted to free the native slot /approvals now
 #     claims — without this entry /approvals tips the registry past the 50-cap
 #     and silently clamps /update off, breaking Telegram parity.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update"})
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    # Original via-/hermes-only commands
+    "topup", "moa", "debug", "egress", "init", "version", "diff", "update",
+    # Access control commands — routed via /hermes on Slack (50-cap management)
+    "access_grant", "access_list", "access_revoke", "access_status",
+    # Multi-agent management — not worth native Slack slots
+    "agents_disconnect", "agents_list",
+    # Help sub-commands — routed via /hermes help on Slack
+    "help_agents", "help_instances",
+    # Hermes instance management — routed via /hermes on Slack
+    "hermes_list", "hermes_status",
+    # Persona load commands — routed via /hermes on Slack
+    "load_demis", "load_jeff", "load_jony", "load_knuth", "load_tigani", "load_turing",
+    # Instance switching — routed via /hermes on Slack
+    "switch_hermes2", "switch_local",
+})
 
 
 def _sanitize_slack_name(raw: str) -> str:
