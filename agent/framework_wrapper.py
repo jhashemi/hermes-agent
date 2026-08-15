@@ -3,7 +3,8 @@
 Provides:
   1. sys.path setup — adds EAF src to sys.path on import
   2. Framework re-exports — LldapAdapter, LDAPAgentLocator, NATSEventBus,
-     ExecutiveAgentActor, Container (AgentContainer), KanbanWorkerExecutiveAgentActor
+     ExecutiveAgentActor, Container (AgentContainer), KanbanWorkerActor,
+     DedicatedSubjectWriter
   3. Hermes-facing LLDAP config + factory — LldapConfig, get_lldap_adapter(),
      get_directory_port_type()
 
@@ -71,7 +72,13 @@ ExecutiveAgentActor = _try_import(
 )
 KanbanWorkerExecutiveAgentActor = _try_import(
     "executive_agents.agents.kanban_worker_executive_agent_actor",
-    "KanbanWorkerActor",
+    "KanbanWorkerActor",  # class name in EAF module
+)
+
+# DedicatedSubjectWriter — typed write companion to NATSEventBus
+DedicatedSubjectWriter = _try_import(
+    "executive_agents.infrastructure.adapters.nats_event_bus",
+    "DedicatedSubjectWriter",
 )
 
 
@@ -223,6 +230,8 @@ __all__ = [
     "ExecutiveAgentActor",
     "Container",
     "KanbanWorkerExecutiveAgentActor",
+    # NATS typed write companion
+    "DedicatedSubjectWriter",
     # Hermes-facing LLDAP factory
     "LldapConfig",
     "get_directory_port_type",

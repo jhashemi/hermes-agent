@@ -63,6 +63,7 @@ class TestFrameworkWrapperModule:
             "ExecutiveAgentActor",
             "Container",
             "KanbanWorkerExecutiveAgentActor",
+            "DedicatedSubjectWriter",
             "LldapConfig",
             "get_directory_port_type",
             "get_lldap_adapter",
@@ -288,6 +289,12 @@ class TestIntegration:
             DedicatedSubjectWriter,
         )
         assert DedicatedSubjectWriter is not None
+
+    def test_dsw_exported_from_wrapper(self):
+        """DedicatedSubjectWriter must also be exported from framework_wrapper."""
+        from agent.framework_wrapper import DedicatedSubjectWriter as W_DSW
+        assert W_DSW is not None
+        assert isinstance(W_DSW, type)
 
     def test_all_wrapper_exports_are_types(self):
         """Every framework class export must be a type. Factory functions are OK."""
