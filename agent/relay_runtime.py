@@ -373,6 +373,145 @@ class RelayRuntime:
         )
         return result if isinstance(result, dict) else args
 
+    def _close_scope_handle(
+        self,
+        session: RelaySession,
+        handle: Any,
+        *,
+        output: dict[str, Any] | None = None,
+        allow_closing: bool = False,
+        failure_label: str = "scope close failed",
+        drain_limit: int = 32,
+    ) -> str | None:
+        """Pop ``handle``, draining orphaned children in the same session context.
+
+        Relay scopes are strict LIFO. Empty-stream retries + interrupt can
+        abandon a physical LLM scope above TURN/SESSION (#81521). Drain and
+        close must run inside one ``run_in_session`` callback so ContextVar
+        stack views stay consistent across pops.
+        """
+        if handle is None:
+            return None
+        metadata = {
+            RUNTIME_SCHEMA_KEY: RUNTIME_SCHEMA_VERSION,
+            RUNTIME_INSTANCE_KEY: self.runtime_id,
+        }
+        close_output = output or {}
+        session_root = session.handle
+        drained_holder = {"count": 0}
+        error_holder: dict[str, BaseException] = {}
+
+        def close_with_drain() -> None:
+            def current_top() -> Any:
+                # Version-correct accessor first: the pinned nemo-relay
+                # binding exposes ``scope.get_handle()`` returning the
+                # current top-of-stack ScopeHandle.  Its
+                # ``get_scope_stack()`` returns a native ScopeStack object
+                # that ``scope.pop`` rejects with TypeError, so it must
+                # never be treated as a handle (#81601 review).
+                get_handle = getattr(
+                    getattr(self.relay, "scope", None), "get_handle", None
+                )
+                if callable(get_handle):
+                    try:
+                        return get_handle()
+                    except Exception:
+                        pass
+                top = self.relay.get_scope_stack()
+                # Some Relay builds return the live stack (list). Others
+                # return the top handle directly — including tuple handles
+                # like ("scope", name, serial) from the test fake. Only
+                # unwrap real list stacks; never index a handle tuple.
+                if isinstance(top, list):
+                    return top[-1] if top else None
+                return top
+
+            def same_handle(a: Any, b: Any) -> bool:
+                # Native ScopeHandle instances do not implement __eq__ by
+                # value — two handles for the same scope compare unequal —
+                # so compare by uuid when both sides expose one.
+                if a is None or b is None:
+                    return a is b
+                if a is b or a == b:
+                    return True
+                a_uuid = getattr(a, "uuid", None)
+                b_uuid = getattr(b, "uuid", None)
+                return a_uuid is not None and a_uuid == b_uuid
+
+            try:
+                self.relay.scope.pop(
+                    handle,
+                    output=close_output,
+                    metadata=metadata,
+                )
+                return
+            except Exception as first_exc:
+                error_holder["first"] = first_exc
+
+            for _ in range(drain_limit):
+                top = current_top()
+                if top is None or same_handle(top, handle):
+                    break
+                # Never pop the session root while draining for a nested handle.
+                if (
+                    session_root is not None
+                    and same_handle(top, session_root)
+                    and handle is not session_root
+                ):
+                    break
+                try:
+                    self.relay.scope.pop(
+                        top,
+                        output={
+                            "outcome": "cancelled",
+                            "hermes.orphan_drain": True,
+                        },
+                        metadata=metadata,
+                    )
+                    drained_holder["count"] += 1
+                except Exception as drain_exc:
+                    error_holder["drain"] = drain_exc
+                    logger.warning(
+                        "Hermes Relay orphaned scope drain failed",
+                        exc_info=True,
+                    )
+                    break
+
+            if drained_holder["count"]:
+                logger.warning(
+                    "Hermes Relay drained %d orphaned scope(s) before closing %s",
+                    drained_holder["count"],
+                    handle,
+                )
+            try:
+                self.relay.scope.pop(
+                    handle,
+                    output=close_output,
+                    metadata=metadata,
+                )
+                error_holder.pop("first", None)
+                error_holder.pop("drain", None)
+            except Exception as retry_exc:
+                error_holder["retry"] = retry_exc
+
+        try:
+            self.run_in_session(
+                session,
+                close_with_drain,
+                allow_closing=allow_closing,
+                # Bound the whole drain+close like the direct pops it
+                # replaced: a wedged native pipeline must cost at most one
+                # span, never block turn/session completion (see
+                # tests/agent/test_relay_runtime_bounded_scope_ops.py).
+                timeout=_SCOPE_OP_TIMEOUT,
+            )
+        except Exception as exc:
+            return f"{failure_label}: {exc}"
+        retry_exc = error_holder.get("retry") or error_holder.get("first")
+        if retry_exc is not None:
+            return f"{failure_label}: {retry_exc}"
+        return None
+
     def close_session(self, event: dict[str, Any]) -> None:
         """Close one session scope and remove it from the core registry."""
         session_id = _session_id(event)
