@@ -195,8 +195,27 @@ async def cmd_subscribe():
                     # don't re-install our own broadcast
                     await msg.ack()
                     continue
-                local = SKILLS_DIR / name / "SKILL.md"
-                if local.exists():
+                # Resolve local skill dir — walk category subdirs (devops/, mlops/,
+                # software-development/, etc.). A naive `SKILLS_DIR / name` misses
+                # every category-nested skill, causing every broadcast to fall through
+                # to the scanner even when local content matches. Documented pitfall:
+                # cluster-skill-propagation-nats § "Skill-name-to-directory resolver".
+                def _resolve_local(_name):
+                    direct = SKILLS_DIR / _name / "SKILL.md"
+                    if direct.exists():
+                        return direct
+                    try:
+                        for _entry in SKILLS_DIR.iterdir():
+                            if not _entry.is_dir() or _entry.name.startswith("."):
+                                continue
+                            _cand = _entry / _name / "SKILL.md"
+                            if _cand.exists():
+                                return _cand
+                    except (FileNotFoundError, PermissionError):
+                        pass
+                    return None
+                local = _resolve_local(name)
+                if local is not None:
                     local_sha = hashlib.sha256(local.read_bytes()).hexdigest()
                     # Idempotency: skip reinstall when local SKILL.md already matches.
                     # For single_markdown: broadcast sha IS the SKILL.md sha — direct compare.
