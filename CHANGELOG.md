@@ -5,6 +5,91 @@ All notable changes to the Hermes WhatsApp Multi-Instance Orchestration System a
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+#### Cluster Plugin Sync — 2026-08-15
+
+- **Cognitive Memory Plugin** (`plugins/memory/cognitive/`): Decision audit trail
+  with JSONL persistence, `cognitive_recall` and `cognitive_decide` tools, auto-
+  extraction of decisions from conversation turns, and system-prompt injection of
+  recent decisions. Active across both cluster nodes (h1 + h2).
+
+- **Executive Activation Plugin** (`plugins/executive_activation/`): Activation
+  cycle orchestration, cognitive memory bridge, and persona resolver. Includes
+  tests_activation.py and tests_activation_extended.py.
+
+- **Voice Platform Plugin** (`~/.hermes/plugins/voice_platform_plugin/`): Gateway
+  integration for the Executive Voice Agents Platform — health polling, NATS
+  event bridging, and EAF operator tools (agent_list, agent_health,
+  session_list, session_terminate).
+
+- **ADR-009 .skill File Dispatch**: Receiving .skill files via gateway chat
+  platforms with security scan + install pipeline. Implemented for Discord,
+  Telegram, and WhatsApp platform adapters in their new plugins/platforms/
+  locations (ported from old gateway/platforms/ after upstream refactor).
+
+- **Signal Clarity Guidance** (`agent/prompt_builder.py`): SIGNAL_CLARITY_GUIDANCE
+  constant and injection logic to counteract "helpfulness theater" — the agent
+  manufacturing connections between unrelated topics or invoking irrelevant
+  tools to appear proactive.
+
+- **Session Parameters in Todo Tool**: Structured parameter store via the todo
+  tool for in-session facts that must survive context compression. Pipe-delimited
+  key-value pairs with id 'session_params'.
+
+- **LLDAP Bootstrap** (`agent/agent_bootstrap.py`): Config resolution + connection
+  bootstrap for LLDAP directory integration.
+
+- **Framework Wrapper** (`src/hermes_agent/framework_wrapper.py`): Unified import
+  interface for executive-agents-framework components. Auto-adds EAF src to
+  sys.path. Exports: LldapAdapter, LDAPAgentLocator, NATSEventBus,
+  ExecutiveAgentActor, Container (AgentContainer), KanbanWorkerExecutiveAgentActor.
+
+- **DuckDB Kanban Reader** (`hermes_cli/kanban_duckdb_reader.py`): Read-only
+  DuckDB-backed kanban reader for the dispatcher, controlled by
+  HERMES_KANBAN_BACKEND env var.
+
+- **Cluster Dispatch Routing** (`gateway/kanban_watchers.py`): Per-board cluster
+  node router for cross-node task routing (hermes1/hermes2).
+
+- **Tests**: 230 passing tests across 8 suites covering cognitive provider,
+  session params persistence, LLDAP adapter instantiation, DuckDB kanban reader,
+  env loader, commands/Slack parity, clipboard, and framework imports.
+
+### Fixed
+
+- **Slack Command Parity**: Added 18 missing commands to _SLACK_VIA_HERMES_ONLY
+  (access_grant, access_list, access_revoke, access_status, agents_disconnect,
+  agents_list, help_agents, help_instances, hermes_list, hermes_status, load_demis,
+  load_jeff, load_jony, load_knuth, load_tigani, load_turing, switch_hermes2,
+  switch_local). These are routed via /hermes <command> on Slack to stay within
+  the 50-slash-command cap.
+
+- **Framework Import Paths**: Fixed ExecutiveAgentActor and KanbanWorkerActor
+  import paths in framework_wrapper.py to match actual EAF module location
+  (executive_agents.agents.kanban_worker_executive_agent_actor).
+
+- **certifi Version Alignment**: Updated both system and venv certifi to
+  2026.5.20 on both cluster nodes.
+
+- **Dependencies**: Installed prompt_toolkit, pytest, pytest-asyncio, duckdb,
+  ldap3 on both cluster nodes.
+
+- **src/hermes_agent/ Tracking**: Previously untracked src/hermes_agent/ package
+  (framework_wrapper, agent_bootstrap, __init__) is now committed to git to
+  prevent inconsistent test results across nodes.
+
+### Changed
+
+- Merged feat/voice-bridge-converged (48 custom commits) with upstream main.
+  Resolved file-move conflicts where gateway/platforms/{discord,telegram,whatsapp}.py
+  were moved to plugins/platforms/{discord,telegram,whatsapp}/adapter.py.
+- EAF master synced across cluster (h1 + h2 at commit 1c7f97fb).
+- hermes-agent feat/voice-bridge-converged synced across cluster (h1 + h2 at
+  commit 4ba612b4f).
+
 ## [1.0.0] - 2026-05-11
 
 ### Added
