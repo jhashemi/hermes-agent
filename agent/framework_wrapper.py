@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ---- Add framework src to sys.path ─────────────────────────────────────────
 _FRAMEWORK_SRC = os.environ.get(
     "EXECUTIVE_AGENTS_FRAMEWORK_SRC",
-    "/home/ubuntu/executive_agents_framework/src",
+    os.path.expanduser("~/executive_agents_framework/src"),
 )
 if os.path.isdir(_FRAMEWORK_SRC) and _FRAMEWORK_SRC not in sys.path:
     sys.path.insert(0, _FRAMEWORK_SRC)

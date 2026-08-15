@@ -13,19 +13,21 @@ from __future__ import annotations
 import json
 import logging
 import os
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_BASE = Path("/home/ubuntu/executive_agents_platform")
+# Configurable base paths (env-overridable for containerized/distributed deployments)
+_PLATFORM_BASE_ENV = os.environ.get("EXECUTIVE_AGENTS_PLATFORM", "/home/ubuntu/executive_agents_platform")
+PLATFORM_BASE = Path(_PLATFORM_BASE_ENV)
 AGENTS_BASE = PLATFORM_BASE / "agents"
 
-# Typical locations for cognitive audit trails
+# Typical locations for cognitive audit trails (env-overridable)
+_HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~") + "/.hermes"))
 _AUDIT_SEARCH_PATHS = [
-    Path(os.path.expanduser("~")) / "executive_agents_framework" / "data" / "cognitive_audit.jsonl",
-    Path(os.path.expanduser("~")) / ".hermes" / "cognitive_audit.jsonl",
+    Path(os.environ.get("EAF_HOME", os.path.expanduser("~") + "/executive_agents_framework")) / "data" / "cognitive_audit.jsonl",
+    _HERMES_HOME / "cognitive_audit.jsonl",
     Path(os.path.expanduser("~")) / "cognitive_audit.jsonl",
     PLATFORM_BASE / "data" / "cognitive_audit.jsonl",
 ]

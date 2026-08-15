@@ -26,7 +26,7 @@ from .cognitive_memory import query_cognitive_memory, format_memory_context
 
 logger = logging.getLogger(__name__)
 
-HERMES_HOME = Path(os.path.expanduser("~")) / ".hermes"
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", os.path.expanduser("~") + "/.hermes"))
 AUDIT_PATH = HERMES_HOME / "cognitive_audit.jsonl"
 
 
