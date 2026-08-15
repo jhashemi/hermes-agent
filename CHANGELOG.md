@@ -107,6 +107,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Updated test contracts**: test_framework_imports.py now expects 9 __all__ exports
   (was 6) and handles factory functions as callable in test_all_wrapper_exports_are_types.
 
+### Code Review — 2026-08-15 (Comprehensive)
+
+Full code review across 3 severity levels with all findings fixed:
+
+**Critical (4 fixed):**
+- EAF ExecutiveAgentActor.emit_event: print-based stub → EventBus injection (DIP)
+- EAF KanbanWorkerActor.emit_completed/emit_blocked: print-based stubs → delegate to emit_event
+- EAF KanbanWorkerActor.run(): print banners → structured logging
+- EAF KanbanEventHandler: print handlers → logger.info/warning
+
+**High (4 fixed):**
+- cognitive_memory.py: hardcoded PLATFORM_BASE → env-overridable (EXECUTIVE_AGENTS_PLATFORM)
+- activation_cycle.py: hardcoded HERMES_HOME → reads HERMES_HOME env var
+- framework_wrapper.py: hardcoded /home/ubuntu → os.path.expanduser
+- EAF docstrings: "In production this would..." → describe actual behavior
+
+**Medium (11 fixed):**
+- 9 silent except/pass blocks → specific exception types + debug logging
+- 1 bare except Exception → narrowed to (ValueError, TypeError)
+- 12 missing docstrings on public methods → all added
+
+**Low (12 fixed):**
+- 10 unused imports removed (pyflakes clean across 8 files)
+- 2 f-strings without placeholders → plain strings
+- TYPE_CHECKING import for LldapConfig forward reference
+- 8 magic number truncation limits → named constants
+- Unused chat_id variable removed
+- EAF: 7 unused framework imports removed + async context check annotated
+
+**Verified clean:**
+- Zero pyflakes warnings (8 custom files in hermes-agent + 2 in EAF)
+- Zero silent exception handlers (AST-verified)
+- Zero missing docstrings on public functions (AST-verified)
+- Zero print() calls in actor/activation code
+- Zero "In production" theater language
+- Zero hardcoded home directory paths
+- 230/230 tests passing on both cluster nodes
+
 ## [1.0.0] - 2026-05-11
 
 ### Added
