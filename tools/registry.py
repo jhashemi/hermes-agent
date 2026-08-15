@@ -126,7 +126,8 @@ def _discovery_cache_path() -> Optional[Path]:
         from hermes_constants import get_hermes_home
 
         return Path(get_hermes_home()) / "cache" / "tool_discovery_cache.json"
-    except Exception:
+    except Exception as e:
+        logger.debug("registry: could not resolve discovery cache path: %s", e)
         return None
 
 
@@ -409,7 +410,8 @@ class ToolRegistry:
         """
         try:
             mod = handler.__globals__.get("__name__", "")  # type: ignore[attr-defined]
-        except AttributeError:
+        except AttributeError as e:
+            logger.debug("registry: handler has no __globals__ (likely a builtin): %s", e)
             return None
         if mod in self._plugin_override_policy:
             return mod
@@ -432,7 +434,8 @@ class ToolRegistry:
         try:
             frame = sys._getframe(2)
             return frame.f_globals.get("__name__", "") or ""
-        except Exception:
+        except Exception as e:
+            logger.debug("registry: could not inspect caller frame: %s", e)
             return ""
 
     def register(

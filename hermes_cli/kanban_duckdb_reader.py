@@ -33,10 +33,13 @@ contract the rest of the codebase relies on.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # DuckDB import — soft-optional so the module is importable in environments
@@ -143,7 +146,8 @@ def _task_from_duckdb_row(row: tuple, columns: list[str]) -> Task:
             parsed = json.loads(raw_skills)
             if isinstance(parsed, list):
                 skills_value = [str(s) for s in parsed if s]
-        except Exception:
+        except Exception as e:
+            logger.debug("kanban_duckdb_reader: could not parse skills JSON: %s", e)
             skills_value = None
 
     def _get(key: str, default: Any = None) -> Any:
@@ -261,8 +265,8 @@ class DuckDBKanbanReader:
         """Close the underlying DuckDB connection."""
         try:
             self._conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("kanban_duckdb_reader: error closing connection: %s", e)
 
     # ------------------------------------------------------------------
     # Private helpers

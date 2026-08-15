@@ -55,7 +55,7 @@ def _read_jsonl(path: Path, limit: int = 500) -> List[dict]:
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
-                pass
+                logger.debug("[cognitive_memory] Skipping malformed JSON line in %s: %.80s", path, line)
         return records
     except Exception as e:
         logger.warning("[cognitive_memory] Could not read %s: %s", path, e)
@@ -162,7 +162,7 @@ def format_memory_context(
         if ts:
             try:
                 ts_str = str(int(float(ts)))
-            except Exception:
+            except (ValueError, TypeError):
                 ts_str = str(ts)[:10]
         else:
             ts_str = ""

@@ -119,8 +119,8 @@ class _StandaloneAuditTrail:
                     if line:
                         try:
                             self._log.append(json.loads(line))
-                        except Exception:
-                            pass
+                        except (json.JSONDecodeError, ValueError) as e:
+                            logger.debug("cognitive: skipping malformed line in audit trail: %s", e)
 
     def _persist(self, entry: dict):
         path = Path(self._storage_path)
@@ -130,6 +130,18 @@ class _StandaloneAuditTrail:
 
     def record_decision(self, agent_id: str, decision_type: str, reasoning: str,
                         confidence: float, context: dict = None) -> str:
+        """Record a decision and persist it to the JSONL audit trail.
+
+        Args:
+            agent_id: Agent that made the decision.
+            decision_type: Category (architecture, implementation, debugging, etc.).
+            reasoning: Human-readable explanation.
+            confidence: Confidence score 0.0-1.0.
+            context: Optional metadata dict.
+
+        Returns:
+            Unique decision ID (e.g. ``D-000123-donald_kn``).
+        """
         decision_id = f"D-{len(self._log):06d}-{agent_id[:8]}"
         entry = {
             "id": decision_id,
@@ -149,6 +161,18 @@ class _StandaloneAuditTrail:
                         min_confidence: float = 0.0,
                         decision_type: str = None,
                         query: str = None) -> list:
+        """Query the decision audit trail with optional filters.
+
+        Args:
+            agent_id: Filter by agent.
+            since: ISO timestamp; only return decisions after this.
+            min_confidence: Minimum confidence threshold.
+            decision_type: Filter by decision type.
+            query: Text search across reasoning/type/context.
+
+        Returns:
+            List of matching decision entries (dicts).
+        """
         results = []
         q_lower = (query or "").lower()
         for entry in self._log:
@@ -169,6 +193,7 @@ class _StandaloneAuditTrail:
 
     @property
     def size(self) -> int:
+        """Number of decisions in the audit trail."""
         return len(self._log)
 
 
@@ -213,7 +238,7 @@ def _extract_decisions_from_turn(user_content: str, assistant_content: str,
                 "context": {"source": "auto_extracted"},
             })
         except ValueError:
-            pass
+            logger.debug("cognitive: could not parse confidence value %r", conf_str)
 
     # If assistant response is substantial (>500 chars), record as reasoning
     if len(assistant_content) > 500 and not tool_calls:
@@ -256,6 +281,7 @@ class CognitiveMemoryProvider(MemoryProvider):
 
     @property
     def name(self) -> str:
+        """Return the provider name for registry lookup."""
         return "cognitive"
 
     def is_available(self) -> bool:
@@ -287,7 +313,8 @@ class CognitiveMemoryProvider(MemoryProvider):
                 self._audit = _StandaloneAuditTrail(
                     storage_path=str(home / "cognitive_audit.jsonl")
                 )
-            except Exception:
+            except Exception as e:
+                logger.warning("cognitive: could not initialize audit trail: %s", e)
                 return None
         return self._audit.record_decision(
             agent_id=agent_id,
@@ -298,6 +325,7 @@ class CognitiveMemoryProvider(MemoryProvider):
         )
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        """Initialize the provider for a new session. Loads config and audit trail."""
         agent_context = kwargs.get("agent_context", "")
         platform = kwargs.get("platform", "cli")
         if agent_context in ("cron", "flush") or platform == "cron":
@@ -315,8 +343,8 @@ class CognitiveMemoryProvider(MemoryProvider):
         if config_path.exists():
             try:
                 cfg = json.loads(config_path.read_text())
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("cognitive: could not parse config %s: %s", config_path, e)
         self._max_prefetch = int(cfg.get("max_prefetch", 5))
         self._enabled = cfg.get("enabled", True)
 
@@ -341,6 +369,7 @@ class CognitiveMemoryProvider(MemoryProvider):
         )
 
     def system_prompt_block(self) -> str:
+        """Return recent decisions formatted for injection into the system prompt."""
         if self._cron_skipped or not self._audit:
             return ""
         count = self._audit.size
@@ -401,6 +430,7 @@ class CognitiveMemoryProvider(MemoryProvider):
         self._sync_thread.start()
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        """Process turn start — extract and record decisions from prior turn."""
         self._turn_count = turn_number
 
     def on_memory_write(self, action: str, target: str, content: str, metadata=None) -> None:
@@ -417,6 +447,7 @@ class CognitiveMemoryProvider(MemoryProvider):
             )
 
     def on_session_end(self, messages: list) -> None:
+        """Process session end — extract final decisions from the conversation."""
         if self._cron_skipped or not self._audit:
             return
         self._audit.record_decision(
@@ -428,11 +459,13 @@ class CognitiveMemoryProvider(MemoryProvider):
         )
 
     def get_tool_schemas(self) -> list:
+        """Return tool schemas for cognitive_recall and cognitive_decide."""
         if self._cron_skipped:
             return []
         return list(ALL_TOOL_SCHEMAS)
 
     def handle_tool_call(self, tool_name: str, args: dict, **kwargs) -> str:
+        """Dispatch a tool call to the appropriate handler."""
         if self._cron_skipped:
             return tool_error("Cognitive memory not active (cron context).")
         if not self._audit:
@@ -487,6 +520,7 @@ class CognitiveMemoryProvider(MemoryProvider):
             return tool_error(f"Cognitive {tool_name} failed: {e}")
 
     def shutdown(self) -> None:
+        """Clean up resources on provider shutdown."""
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=5.0)
 

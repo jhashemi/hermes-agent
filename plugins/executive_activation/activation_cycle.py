@@ -54,6 +54,7 @@ class ActivationResult:
     ts: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
+        """Serialize the activation result to a dictionary for JSON transport."""
         d = asdict(self)
         d["cycle"] = [asdict(s) for s in self.cycle]
         return d
