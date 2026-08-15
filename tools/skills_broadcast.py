@@ -198,9 +198,26 @@ async def cmd_subscribe():
                 local = SKILLS_DIR / name / "SKILL.md"
                 if local.exists():
                     local_sha = hashlib.sha256(local.read_bytes()).hexdigest()
-                    # If our SKILL.md alone matches, treat single-file format as installed
+                    # Idempotency: skip reinstall when local SKILL.md already matches.
+                    # For single_markdown: broadcast sha IS the SKILL.md sha — direct compare.
+                    # For zip_bundle: broadcast sha is over the zip, so unpack SKILL.md and
+                    # compare its sha against local SKILL.md. This closes the drift-loop
+                    # where identical bundles were re-scanned every broadcast because the
+                    # per-format sha shapes didn't match.
                     if env["format"] == "single_markdown" and local_sha == sha:
                         await msg.ack(); continue
+                    if env["format"] == "zip_bundle":
+                        try:
+                            _payload = base64.b64decode(env["payload_b64"])
+                            with zipfile.ZipFile(io.BytesIO(_payload)) as _zf:
+                                _skill_md_bytes = _zf.read("SKILL.md")
+                            _bcast_skill_md_sha = hashlib.sha256(_skill_md_bytes).hexdigest()
+                            if _bcast_skill_md_sha == local_sha:
+                                await msg.ack(); continue
+                        except (KeyError, zipfile.BadZipFile, Exception):
+                            # If we can't read SKILL.md from the payload, fall through
+                            # to the normal install path — scanner will decide.
+                            pass
                 payload = base64.b64decode(env["payload_b64"])
                 report = install_skill_file(
                     payload=payload,
