@@ -167,7 +167,7 @@ class RemoteHermesInstance:
         self,
         name: str,
         hostname: str,  # e.g., "hermes2.flounder-snake.ts.net"
-        ip: str,  # e.g., "100.79.15.66"
+        ip: str,  # e.g., "hermes2.flounder-snake.ts.net"
         http_port: int = 8000,  # Default Hermes agent HTTP port
         http_key: str = "",  # Shared Putty HTTP key
         username: str = "",  # SSH/HTTP username
@@ -217,7 +217,7 @@ HERMES_INSTANCES: Dict[str, RemoteHermesInstance] = {
     "hermes2": RemoteHermesInstance(
         name="hermes2",
         hostname="hermes2.flounder-snake.ts.net",
-        ip="100.79.15.66",
+        ip=os.environ.get("HERMES2_IP", "hermes2.flounder-snake.ts.net"),
         http_port=8000,
         http_key="putty_key_here",  # TODO: Load from env
         username="ubuntu",  # TODO: Load from env

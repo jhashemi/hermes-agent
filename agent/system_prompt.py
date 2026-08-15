@@ -40,6 +40,7 @@ from agent.prompt_builder import (
     PARALLEL_TOOL_CALL_GUIDANCE,
     PLATFORM_HINTS,
     SESSION_SEARCH_GUIDANCE,
+    SIGNAL_CLARITY_GUIDANCE,
     SKILLS_GUIDANCE,
     STEER_CHANNEL_NOTE,
     TASK_COMPLETION_GUIDANCE,
@@ -222,6 +223,15 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # (default True) and only injected when tools are actually loaded.
     if getattr(agent, "_parallel_tool_call_guidance", True) and agent.valid_tool_names:
         stable_parts.append(PARALLEL_TOOL_CALL_GUIDANCE)
+
+    # Universal signal-clarity guidance.  Applied to ALL models with tools
+    # loaded — counteracts "helpfulness theater" where the agent proactively
+    # loads irrelevant tools or manufactures connections to appear helpful.
+    # The honest response ("I don't have that") preserves trust; a fabricated
+    # one destroys it.  Gated by config.yaml ``agent.signal_clarity_guidance``
+    # (default True) so users who want a leaner prompt can turn it off.
+    if getattr(agent, "_signal_clarity_guidance", True) and agent.valid_tool_names:
+        stable_parts.append(SIGNAL_CLARITY_GUIDANCE)
 
     # Tool-aware behavioral guidance: only inject when the tools are loaded
     tool_guidance = []

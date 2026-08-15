@@ -1132,6 +1132,42 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # ── Cluster dispatch routing ───────────────────────────────────
+        # Create a node router that consults the LLM cluster dispatcher
+        # for cross-node task routing (hermes1/hermes2). Gated by
+        # ``kanban.cluster_dispatch`` (default: False). When disabled or
+        # the LLM dispatcher is unavailable, returns ``local_node_router``
+        # which always routes to the local node (None).
+        cluster_routers: dict[str, "NodeRouter"] = {}
+        try:
+            from gateway.cluster_dispatch import create_cluster_node_router, local_node_router
+            _cluster_dispatch_enabled = bool(kanban_cfg.get("cluster_dispatch", False))
+            if _cluster_dispatch_enabled:
+                logger.info("kanban dispatcher: cluster dispatch enabled in config")
+            else:
+                logger.debug("kanban dispatcher: cluster dispatch disabled (local-only)")
+        except Exception as exc:
+            logger.warning(
+                "kanban dispatcher: cluster_dispatch module import failed (%s); "
+                "all tasks will spawn locally", exc,
+            )
+            _cluster_dispatch_enabled = False
+
+        def _get_cluster_router(slug: str):
+            """Return (and cache) a per-board cluster node router."""
+            if not _cluster_dispatch_enabled:
+                return None
+            if slug not in cluster_routers:
+                try:
+                    cluster_routers[slug] = create_cluster_node_router(board=slug)
+                except Exception as exc:
+                    logger.warning(
+                        "kanban dispatcher: failed to create cluster router for "
+                        "board %s (%s); using local-only", slug, exc,
+                    )
+                    cluster_routers[slug] = local_node_router
+            return cluster_routers[slug]
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1216,6 +1252,19 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
+                # Cluster dispatch: get the per-board node router and
+                # refresh its LLM routing table for this tick. The router
+                # is advisory — dispatch_once re-validates every pick
+                # against deterministic hard gates before claiming.
+                _router = _get_cluster_router(slug)
+                if _router is not None and hasattr(_router, "refresh"):
+                    try:
+                        _router.refresh()
+                    except Exception as exc:
+                        logger.warning(
+                            "kanban dispatcher: cluster router refresh failed "
+                            "for board %s (%s); routing locally", slug, exc,
+                        )
                 return _kb.dispatch_once(
                     conn,
                     board=slug,
@@ -1225,6 +1274,7 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    node_router=_router,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

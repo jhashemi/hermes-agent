@@ -93,7 +93,7 @@ class VeinEmitter:
     _deps_fail: set = field(default_factory=set)
 
     # Internals:
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    _lock: threading.RLock = field(default_factory=threading.RLock)  # RLock: re-entrant, _envelope→_vital_signs safe
     _stop_event: threading.Event = field(default_factory=threading.Event)
     _thread: Optional[threading.Thread] = None
 

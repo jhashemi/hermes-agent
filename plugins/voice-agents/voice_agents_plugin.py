@@ -26,6 +26,22 @@ from typing import Any, Dict, Optional
 
 import requests
 
+# OTel instrumentation — zero-impact import (fails silently if SDK/module unavailable)
+try:
+    _PLATFORM_SRC = Path("/home/ubuntu/executive_agents_platform/src")
+    if _PLATFORM_SRC.exists() and str(_PLATFORM_SRC) not in sys.path:
+        sys.path.insert(0, str(_PLATFORM_SRC))
+    from voice.otel_tracer import record_session_start as _otel_session_start, record_session_end as _otel_session_end
+    _OTEL_AVAILABLE = True
+except ImportError:
+    _OTEL_AVAILABLE = False
+
+    def _otel_session_start(*a, **kw):  # type: ignore[misc]
+        pass
+
+    def _otel_session_end(*a, **kw):  # type: ignore[misc]
+        pass
+
 from .jetstream_bridge import (
     derive_room,
     get_bridge,
@@ -340,6 +356,13 @@ def _handle_load_agent(text: str, event: Any, gateway: Any) -> Optional[Dict]:
     )
     _sessions[user_id] = session
 
+    # OTel: emit session.start span for gateway-initiated sessions
+    _otel_session_start(
+        session_id=session.session_id,
+        agent_name=agent_id,
+        room=bridge_resp.get("room_name", ""),
+    )
+
     voice_uuid = bridge_resp.get("voice_uuid", "")
     voice_status = "🎙️ Voice ready" if voice_uuid else "📝 Text only"
 
@@ -395,6 +418,13 @@ def _handle_disconnect(event: Any) -> Optional[Dict]:
 
     if not session:
         return {"action": "rewrite", "text": "ℹ️ No voice agent connected.\n\nType /voice-agents to see available agents."}
+
+    # OTel: emit session.end span for gateway-disconnected sessions
+    _otel_session_end(
+        session_id=session.session_id,
+        agent_name=session.agent_id,
+        reason="gateway_disconnect",
+    )
 
     _bridge_disconnect(user_id)
     return {"action": "rewrite", "text": f"✅ Disconnected from {session.agent_id}.\n\nType /voice-agents to connect to a different agent."}

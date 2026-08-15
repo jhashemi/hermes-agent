@@ -16,6 +16,7 @@ Validates:
 import json
 import os
 import sqlite3
+import sys
 import tempfile
 import time
 from dataclasses import dataclass, field, asdict
@@ -23,6 +24,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+# Make executive_agents_framework importable so llm_cluster_dispatcher.py
+# can import cluster_load_balancer from it.
+_EAF_SRC = str(Path.home() / "executive_agents_framework" / "src")
+if _EAF_SRC not in sys.path:
+    sys.path.insert(0, _EAF_SRC)
 
 
 # ---------------------------------------------------------------------------
@@ -465,12 +472,16 @@ class TestDispatchOnceWithNodeRouter:
         claim_task and before spawning. The node_router parameter is passed
         through from the gateway watcher.
         """
-        from hermes_cli.kanban_db import dispatch_once
+        from hermes_cli.kanban_db import dispatch_once, _dispatch_once_locked
         import inspect
         # Verify the code path exists by inspecting the source
         source = inspect.getsource(dispatch_once)
         assert "node_router" in source, "dispatch_once must reference node_router"
-        assert "target_node" in source, "dispatch_once must set target_node from node_router"
+        # dispatch_once is a thin wrapper that delegates to _dispatch_once_locked;
+        # the actual target_node logic lives there.
+        locked_source = inspect.getsource(_dispatch_once_locked)
+        assert "target_node" in locked_source, \
+            "_dispatch_once_locked must set target_node from node_router"
 
     def test_node_router_returns_remote_node(self):
         """When node_router returns a remote node, target_node is passed to spawn.
@@ -539,3 +550,50 @@ class TestRemoteSpawnCmd:
         cmd_str = " ".join(cmd)
         assert "HERMES_KANBAN_TASK" in cmd_str
         assert "HERMES_KANBAN_BOARD" in cmd_str
+
+
+# ---------------------------------------------------------------------------
+# AC1+: Gateway watcher wiring (kanban_watchers.py passes node_router)
+# ---------------------------------------------------------------------------
+
+class TestGatewayWatcherWiring:
+    """Verify that the gateway's kanban dispatcher watcher actually passes
+    node_router to dispatch_once on each tick.
+
+    This is the critical integration point: without this wiring, the
+    node_router parameter in dispatch_once is dead code — the LLM cluster
+    dispatcher is never consulted.
+    """
+
+    def test_watcher_source_references_cluster_router(self):
+        """kanban_watchers.py must create and pass a cluster node router."""
+        import inspect
+        from gateway import kanban_watchers
+        source = inspect.getsource(kanban_watchers)
+        # The watcher must import from cluster_dispatch
+        assert "create_cluster_node_router" in source, \
+            "kanban_watchers must import create_cluster_node_router"
+        # The watcher must pass node_router to dispatch_once
+        assert "node_router=" in source, \
+            "kanban_watchers must pass node_router= to dispatch_once"
+        # The watcher must have the cluster dispatch config gate
+        assert "cluster_dispatch" in source, \
+            "kanban_watchers must gate cluster dispatch on kanban.cluster_dispatch config"
+
+    def test_watcher_source_has_refresh_call(self):
+        """The watcher must call router.refresh() before dispatch."""
+        import inspect
+        from gateway import kanban_watchers
+        source = inspect.getsource(kanban_watchers)
+        assert "refresh" in source, \
+            "kanban_watchers must call router.refresh() to update LLM routing table per tick"
+
+    def test_create_cluster_node_router_returns_callable(self):
+        """create_cluster_node_router returns a valid NodeRouter callable."""
+        from gateway.cluster_dispatch import create_cluster_node_router, local_node_router
+        # With cluster_dispatch disabled (default), returns local_node_router
+        router = create_cluster_node_router(board="test-board")
+        assert callable(router), "router must be callable"
+        # local_node_router always returns None (local spawn)
+        result = router("t_test123", "werner_vogels")
+        assert result is None, "local_node_router must return None for local spawn"

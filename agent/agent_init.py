@@ -1702,11 +1702,16 @@ def init_agent(
     from agent.memory_manager import inject_memory_provider_tools as _inject_memory_provider_tools
     _inject_memory_provider_tools(agent)
 
-    # Skills config: nudge interval for skill creation reminders
-    agent._skill_nudge_interval = 10
+    # Skills config: nudge interval for skill creation reminders.
+    # Default 0 (disabled) — skill creation nudges were a source of
+    # "helpfulness theater": the agent would proactively offer to save
+    # skills even on trivial tasks, inflating tool calls without signal.
+    # Users who want periodic reminders can set skills.creation_nudge_interval
+    # to a positive integer (legacy default was 10).
+    agent._skill_nudge_interval = 0
     try:
         skills_config = _agent_cfg.get("skills", {})
-        agent._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 10))
+        agent._skill_nudge_interval = int(skills_config.get("creation_nudge_interval", 0))
     except Exception:
         pass
 
@@ -1734,6 +1739,13 @@ def init_agent(
     # the other.  Steers the model to batch independent tool calls into a
     # single turn; the runtime already executes such batches concurrently.
     agent._parallel_tool_call_guidance = bool(_agent_section.get("parallel_tool_call_guidance", True))
+
+    # Universal signal-clarity guidance toggle.  Default True.  Counteracts
+    # "helpfulness theater" — the agent loading irrelevant tools or
+    # manufacturing connections to appear helpful.  When True, injects
+    # SIGNAL_CLARITY_GUIDANCE into the system prompt, steering the model to
+    # acknowledge uncertainty rather than fabricating relevance.
+    agent._signal_clarity_guidance = bool(_agent_section.get("signal_clarity_guidance", True))
 
     # Local Python toolchain probe toggle.  Default True.  When False,
     # the probe is skipped entirely (no subprocess calls, no system-prompt

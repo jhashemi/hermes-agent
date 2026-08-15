@@ -35,6 +35,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# wire-004: Ensure src/ sub-packages (hermes_agent, etc.) are importable.
+# The editable-install finder maps flat packages under the repo root but
+# does not cover src/ — add it explicitly so tests can import hermes_agent.
+_SRC_DIR = PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
 
 # ── Sandbox HERMES_HOME before ANY test module is imported ──────────────────
 # `hermes_cli/main.py` calls `setup_logging()` at MODULE level, which resolves

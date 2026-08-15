@@ -183,10 +183,10 @@ def _load_node_hosts() -> dict[str, Optional[str]]:
         from llm_cluster_dispatcher import NODE_HOSTS
         return dict(NODE_HOSTS)
     except Exception:
-        # Defaults matching llm_cluster_dispatcher.py
+        # Defaults matching llm_cluster_dispatcher.py NODE_HOSTS
         return {
             "hermes2": None,           # local
-            "hermes1": "100.107.83.25",  # Tailscale
+            "hermes1": "100.107.83.25",  # Tailscale IP
         }
 
 _NODE_HOSTS: dict[str, Optional[str]] = _load_node_hosts()

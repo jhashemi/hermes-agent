@@ -39,7 +39,7 @@ _TRUNCATION_MARKER = "… [truncated]"
 # Persisted as ordinary message content. ContextCompressor uses this stable
 # header to distinguish the synthetic post-compaction row from a real user.
 TODO_INJECTION_HEADER = (
-    "[Your active task list was preserved across context compression]"
+    "[Your active task list and session parameters were preserved across context compression]"
 )
 
 
@@ -274,12 +274,20 @@ TODO_SCHEMA = {
         "- Provide 'todos' array to create/update items\n"
         "- merge=false (default): replace the entire list with a fresh plan\n"
         "- merge=true: update existing items by id, add any new ones\n\n"
-        "Each item: {id: string, content: string, "
-        "status: pending|in_progress|completed|cancelled}\n"
+        "Each item: {id: string, content: string, status: pending|in_progress|completed|cancelled}\n"
         "List order is priority. Only ONE item in_progress at a time.\n"
         "Mark items completed immediately when done. If something fails, "
         "cancel it and add a revised item.\n\n"
-        "Always returns the full current list."
+        "Always returns the full current list.\n\n"
+        "SECOND USE — In-session structured parameter store: When the user states "
+        "explicit structured parameters early in the session (location, financial target, "
+        "strategy, timeframe, investment criteria, or any key fact needed later), "
+        "IMMEDIATELY record them here as an in_progress item so they survive context "
+        "compression. The todo list is re-injected on every turn — it is the ONLY "
+        "in-session store that outlasts context compression. Use id 'session_params' "
+        "(or domain-specific id like 'real_estate_params') and pipe-delimit key-value "
+        "pairs: 'Location: Newport Beach CA | Strategy: rental hold | IRR: 17%'. "
+        "Update when parameters change; mark completed only when the session goal is done."
     ),
     "parameters": {
         "type": "object",
