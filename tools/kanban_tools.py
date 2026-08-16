@@ -899,6 +899,13 @@ def _handle_block(args: dict, **kw) -> str:
                 waiting_for_condition=waiting_for_condition,
                 expected_run_id=_worker_run_id(tid),
             )
+            # block_task may return a dict (soft-refusal) or a bool (old behavior)
+            if isinstance(ok, dict):
+                # Soft-refusal: return structured error
+                if not ok.get("ok"):
+                    return tool_error(ok.get("message", "Block refused"), extra=ok)
+                # Unexpected: dict with ok=true is malformed
+                return tool_error(f"Unexpected block_task response: {ok}")
             if not ok:
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
