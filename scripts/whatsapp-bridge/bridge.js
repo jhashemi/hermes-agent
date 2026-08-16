@@ -106,11 +106,26 @@ try {
     .digest('hex')
     .slice(0, 16);
 } catch {}
-const PAIR_ONLY = args.includes('--pair-only');
+const PAIR_ONLY = args.includes('--pair-only') || args.includes('--pair-code');
 const PAIR_JSON = args.includes('--pair-json');
+const PAIR_CODE = args.includes('--pair-code');
+// Phone number for pairing-code mode: --pair-code <phone> or from WHATSAPP_ALLOWED_USERS
+const PAIR_CODE_PHONE = getArg('pair-phone', '');
 const WHATSAPP_MODE = getArg('mode', process.env.WHATSAPP_MODE || 'self-chat'); // "bot" or "self-chat"
 const WHATSAPP_DM_POLICY = String(process.env.WHATSAPP_DM_POLICY || 'open').trim().toLowerCase();
 const ALLOWED_USERS = parseAllowedUsers(process.env.WHATSAPP_ALLOWED_USERS || '');
+
+// Resolve phone number for pairing-code mode: --pair-phone arg takes priority,
+// otherwise fall back to WHATSAPP_ALLOWED_USERS (first entry).
+function getPairPhone() {
+  if (PAIR_CODE_PHONE) return PAIR_CODE_PHONE.replace(/[^\d]/g, '');
+  if (ALLOWED_USERS && ALLOWED_USERS.size > 0) {
+    const first = Array.from(ALLOWED_USERS)[0];
+    return first.replace(/[^\d]/g, '');
+  }
+  return '';
+}
+
 const DEFAULT_REPLY_PREFIX = '⚕ *Hermes Agent*\n────────────\n';
 const REPLY_PREFIX = process.env.WHATSAPP_REPLY_PREFIX === undefined
   ? DEFAULT_REPLY_PREFIX
@@ -385,6 +400,7 @@ function rememberSentId(id) {
 
 let sock = null;
 let connectionState = 'disconnected';
+let _reconnectAttempts = 0;
 
 function emitPairEvent(event) {
   if (!PAIR_JSON) return;
@@ -413,6 +429,26 @@ async function startSocket() {
       return { conversation: '' };
     },
   });
+
+  // Pairing code mode: request a pairing code instead of scanning a QR code.
+  // The user enters this code on their phone: WhatsApp → Settings → Linked
+  // Devices → Enter Code (or "Link a Device" → "Link via Number").
+  // The code is requested AFTER the socket connects to WhatsApp servers
+  // (in the connection.update handler below), because requestPairingCode
+  // sends an IQ query that requires an established connection.
+  let _pairCodePending = false;
+  let _pairPhone = '';
+  if (PAIR_CODE) {
+    _pairPhone = getPairPhone();
+    if (!_pairPhone) {
+      console.error('❌ --pair-code requires a phone number.  Set WHATSAPP_ALLOWED_USERS or pass --pair-phone <number>.');
+      process.exit(1);
+    }
+    console.log('📱 WhatsApp pairing-code mode');
+    console.log(`📱 Phone: ${_pairPhone}`);
+    console.log('📱 Connecting to WhatsApp to request pairing code...\n');
+    _pairCodePending = true;
+  }
 
   sock.ev.on('creds.update', () => { saveCreds(); lidToPhone = buildLidMap(); });
 
@@ -444,17 +480,45 @@ async function startSocket() {
       } else {
         // 515 = restart requested (common after pairing). Always reconnect.
         emitPairEvent({ event: 'disconnected', reason });
+
+        // Pair-code mode: NEVER auto-reconnect. Auto-reconnecting during
+        // pairing (a) creates a new socket with no listener for the pair-
+        // success message the phone is about to send (→ "couldn't link
+        // device"), and (b) hammers WhatsApp servers on 428 spirals.
+        // Exit cleanly and let the caller re-run us with a fresh code.
+        if (PAIR_CODE) {
+          if (!PAIR_JSON) {
+            console.log(`ℹ️  Pair-code session ended (reason: ${reason}). Exiting.`);
+          }
+          process.exit(reason === 428 ? 2 : (reason === DisconnectReason.restartRequired || reason === 515 ? 0 : 1));
+        }
+
         if (!PAIR_JSON) {
           if (reason === 515) {
             console.log('↻ WhatsApp requested restart (code 515). Reconnecting...');
+          } else if (reason === 428) {
+            // Rate limited — use exponential backoff (30s × 2^n, cap at 30m).
+            // Rapid retries with 428 RESETS the ban, so we must back off.
+            _reconnectAttempts++;
+            const backoffSecs = Math.min(1800, Math.pow(2, _reconnectAttempts - 1) * 30);
+            const mins = Math.round(backoffSecs / 60);
+            console.log(`⚠️  Rate limited (428). Backing off ${mins > 0 ? mins + 'm' : Math.round(backoffSecs) + 's'} before retry...`);
           } else {
             console.log(`⚠️  Connection closed (reason: ${reason}). Reconnecting in 3s...`);
           }
         }
-        setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        if (reason === 428) {
+          // Exponential backoff for rate limiting
+          const backoff = Math.min(1800, Math.pow(2, _reconnectAttempts - 1) * 30) * 1000;
+          setTimeout(startSocket, backoff);
+        } else {
+          _reconnectAttempts = 0;  // Reset on non-428 disconnect
+          setTimeout(startSocket, reason === 515 ? 1000 : 3000);
+        }
       }
     } else if (connection === 'open') {
       connectionState = 'connected';
+      _reconnectAttempts = 0;
       const connectedUser = sock?.user
         ? {
             id: sock.user.id || null,
@@ -474,6 +538,29 @@ async function startSocket() {
       }
     }
   });
+
+  // Request pairing code after the connection update handler is set up,
+  // so the code is requested as soon as the socket connects.
+  // We use a microtask to ensure the socket event handlers are registered first.
+  if (PAIR_CODE) {
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(_pairPhone);
+        _pairCodePending = false;
+        if (!PAIR_JSON) {
+          console.log(`\n🔢 Your pairing code: ${code}`);
+          console.log('\n📱 On your phone, open WhatsApp → Settings → Linked Devices → Enter Code');
+          console.log(`   Enter this code: ${code}`);
+          console.log('\nWaiting for pairing to complete...\n');
+        } else {
+          emitPairEvent({ event: 'pairing_code', code, phone: _pairPhone });
+        }
+      } catch (e) {
+        console.error('❌ Failed to request pairing code:', e?.message || e);
+        process.exit(1);
+      }
+    }, 1000);
+  }
 
   sock.ev.on('messages.update', async (updates) => {
     for (const { key, update } of updates || []) {
@@ -1117,7 +1204,11 @@ if (PAIR_ONLY) {
   if (PAIR_JSON) {
     emitPairEvent({ event: 'started', session: SESSION_DIR });
   } else {
-    console.log('📱 WhatsApp pairing mode');
+    if (PAIR_CODE) {
+      console.log('📱 WhatsApp pairing-code mode');
+    } else {
+      console.log('📱 WhatsApp pairing mode');
+    }
     console.log(`📁 Session: ${SESSION_DIR}`);
     console.log();
   }

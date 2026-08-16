@@ -1,0 +1,18 @@
+[Unit]
+Description=Kanban Rule Distiller — VFE-NERVE-05
+Documentation=https://github.com/nousresearch/hermes-agent/docs/kanban
+After=network.target
+PartOf=hermes-services.target
+
+[Service]
+Type=simple
+ExecStart=%h/.hermes/bin/kanban-rule-distiller
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="HERMES_RULE_DISTILLER_LOG_LEVEL=INFO"
+Environment="HERMES_RULE_DISTILLER_POLL_INTERVAL=5"
+
+[Install]
+WantedBy=default.target

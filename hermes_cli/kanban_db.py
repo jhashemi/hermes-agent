@@ -4752,6 +4752,9 @@ def complete_task(
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
+    unblocks: Optional[Iterable[str]] = None,
+    commit_hash: Optional[str] = None,
+    test_run_id: Optional[str] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -4906,6 +4909,15 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+        # Record unblocks, commit_hash, and test_run_id in the event payload
+        if unblocks:
+            unblocks_list = [str(u).strip() for u in unblocks if str(u).strip()]
+            if unblocks_list:
+                completed_payload["unblocks"] = unblocks_list
+        if commit_hash:
+            completed_payload["commit_hash"] = str(commit_hash).strip()
+        if test_run_id:
+            completed_payload["test_run_id"] = str(test_run_id).strip()
         _append_event(
             conn, task_id, "completed",
             completed_payload,
@@ -5531,6 +5543,10 @@ def block_task(
     *,
     reason: Optional[str] = None,
     kind: Optional[str] = None,
+    waiting_for: Optional[str] = None,
+    waiting_for_commit: Optional[str] = None,
+    waiting_for_event: Optional[str] = None,
+    waiting_for_condition: Optional[str] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
@@ -5610,9 +5626,19 @@ def block_task(
                 run_id = _synthesize_ended_run(
                     conn, task_id, outcome="blocked", summary=reason,
                 )
+            # Build the dependency_wait event payload with typed fields
+            dep_wait_payload = {"reason": reason, "kind": kind}
+            if waiting_for:
+                dep_wait_payload["waiting_for"] = str(waiting_for).strip()
+            if waiting_for_commit:
+                dep_wait_payload["waiting_for_commit"] = str(waiting_for_commit).strip()
+            if waiting_for_event:
+                dep_wait_payload["waiting_for_event"] = str(waiting_for_event).strip()
+            if waiting_for_condition:
+                dep_wait_payload["waiting_for_condition"] = str(waiting_for_condition).strip()
             _append_event(
                 conn, task_id, "dependency_wait",
-                {"reason": reason, "kind": kind}, run_id=run_id,
+                dep_wait_payload, run_id=run_id,
             )
             _blocked_task = get_task(conn, task_id)
             _fire_kanban_lifecycle_hook(
@@ -5663,14 +5689,24 @@ def block_task(
                 run_id = _synthesize_ended_run(
                     conn, task_id, outcome="blocked", summary=reason,
                 )
+            # Build the block_loop_detected event payload with typed fields
+            loop_payload = {
+                "reason": reason,
+                "kind": kind,
+                "recurrences": recurrences,
+                "limit": BLOCK_RECURRENCE_LIMIT,
+            }
+            if waiting_for:
+                loop_payload["waiting_for"] = str(waiting_for).strip()
+            if waiting_for_commit:
+                loop_payload["waiting_for_commit"] = str(waiting_for_commit).strip()
+            if waiting_for_event:
+                loop_payload["waiting_for_event"] = str(waiting_for_event).strip()
+            if waiting_for_condition:
+                loop_payload["waiting_for_condition"] = str(waiting_for_condition).strip()
             _append_event(
                 conn, task_id, "block_loop_detected",
-                {
-                    "reason": reason,
-                    "kind": kind,
-                    "recurrences": recurrences,
-                    "limit": BLOCK_RECURRENCE_LIMIT,
-                },
+                loop_payload,
                 run_id=run_id,
             )
         else:
@@ -5720,9 +5756,19 @@ def block_task(
                     outcome="blocked",
                     summary=reason,
                 )
+            # Build the blocked event payload with typed fields
+            blocked_payload = {"reason": reason, "kind": kind, "recurrences": recurrences}
+            if waiting_for:
+                blocked_payload["waiting_for"] = str(waiting_for).strip()
+            if waiting_for_commit:
+                blocked_payload["waiting_for_commit"] = str(waiting_for_commit).strip()
+            if waiting_for_event:
+                blocked_payload["waiting_for_event"] = str(waiting_for_event).strip()
+            if waiting_for_condition:
+                blocked_payload["waiting_for_condition"] = str(waiting_for_condition).strip()
             _append_event(
                 conn, task_id, "blocked",
-                {"reason": reason, "kind": kind, "recurrences": recurrences},
+                blocked_payload,
                 run_id=run_id,
             )
         _blocked_task = get_task(conn, task_id)
@@ -10134,6 +10180,18 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
         (task_id,),
     ).fetchone()
     return Run.from_row(row) if row else None
+
+
+def count_task_runs(conn: sqlite3.Connection, task_id: str) -> int:
+    """Count the total number of runs (attempts) for a task.
+    
+    Used to compute retry_n for VFE observation emission.
+    """
+    row = conn.execute(
+        "SELECT COUNT(*) as cnt FROM task_runs WHERE task_id = ?",
+        (task_id,),
+    ).fetchone()
+    return int(row["cnt"]) if row else 0
 
 
 def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:

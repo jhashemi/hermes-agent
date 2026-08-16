@@ -706,6 +706,31 @@ def _handle_complete(args: dict, **kw) -> str:
         )
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
+    unblocks = args.get("unblocks")
+    commit_hash = args.get("commit_hash")
+    test_run_id = args.get("test_run_id")
+    
+    # Validate unblocks is a list if provided
+    if unblocks is not None:
+        if isinstance(unblocks, str):
+            unblocks = [unblocks]
+        if not isinstance(unblocks, (list, tuple)):
+            return tool_error(
+                f"unblocks must be a list of task ids, got "
+                f"{type(unblocks).__name__}"
+            )
+        unblocks = [str(u).strip() for u in unblocks if str(u).strip()]
+    
+    # Redact and validate commit_hash if provided
+    if commit_hash:
+        commit_hash = str(commit_hash).strip()
+        commit_hash = redact_sensitive_text(commit_hash, force=True) if commit_hash else None
+    
+    # Redact and validate test_run_id if provided
+    if test_run_id:
+        test_run_id = str(test_run_id).strip()
+        test_run_id = redact_sensitive_text(test_run_id, force=True) if test_run_id else None
+    
     try:
         kb, conn = _connect(board=board)
         try:
@@ -750,6 +775,9 @@ def _handle_complete(args: dict, **kw) -> str:
                     conn, tid,
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
+                    unblocks=unblocks,
+                    commit_hash=commit_hash,
+                    test_run_id=test_run_id,
                     expected_run_id=_worker_run_id(tid),
                 )
             except kb.ArtifactPreservationError as artifact_err:
@@ -813,6 +841,22 @@ def _handle_block(args: dict, **kw) -> str:
     reason = redact_sensitive_text(str(reason), force=True)
     kind = args.get("kind")
     board = args.get("board")
+    waiting_for = args.get("waiting_for")
+    waiting_for_commit = args.get("waiting_for_commit")
+    waiting_for_event = args.get("waiting_for_event")
+    waiting_for_condition = args.get("waiting_for_condition")
+    
+    # Sanitize waiting_for parameters
+    if waiting_for:
+        waiting_for = str(waiting_for).strip() if waiting_for else None
+    if waiting_for_commit:
+        waiting_for_commit = str(waiting_for_commit).strip()
+        waiting_for_commit = redact_sensitive_text(waiting_for_commit, force=True) if waiting_for_commit else None
+    if waiting_for_event:
+        waiting_for_event = str(waiting_for_event).strip() if waiting_for_event else None
+    if waiting_for_condition:
+        waiting_for_condition = str(waiting_for_condition).strip() if waiting_for_condition else None
+    
     try:
         kb, conn = _connect(board=board)
         if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
@@ -849,6 +893,10 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 kind=kind,
+                waiting_for=waiting_for,
+                waiting_for_commit=waiting_for_commit,
+                waiting_for_event=waiting_for_event,
+                waiting_for_condition=waiting_for_condition,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1700,6 +1748,33 @@ KANBAN_COMPLETE_SCHEMA = {
                     "task in-flight so you can fix the path and retry."
                 ),
             },
+            "unblocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional: list of task ids that should be auto-unblocked "
+                    "by this completion. Kernel will atomically unblock them "
+                    "as part of the same transaction. Each must currently be "
+                    "in blocked-dependency state with waiting_for pointing back "
+                    "to this task."
+                ),
+            },
+            "commit_hash": {
+                "type": "string",
+                "description": (
+                    "Optional: canonical fix commit hash for this completion. "
+                    "Enables auto-healing of downstream block-loops that are "
+                    "waiting for this commit to land on master."
+                ),
+            },
+            "test_run_id": {
+                "type": "string",
+                "description": (
+                    "Optional: CI/test run id (e.g., GitHub Actions run URL) "
+                    "that validated this completion. Provides evidence trail "
+                    "for compliance / audit logs."
+                ),
+            },
             "board": _board_schema_prop(),
         },
         "required": [],
@@ -1742,6 +1817,37 @@ KANBAN_BLOCK_SCHEMA = {
                     "Why you're blocked. 'dependency' waits in todo and "
                     "resumes automatically; the others surface to a human. "
                     "Omit only if none apply."
+                ),
+            },
+            "waiting_for": {
+                "type": "string",
+                "description": (
+                    "Optional: if blocking on a specific task's completion, "
+                    "pass its ticket id. Enables kernel sanity-check (refuse "
+                    "block if task is already done) and auto-healing by "
+                    "recheck jobs when block-loops fire."
+                ),
+            },
+            "waiting_for_commit": {
+                "type": "string",
+                "description": (
+                    "Optional: git commit hash this task is waiting for. "
+                    "Kernel will use to auto-heal if commit lands on master."
+                ),
+            },
+            "waiting_for_event": {
+                "type": "string",
+                "description": (
+                    "Optional: NATS event name (e.g., 'spine.gate.wave2_cleared') "
+                    "this task is waiting for. Kernel will use to auto-heal "
+                    "if event is observed."
+                ),
+            },
+            "waiting_for_condition": {
+                "type": "string",
+                "description": (
+                    "Optional: human-readable predicate describing what "
+                    "condition must be met for unblocking (for L3 rechecker audit)."
                 ),
             },
             "board": _board_schema_prop(),
