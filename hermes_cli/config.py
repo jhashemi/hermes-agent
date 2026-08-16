@@ -680,12 +680,100 @@ def get_container_exec_info() -> Optional[dict]:
 # =============================================================================
 
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F811,E402
+from hermes_constants import (  # noqa: F811,E402
+    get_hermes_home,
+    get_process_hermes_home,
+    get_default_hermes_root,
+)
 from utils import atomic_replace, fast_safe_load
 
 def get_config_path() -> Path:
     """Get the main config file path."""
     return get_hermes_home() / "config.yaml"
+
+
+def get_root_config_path() -> Path:
+    """Get the ROOT config file path, ignoring any active profile.
+
+    In profile mode ``HERMES_HOME`` points at ``<root>/profiles/<name>`` and
+    :func:`get_config_path` returns the profile-scoped ``config.yaml``. For
+    **host-level daemon settings** that are watched by a single unscoped daemon
+    (e.g. the VFE spine daemon on hermes1/hermes2), we must instead write to the
+    root ``<hermes_root>/config.yaml`` that the daemon polls. Delegates to
+    :func:`get_default_hermes_root` so Docker layouts (``/opt/data/profiles/…``)
+    and native layouts (``~/.hermes/profiles/…``) both resolve correctly.
+    """
+    return get_default_hermes_root() / "config.yaml"
+
+
+# =============================================================================
+# Root-scoped (daemon-global) config key namespaces
+# =============================================================================
+#
+# Some keys drive host-level daemons that are NOT profile-scoped — they run
+# as a single service per box, poll a single config file, and serve every
+# publisher regardless of which Hermes profile the publisher runs under.
+# Those keys MUST be written to the root config (``<hermes_root>/config.yaml``)
+# even when ``hermes config set`` is invoked under an active profile — otherwise
+# the CLI silently writes to a profile config the daemon never reads, and the
+# operation appears to succeed while nothing changes.
+#
+# This is a documented, deliberate exception to the profile-scoping model.
+# The special case is announced at set/unset time with an explicit "note: X is
+# a daemon-global key — written to root config <path>" line so the operator
+# sees which file was actually touched.
+#
+# Current members:
+#   ``vfe.*`` — the Variational-Free-Energy spine kill-switch and belief-store
+#              tunables. The daemon (``src/vfe/daemon.py``) reads
+#              ``CONFIG_PATH`` (default ``~/.hermes/config.yaml``) and INV-08
+#              requires a flip of ``vfe.enabled`` to engage the kill-switch
+#              within 30s. Prior to this special-case, ``hermes config set
+#              vfe.enabled false`` from a profile-scoped shell wrote to the
+#              profile config, the daemon kept reading the untouched root,
+#              and the kill-switch never fired. See kanban t_c43af288
+#              (VFE-SAFE-02).
+#
+# Adding a new prefix here is a governance decision — the underlying daemon
+# must document that it reads the root config unconditionally, and there must
+# be no profile-scoped consumer of the same namespace that would silently be
+# broken by the reroute. When in doubt, keep the key profile-scoped.
+_ROOT_SCOPED_CONFIG_PREFIXES: frozenset[str] = frozenset({
+    "vfe",
+})
+
+
+def _is_root_scoped_key(key: str) -> bool:
+    """True when ``key`` (dotted) belongs to a documented root-scoped namespace.
+
+    Matches the first dotted segment (case-insensitive) against
+    :data:`_ROOT_SCOPED_CONFIG_PREFIXES`. Bare top-level scalars like ``vfe``
+    also match — the whole namespace is anchored, not just ``vfe.something``.
+    """
+    if not key:
+        return False
+    head = key.split(".", 1)[0].strip().lower()
+    return head in _ROOT_SCOPED_CONFIG_PREFIXES
+
+
+def _resolve_config_path_for_key(key: str) -> tuple[Path, bool]:
+    """Return ``(config_path, is_root_scoped_override)`` for a config-set write.
+
+    When the key falls under :data:`_ROOT_SCOPED_CONFIG_PREFIXES` AND we are
+    running under an active profile whose config path differs from the root,
+    we return the root path and ``True`` (the caller should print a routing
+    notice). Otherwise we return the ordinary :func:`get_config_path` and
+    ``False``.
+    """
+    profile_path = get_config_path()
+    if not _is_root_scoped_key(key):
+        return profile_path, False
+    root_path = get_root_config_path()
+    try:
+        same = root_path.resolve() == profile_path.resolve()
+    except OSError:
+        same = str(root_path) == str(profile_path)
+    return root_path, not same
 
 def get_env_path() -> Path:
     """Get the .env file path (for API keys)."""
@@ -4825,7 +4913,15 @@ def set_config_value(key: str, value: str, force: bool = False):
     # Otherwise it goes to config.yaml
     # Read the raw user config (not merged with defaults) to avoid
     # dumping all default values back to the file
-    config_path = get_config_path()
+    #
+    # Root-scoped-key routing (VFE-SAFE-02 / kanban t_c43af288):
+    # Some keys drive host-level daemons that are NOT profile-scoped (see
+    # _ROOT_SCOPED_CONFIG_PREFIXES above — currently ``vfe.*``). When the
+    # CLI runs under an active profile, writing to the profile config would
+    # silently miss the file the daemon polls. Route those writes to the
+    # root config regardless of active profile and announce the reroute so
+    # the operator sees which file was actually touched.
+    config_path, is_root_override = _resolve_config_path_for_key(key)
     require_readable_config_before_write(config_path)
     user_config = {}
     if config_path.exists():
@@ -4900,6 +4996,18 @@ def set_config_value(key: str, value: str, force: bool = False):
     else:
         _display_value = value
     print(f"✓ Set {key} = {_display_value} in {config_path}")
+    if is_root_override:
+        # VFE-SAFE-02: the CLI ran under an active profile but the key belongs
+        # to a daemon-global namespace, so the write went to the ROOT config
+        # (the file the unscoped host-level daemon polls) instead of the
+        # active profile's config. Surface that loudly so the operator knows
+        # which file was actually touched and doesn't waste time diffing the
+        # profile config.
+        print(color(
+            f"  (note: '{key.split('.', 1)[0]}.*' is a daemon-global key — "
+            f"written to root config, not the active profile's config)",
+            Colors.DIM,
+        ))
     warn_unpinned_cron_jobs_after_model_config_change(key, value, user_config)
 
     # Post-write unknown-key notice (#34067): value IS saved, but tell the
@@ -4925,6 +5033,20 @@ def get_config_value(key: str, *, as_json: bool = False):
     if _is_env_config_key(key):
         env_value = get_env_value(key.upper())
         value = _MISSING if env_value is None else env_value
+    elif _is_root_scoped_key(key):
+        # VFE-SAFE-02: daemon-global keys live in the root config regardless
+        # of active profile. Read them directly from root so ``hermes config
+        # get vfe.enabled`` reflects what the daemon actually sees, mirroring
+        # the set/unset routing above.
+        root_path = get_root_config_path()
+        raw: Dict[str, Any] = {}
+        if root_path.exists():
+            try:
+                with open(root_path, encoding="utf-8") as f:
+                    raw = fast_safe_load(f) or {}
+            except Exception:
+                raw = {}
+        value = _get_nested(raw, key)
     else:
         value = _get_nested(load_config(), key)
 
@@ -4966,7 +5088,11 @@ def unset_config_value(key: str):
         print(f"✓ Unset {key} from {get_env_path()}")
         return
 
-    config_path = get_config_path()
+    # Root-scoped-key routing (VFE-SAFE-02): mirror set_config_value so that
+    # ``hermes config unset vfe.enabled`` from a profile-scoped shell targets
+    # the file the daemon actually reads. Otherwise the CLI would report a
+    # successful unset while the root config kept the stale value.
+    config_path, is_root_override = _resolve_config_path_for_key(key)
     require_readable_config_before_write(config_path)
     user_config = {}
     if config_path.exists():
@@ -4991,6 +5117,12 @@ def unset_config_value(key: str):
     from utils import atomic_yaml_write
     atomic_yaml_write(config_path, user_config, sort_keys=False)
     print(f"✓ Unset {key} from {config_path}")
+    if is_root_override:
+        print(color(
+            f"  (note: '{key.split('.', 1)[0]}.*' is a daemon-global key — "
+            f"unset in root config, not the active profile's config)",
+            Colors.DIM,
+        ))
 
 
 # =============================================================================
