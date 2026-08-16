@@ -5548,7 +5548,8 @@ def block_task(
     waiting_for_event: Optional[str] = None,
     waiting_for_condition: Optional[str] = None,
     expected_run_id: Optional[int] = None,
-) -> bool:
+    force: bool = False,
+) -> Any:
     """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
 
     ``kind`` (one of :data:`VALID_BLOCK_KINDS`, or ``None`` for a legacy
@@ -5573,13 +5574,44 @@ def block_task(
       can use it to signal "this might clear on its own"; it still participates
       in the loop breaker so a forever-flaky task eventually escalates.
 
+    When ``waiting_for`` is set, performs a soft-refusal check: if the referenced
+    task is already ``done``, returns a structured error dict instead of blocking.
+    Pass ``force=True`` to bypass this check (escape hatch).
+
     Returns True on any successful transition (to ``blocked``, ``todo``, or
-    ``triage``), False when the task wasn't in a blockable state.
+    ``triage``), False when the task wasn't in a blockable state, or a dict
+    with ``{ok: false, code: "...", message: "...", ...}`` when a soft-refusal
+    check fires.
     """
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
         )
+    
+    # Soft-refusal: check waiting_for status before entering write transaction
+    if waiting_for is not None and not force:
+        upstream = conn.execute(
+            "SELECT id, status, title, completed_at, result FROM tasks WHERE id = ?",
+            (str(waiting_for).strip(),),
+        ).fetchone()
+        if upstream is None:
+            return {
+                "ok": False,
+                "code": "waiting_for_not_found",
+                "message": f"Ticket {waiting_for} doesn't exist. Recheck the id.",
+            }
+        if upstream["status"] == "done":
+            return {
+                "ok": False,
+                "code": "waiting_for_already_done",
+                "message": (
+                    f"Ticket {waiting_for} ({upstream['title']}) completed at "
+                    f"{upstream['completed_at']} — before you tried to block. "
+                    f"Re-read the parent + upstream trees. Force with `force=True` to override."
+                ),
+                "upstream_summary": upstream["result"],
+            }
+
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
