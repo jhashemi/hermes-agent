@@ -669,6 +669,39 @@ def finalize_turn(
 
     # Clear stream callback so it doesn't leak into future calls
     agent._stream_callback = None
+    
+    # ── Cognitive heartbeat: predict-then-declare gate ──────────────────────────
+    # Inspect final_response for claim keywords (DONE, COMPLETE, VERIFIED, etc.)
+    # and validate they were pre-declared with cognitive_predict().
+    # If gaps detected, inject soft warning into response.
+    try:
+        from agent.cognitive_heartbeat import (
+            perform_cognitive_heartbeat_inspection,
+            inject_heartbeat_warning_into_response,
+        )
+        
+        heartbeat_result = perform_cognitive_heartbeat_inspection(
+            final_response=final_response,
+            messages=messages,
+        )
+        if heartbeat_result:
+            # Inject soft warning into the response
+            final_response_with_warning = inject_heartbeat_warning_into_response(
+                final_response or "",
+                heartbeat_result,
+            )
+            final_response = final_response_with_warning
+            result["final_response"] = final_response
+            result["cognitive_heartbeat"] = heartbeat_result
+            
+            # Log the intervention for diagnostics
+            logger.info(
+                "cognitive_heartbeat: %s — prediction_details=%s",
+                heartbeat_result.get("soft_warning", ""),
+                heartbeat_result.get("prediction_details", ""),
+            )
+    except Exception as hb_exc:
+        logger.debug("Cognitive heartbeat inspection failed: %s", hb_exc)
 
     # Check skill trigger NOW — based on how many tool iterations THIS turn used.
     _should_review_skills = False

@@ -188,9 +188,9 @@ class TestCognitiveMemoryProvider:
     def test_get_tool_schemas(self, tmp_path):
         provider = self._make_provider(tmp_path)
         schemas = provider.get_tool_schemas()
-        assert len(schemas) == 2
+        assert len(schemas) == 3
         names = {s["name"] for s in schemas}
-        assert names == {"cognitive_recall", "cognitive_decide"}
+        assert names == {"cognitive_recall", "cognitive_decide", "cognitive_predict"}
 
     def test_cognitive_recall_tool(self, tmp_path):
         provider = self._make_provider(tmp_path)
@@ -329,7 +329,8 @@ class TestToolSchemas:
         assert "reasoning" in params["required"]
 
     def test_all_schemas_in_list(self):
-        assert len(ALL_TOOL_SCHEMAS) == 2
+        assert len(ALL_TOOL_SCHEMAS) == 3
         names = {s["name"] for s in ALL_TOOL_SCHEMAS}
         assert "cognitive_recall" in names
         assert "cognitive_decide" in names
+        assert "cognitive_predict" in names
