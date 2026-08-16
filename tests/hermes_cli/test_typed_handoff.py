@@ -18,7 +18,7 @@ def kanban_db(_isolate_hermes_home):
 
 
 def test_block_task_waiting_for_not_found(kanban_db):
-    """Test: block_task soft-refusal when waiting_for task doesn't exist."""
+    """Test: block_task raises MissingWaitingForError when waiting_for task doesn't exist."""
     conn = kanban_db
     
     # Create a task to block
@@ -29,24 +29,23 @@ def test_block_task_waiting_for_not_found(kanban_db):
         assignee="worker",
     )
     
-    # Try to block with non-existent waiting_for
-    result = kb.block_task(
-        conn, tid,
-        reason="waiting for upstream",
-        kind="dependency",
-        waiting_for="t_does_not_exist",
-    )
+    # Try to block with non-existent waiting_for — should raise exception
+    with pytest.raises(kb.MissingWaitingForError) as exc_info:
+        kb.block_task(
+            conn, tid,
+            reason="waiting for upstream",
+            kind="dependency",
+            waiting_for="t_does_not_exist",
+        )
     
-    # Should return refusal dict
-    assert isinstance(result, dict)
-    assert result["ok"] is False
-    assert result["code"] == "waiting_for_not_found"
-    assert "doesn't exist" in result["message"]
-    assert "t_does_not_exist" in result["message"]
+    # Exception should contain the phantom id
+    assert "t_does_not_exist" in str(exc_info.value)
+    assert exc_info.value.phantom == ["t_does_not_exist"]
     
-    # Task should NOT be blocked
+    # Task should NOT be blocked (state unchanged)
     task = kb.get_task(conn, tid)
     assert task.status == "ready"
+
 
 
 def test_block_task_waiting_for_already_done(kanban_db):

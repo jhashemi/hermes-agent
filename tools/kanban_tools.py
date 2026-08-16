@@ -644,6 +644,9 @@ def _handle_complete(args: dict, **kw) -> str:
             pass
     created_cards = args.get("created_cards")
     artifacts = args.get("artifacts")
+    unblocks = args.get("unblocks")
+    commit_hash = args.get("commit_hash")
+    test_run_id = args.get("test_run_id")
     if created_cards is not None:
         if isinstance(created_cards, str):
             # Accept a single id as a string for convenience.
@@ -657,6 +660,27 @@ def _handle_complete(args: dict, **kw) -> str:
         created_cards = [
             str(c).strip() for c in created_cards if str(c).strip()
         ]
+    if unblocks is not None:
+        if isinstance(unblocks, str):
+            # Accept a single id as a string for convenience, mirroring
+            # ``created_cards``.
+            unblocks = [unblocks]
+        if not isinstance(unblocks, (list, tuple)):
+            return tool_error(
+                f"unblocks must be a list of task ids, got "
+                f"{type(unblocks).__name__}"
+            )
+        unblocks = [
+            str(u).strip() for u in unblocks if str(u).strip()
+        ]
+    if commit_hash is not None and not isinstance(commit_hash, str):
+        return tool_error(
+            f"commit_hash must be a string, got {type(commit_hash).__name__}"
+        )
+    if test_run_id is not None and not isinstance(test_run_id, str):
+        return tool_error(
+            f"test_run_id must be a string, got {type(test_run_id).__name__}"
+        )
     if artifacts is not None:
         if isinstance(artifacts, str):
             # Accept a single path as a string for convenience.
@@ -706,31 +730,6 @@ def _handle_complete(args: dict, **kw) -> str:
         )
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
-    unblocks = args.get("unblocks")
-    commit_hash = args.get("commit_hash")
-    test_run_id = args.get("test_run_id")
-    
-    # Validate unblocks is a list if provided
-    if unblocks is not None:
-        if isinstance(unblocks, str):
-            unblocks = [unblocks]
-        if not isinstance(unblocks, (list, tuple)):
-            return tool_error(
-                f"unblocks must be a list of task ids, got "
-                f"{type(unblocks).__name__}"
-            )
-        unblocks = [str(u).strip() for u in unblocks if str(u).strip()]
-    
-    # Redact and validate commit_hash if provided
-    if commit_hash:
-        commit_hash = str(commit_hash).strip()
-        commit_hash = redact_sensitive_text(commit_hash, force=True) if commit_hash else None
-    
-    # Redact and validate test_run_id if provided
-    if test_run_id:
-        test_run_id = str(test_run_id).strip()
-        test_run_id = redact_sensitive_text(test_run_id, force=True) if test_run_id else None
-    
     try:
         kb, conn = _connect(board=board)
         try:
@@ -776,8 +775,8 @@ def _handle_complete(args: dict, **kw) -> str:
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
                     unblocks=unblocks,
-                    commit_hash=commit_hash,
-                    test_run_id=test_run_id,
+                    commit_hash=commit_hash.strip() if commit_hash else None,
+                    test_run_id=test_run_id.strip() if test_run_id else None,
                     expected_run_id=_worker_run_id(tid),
                 )
             except kb.ArtifactPreservationError as artifact_err:
@@ -840,23 +839,21 @@ def _handle_block(args: dict, **kw) -> str:
         return tool_error("reason is required — explain what input you need")
     reason = redact_sensitive_text(str(reason), force=True)
     kind = args.get("kind")
-    board = args.get("board")
     waiting_for = args.get("waiting_for")
     waiting_for_commit = args.get("waiting_for_commit")
     waiting_for_event = args.get("waiting_for_event")
     waiting_for_condition = args.get("waiting_for_condition")
-    
-    # Sanitize waiting_for parameters
-    if waiting_for:
-        waiting_for = str(waiting_for).strip() if waiting_for else None
-    if waiting_for_commit:
-        waiting_for_commit = str(waiting_for_commit).strip()
-        waiting_for_commit = redact_sensitive_text(waiting_for_commit, force=True) if waiting_for_commit else None
-    if waiting_for_event:
-        waiting_for_event = str(waiting_for_event).strip() if waiting_for_event else None
-    if waiting_for_condition:
-        waiting_for_condition = str(waiting_for_condition).strip() if waiting_for_condition else None
-    
+    for _name, _val in (
+        ("waiting_for", waiting_for),
+        ("waiting_for_commit", waiting_for_commit),
+        ("waiting_for_event", waiting_for_event),
+        ("waiting_for_condition", waiting_for_condition),
+    ):
+        if _val is not None and not isinstance(_val, str):
+            return tool_error(
+                f"{_name} must be a string, got {type(_val).__name__}"
+            )
+    board = args.get("board")
     try:
         kb, conn = _connect(board=board)
         if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
@@ -893,19 +890,32 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 kind=kind,
-                waiting_for=waiting_for,
-                waiting_for_commit=waiting_for_commit,
-                waiting_for_event=waiting_for_event,
-                waiting_for_condition=waiting_for_condition,
+                waiting_for=waiting_for.strip() if waiting_for else None,
+                waiting_for_commit=(
+                    waiting_for_commit.strip() if waiting_for_commit else None
+                ),
+                waiting_for_event=(
+                    waiting_for_event.strip() if waiting_for_event else None
+                ),
+                waiting_for_condition=(
+                    waiting_for_condition.strip() if waiting_for_condition else None
+                ),
                 expected_run_id=_worker_run_id(tid),
             )
-            # block_task may return a dict (soft-refusal) or a bool (old behavior)
-            if isinstance(ok, dict):
-                # Soft-refusal: return structured error
-                if not ok.get("ok"):
-                    return tool_error(ok.get("message", "Block refused"), extra=ok)
-                # Unexpected: dict with ok=true is malformed
-                return tool_error(f"Unexpected block_task response: {ok}")
+        except kb.MissingWaitingForError as miss_err:
+            # Structured rejection — like ``HallucinatedCardsError`` in
+            # ``kanban_complete``. State was NOT mutated (the gate runs
+            # before the write txn), so the worker can retry with a
+            # corrected id or drop the field entirely. See VFE-NERVE-01.
+            return tool_error(
+                f"kanban_block blocked: waiting_for references ticket(s) "
+                f"that do not exist: {', '.join(miss_err.phantom)}. "
+                f"Your task is still in-flight (no state change). "
+                f"Retry kanban_block with a corrected waiting_for id, or "
+                f"omit waiting_for entirely if you don't actually depend "
+                f"on a specific ticket."
+            )
+        else:
             if not ok:
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "
@@ -1759,27 +1769,36 @@ KANBAN_COMPLETE_SCHEMA = {
                 "type": "array",
                 "items": {"type": "string"},
                 "description": (
-                    "Optional: list of task ids that should be auto-unblocked "
-                    "by this completion. Kernel will atomically unblock them "
-                    "as part of the same transaction. Each must currently be "
-                    "in blocked-dependency state with waiting_for pointing back "
-                    "to this task."
+                    "Optional list of ticket ids this completion is "
+                    "expected to unblock (e.g. the ids listed under "
+                    "``waiting_for`` on other tasks). Every id must "
+                    "exist — phantom ids are rejected with the same "
+                    "structured error as ``created_cards``. Ids that "
+                    "exist but are not currently in a blockable "
+                    "status are recorded as a soft warning on the "
+                    "completion event, they do not block the "
+                    "completion. Prefer this over prose so an "
+                    "auto-heal loop can trigger recovery without "
+                    "scanning summaries."
                 ),
             },
             "commit_hash": {
                 "type": "string",
                 "description": (
-                    "Optional: canonical fix commit hash for this completion. "
-                    "Enables auto-healing of downstream block-loops that are "
-                    "waiting for this commit to land on master."
+                    "Optional canonical commit hash (full or short "
+                    "SHA) for the fix or change this completion "
+                    "delivers. Recorded on the completion event so "
+                    "downstream auditors can trace done → merged "
+                    "without re-parsing prose."
                 ),
             },
             "test_run_id": {
                 "type": "string",
                 "description": (
-                    "Optional: CI/test run id (e.g., GitHub Actions run URL) "
-                    "that validated this completion. Provides evidence trail "
-                    "for compliance / audit logs."
+                    "Optional CI run id (e.g. a GitHub Actions run "
+                    "URL or numeric id) that provides green-evidence "
+                    "for this completion. Recorded on the completion "
+                    "event."
                 ),
             },
             "board": _board_schema_prop(),
@@ -1829,32 +1848,36 @@ KANBAN_BLOCK_SCHEMA = {
             "waiting_for": {
                 "type": "string",
                 "description": (
-                    "Optional: if blocking on a specific task's completion, "
-                    "pass its ticket id. Enables kernel sanity-check (refuse "
-                    "block if task is already done) and auto-healing by "
-                    "recheck jobs when block-loops fire."
+                    "Optional ticket id (e.g. 't_abc123') this block is "
+                    "gated on. Must be an id you got back from a real "
+                    "kanban call — the kernel verifies it exists before "
+                    "accepting the block. A missing id is rejected with a "
+                    "structured error so an auto-heal loop can reason "
+                    "about the block instead of parsing prose."
                 ),
             },
             "waiting_for_commit": {
                 "type": "string",
                 "description": (
-                    "Optional: git commit hash this task is waiting for. "
-                    "Kernel will use to auto-heal if commit lands on master."
+                    "Optional commit hash (full or short SHA) this block "
+                    "is waiting on — e.g. a fix pending merge or CI."
                 ),
             },
             "waiting_for_event": {
                 "type": "string",
                 "description": (
-                    "Optional: NATS event name (e.g., 'spine.gate.wave2_cleared') "
-                    "this task is waiting for. Kernel will use to auto-heal "
-                    "if event is observed."
+                    "Optional event-bus subject the block is waiting for "
+                    "(e.g. 'spine.gate.wave2_cleared'). Lets an event "
+                    "listener auto-unblock the task when the subject "
+                    "fires."
                 ),
             },
             "waiting_for_condition": {
                 "type": "string",
                 "description": (
-                    "Optional: human-readable predicate describing what "
-                    "condition must be met for unblocking (for L3 rechecker audit)."
+                    "Optional human-readable predicate that describes "
+                    "when this block should clear (e.g. 'p95 latency < "
+                    "200ms for 10 minutes'). Used by L3 rechecker loops."
                 ),
             },
             "board": _board_schema_prop(),
