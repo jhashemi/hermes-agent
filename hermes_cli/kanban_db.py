@@ -141,6 +141,136 @@ KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
+# ---------------------------------------------------------------------------
+# min_resources (ADR-006b Phase 2)
+# ---------------------------------------------------------------------------
+#
+# Per-task resource declaration consumed by the VCG dispatcher's fitness gate.
+# A task's body may open with a YAML front-matter block containing a
+# ``min_resources:`` key, e.g.
+#
+#     ---
+#     min_resources:
+#       mem_gb: 4
+#       cpu_cores: 2
+#       bedrock_tpm_reservation: 40000
+#     ---
+#     <normal task body follows>
+#
+# On task ingest ``create_task`` parses the block (if any) and stores the
+# declared subset as JSON in ``tasks.min_resources``. Missing keys stay
+# missing — the default is applied at dispatch time by
+# ``get_task_min_resources`` so NULL (no declaration) and an
+# explicit-but-partial declaration remain distinguishable.
+MIN_RESOURCES_KEYS: dict[str, type] = {
+    "mem_gb": float,
+    "cpu_cores": int,
+    "bedrock_tpm_reservation": int,
+}
+MIN_RESOURCES_DEFAULT: dict[str, Any] = {
+    "mem_gb": 0.5,
+    "cpu_cores": 1,
+    "bedrock_tpm_reservation": 10000,
+}
+# Anchored to the start of the body. Front-matter is the classic Jekyll
+# convention: a leading ``---`` line and a trailing ``---`` line. Everything
+# between is YAML. Whitespace-only lines before the opening ``---`` are
+# tolerated so a body pasted with an accidental blank line still parses.
+_FRONT_MATTER_RE = re.compile(
+    r"\A\s*---\s*\r?\n(.*?)\r?\n---\s*(?:\r?\n|\Z)",
+    re.DOTALL,
+)
+
+
+def _parse_min_resources_from_body(body: Optional[str]) -> Optional[dict[str, Any]]:
+    """Extract the ``min_resources`` block from a task body's YAML front-matter.
+
+    Returns a dict of declared keys (subset of :data:`MIN_RESOURCES_KEYS`)
+    coerced to the canonical types (``mem_gb`` as float, the others as int),
+    or ``None`` when the body has no front-matter, the front-matter fails to
+    parse, or the block does not declare ``min_resources``.
+
+    Unknown keys inside ``min_resources`` are silently dropped so downstream
+    consumers see a stable schema. Non-scalar / non-numeric values for known
+    keys are dropped too — a malformed declaration is treated the same as an
+    absent one (NULL in the column, default applied at dispatch time). This is
+    a lossy convenience parser; strict validation belongs in the dispatcher's
+    gate check, not in the ingest path.
+    """
+    if not body:
+        return None
+    match = _FRONT_MATTER_RE.match(body)
+    if match is None:
+        return None
+    try:
+        # Import lazily so ``kanban_db`` remains importable on stripped
+        # installs without PyYAML. The parser is only invoked from
+        # ``create_task`` where task bodies are already assumed to be
+        # user-authored markdown-adjacent text.
+        import yaml  # type: ignore[import-not-found]
+
+        data = yaml.safe_load(match.group(1))
+    except Exception:  # noqa: BLE001 — any parse error → no declaration
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    raw = data.get("min_resources")
+    if not isinstance(raw, Mapping):
+        return None
+    out: dict[str, Any] = {}
+    for key, coerce in MIN_RESOURCES_KEYS.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        # Reject bool (bool is a subclass of int in Python; ``True`` would
+        # coerce to ``1`` silently and mask a typo).
+        if isinstance(value, bool):
+            continue
+        if not isinstance(value, (int, float)):
+            continue
+        try:
+            out[key] = coerce(value)
+        except (TypeError, ValueError):
+            continue
+    return out or None
+
+
+def get_task_min_resources(
+    conn: sqlite3.Connection, task_id: str
+) -> dict[str, Any]:
+    """Return the effective ``min_resources`` for a task.
+
+    Merges the per-task declaration (parsed from front-matter and stored in
+    ``tasks.min_resources``) over :data:`MIN_RESOURCES_DEFAULT`, so callers
+    always get every key. Missing task → returns the pure default (the
+    dispatcher pre-flights unknown ids the same as unfit ones rather than
+    raising).
+    """
+    row = conn.execute(
+        "SELECT min_resources FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    declared: dict[str, Any] = {}
+    if row is not None and row["min_resources"]:
+        try:
+            parsed = json.loads(row["min_resources"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = None
+        if isinstance(parsed, Mapping):
+            for key, coerce in MIN_RESOURCES_KEYS.items():
+                if key in parsed:
+                    value = parsed[key]
+                    if isinstance(value, bool) or not isinstance(
+                        value, (int, float)
+                    ):
+                        continue
+                    try:
+                        declared[key] = coerce(value)
+                    except (TypeError, ValueError):
+                        continue
+    merged = dict(MIN_RESOURCES_DEFAULT)
+    merged.update(declared)
+    return merged
+
 
 def _assert_not_delegated_child_mutation() -> None:
     """Reject Kanban state mutations from ``delegate_task`` child contexts.
@@ -1238,7 +1368,16 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Per-task minimum resource declaration used by the VCG dispatcher to
+    -- filter unfit nodes (ADR-006b Phase 2). JSON blob with keys
+    -- ``mem_gb`` (float), ``cpu_cores`` (int),
+    -- ``bedrock_tpm_reservation`` (int). Populated on task ingest when the
+    -- body contains a YAML front-matter block with a ``min_resources:`` key.
+    -- NULL when no declaration is present; the dispatcher applies
+    -- ``MIN_RESOURCES_DEFAULT`` at gate-check time so NULL vs an
+    -- explicit-but-partial dict remain distinguishable.
+    min_resources        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2431,6 +2570,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    if "min_resources" not in cols:
+        # Per-task resource declaration for the VCG dispatcher's fitness gate
+        # (ADR-006b Phase 2). Additive; NULL on legacy rows means "no
+        # declaration, apply MIN_RESOURCES_DEFAULT at dispatch time". Kept as
+        # TEXT (not JSON) because SQLite's JSON type is just a TEXT affinity
+        # anyway and existing helpers (``skills``, ``result``) use the same
+        # store-JSON-as-TEXT convention.
+        _add_column_if_missing(
+            conn, "tasks", "min_resources", "min_resources TEXT"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3066,6 +3216,14 @@ def create_task(
             )
         skills_list = cleaned
 
+    # Parse an optional ``min_resources:`` block out of the body's YAML
+    # front-matter (ADR-006b Phase 2). Absence → NULL in the column; the
+    # dispatcher applies ``MIN_RESOURCES_DEFAULT`` at gate-check time so the
+    # column can distinguish "no declaration" from "explicit partial
+    # declaration". Any parse error is silently swallowed by the helper —
+    # the ingest path never blocks task creation on malformed front-matter.
+    min_resources_declared = _parse_min_resources_from_body(body)
+
     # Idempotency check — return the existing task instead of creating a
     # duplicate. Done BEFORE entering write_txn to keep the fast path fast
     # and to avoid holding a write lock during the lookup. Race is
@@ -3166,8 +3324,8 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, min_resources
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3192,6 +3350,9 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        json.dumps(min_resources_declared)
+                        if min_resources_declared is not None
+                        else None,
                     ),
                 )
                 for pid in parents:
