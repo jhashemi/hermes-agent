@@ -2779,55 +2779,6 @@ from hermes_cli.web_routers.git import (  # noqa: E402,F401 — legacy re-export
 
 
 
-# ---------------------------------------------------------------------------
-# Prometheus /metrics endpoint (VFE-METRICS-01)
-#
-# Exposes ``kanban_block_refusals_total{code,board}`` — the cumulative count
-# of NERVE-03b soft-refusals (``block_task`` returning
-# ``waiting_for_already_done`` or ``waiting_for_not_found``) aggregated from
-# the durable ``block_refused`` events in each board's ``task_events`` table.
-#
-# Unauthenticated (in ``_GATE_PUBLIC_PREFIXES``) so external scrapers can
-# poll it.  Exposes only aggregate counts + board slugs — no task content,
-# no PII.
-# ---------------------------------------------------------------------------
-
-@app.get("/metrics")
-def prometheus_metrics():
-    from hermes_cli import kanban_db
-
-    lines: list[str] = [
-        "# HELP kanban_block_refusals_total Soft-refusals from block_task (waiting_for_not_found / waiting_for_already_done).",
-        "# TYPE kanban_block_refusals_total counter",
-    ]
-    try:
-        boards = kanban_db.list_boards()
-    except Exception:
-        boards = []
-    for board_meta in boards:
-        board = board_meta.get("slug") or "default"
-        try:
-            conn = kanban_db.connect(board=board)
-        except Exception:
-            continue
-        try:
-            counts = kanban_db.block_refusal_counts(conn)
-        except Exception:
-            counts = {}
-        finally:
-            conn.close()
-        for code, count in counts.items():
-            # Prometheus label values must be quoted; board slugs are
-            # validated to be lowercase alnum + hyphens so no escaping needed.
-            lines.append(
-                f'kanban_block_refusals_total{{code="{code}",board="{board}"}} {count}'
-            )
-    return Response(
-        content="\n".join(lines) + "\n",
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
-
-
 # Host TCP ports each port-binding gateway platform listens on, as
 # ``platform-name -> (config port key, adapter default)``.  Mirrors
 # ``PORT_BINDING_PLATFORM_VALUES`` in gateway/config.py and each adapter's

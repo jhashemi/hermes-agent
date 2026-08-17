@@ -5695,83 +5695,6 @@ def edit_completed_task_result(
     return True
 
 
-# ---------------------------------------------------------------------------
-# Block-refusal metrics (VFE-METRICS-01)
-#
-# ``block_task`` can soft-refuse when ``waiting_for`` points at a ticket
-# that doesn't exist (``waiting_for_not_found``) or is already ``done``
-# (``waiting_for_already_done``).  Each refusal emits a ``block_refused``
-# event into ``task_events`` (durable, survives worker restarts) so the
-# dashboard ``/metrics`` endpoint can aggregate the cumulative count.
-# ---------------------------------------------------------------------------
-
-BLOCK_REFUSAL_CODES = frozenset({
-    "waiting_for_not_found",
-    "waiting_for_already_done",
-})
-
-
-def _emit_block_refusal_event(
-    conn: sqlite3.Connection,
-    task_id: str,
-    code: str,
-    *,
-    waiting_for: Optional[str] = None,
-    reason: Optional[str] = None,
-    kind: Optional[str] = None,
-    upstream_title: Optional[str] = None,
-) -> None:
-    """Record a ``block_refused`` event for a soft-refusal (NERVE-03b).
-
-    Mirrors the ``block_rejected_missing_waiting_for`` pattern: emit in a
-    tiny dedicated write txn, never mutate task state.  Best-effort — a
-    logging failure must not prevent the refusal return.
-    """
-    try:
-        with write_txn(conn):
-            _append_event(
-                conn, task_id, "block_refused",
-                {
-                    "code": code,
-                    "waiting_for": waiting_for,
-                    "reason": reason,
-                    "kind": kind,
-                    "upstream_title": upstream_title,
-                },
-            )
-    except Exception:
-        _log.warning(
-            "kanban: failed to record block_refused event for %s (%s)",
-            task_id, code, exc_info=True,
-        )
-
-
-def block_refusal_counts(conn: sqlite3.Connection) -> dict[str, int]:
-    """Aggregate ``block_refused`` events by refusal code.
-
-    Returns ``{code: count}`` for the two soft-refusal codes.  Used by the
-    dashboard ``/metrics`` endpoint to expose
-    ``kanban_block_refusals_total{code=...}``.
-    """
-    counts: dict[str, int] = {code: 0 for code in BLOCK_REFUSAL_CODES}
-    try:
-        rows = conn.execute(
-            "SELECT payload FROM task_events WHERE kind = 'block_refused'",
-        ).fetchall()
-    except sqlite3.OperationalError:
-        # Table not yet initialised (fresh DB) — return zeros.
-        return counts
-    for row in rows:
-        try:
-            payload = json.loads(row["payload"]) if row["payload"] else {}
-        except (json.JSONDecodeError, TypeError):
-            continue
-        code = payload.get("code")
-        if code in counts:
-            counts[code] += 1
-    return counts
-
-
 def block_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5851,21 +5774,12 @@ def block_task(
             (str(waiting_for).strip(),),
         ).fetchone()
         if upstream is None:
-            _emit_block_refusal_event(
-                conn, task_id, "waiting_for_not_found",
-                waiting_for=str(waiting_for), reason=reason, kind=kind,
-            )
             return {
                 "ok": False,
                 "code": "waiting_for_not_found",
                 "message": f"Ticket {waiting_for} doesn't exist. Recheck the id.",
             }
         if upstream["status"] == "done":
-            _emit_block_refusal_event(
-                conn, task_id, "waiting_for_already_done",
-                waiting_for=str(waiting_for), reason=reason, kind=kind,
-                upstream_title=upstream["title"],
-            )
             return {
                 "ok": False,
                 "code": "waiting_for_already_done",
