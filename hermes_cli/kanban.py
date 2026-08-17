@@ -637,6 +637,14 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
             "triage to break unblock loops. Omit for a generic block."
         ),
     )
+    p_block.add_argument(
+        "--waiting-for", default=None,
+        help=(
+            "Ticket id this block is gated on (e.g. t_abc123). Must exist; "
+            "if that task is already done the block is refused with a "
+            "waiting_for_already_done error (see VFE-NERVE-FIX-01)."
+        ),
+    )
 
     p_schedule = sub.add_parser("schedule", help="Park one or more tasks in Scheduled (waiting on time, not human input)")
     p_schedule.add_argument("task_id")
@@ -2258,6 +2266,9 @@ def _cmd_edit(args: argparse.Namespace) -> int:
 def _cmd_block(args: argparse.Namespace) -> int:
     reason = " ".join(args.reason).strip() if args.reason else None
     kind = getattr(args, "kind", None)
+    waiting_for = getattr(args, "waiting_for", None)
+    if waiting_for:
+        waiting_for = waiting_for.strip() or None
     author = _profile_author()
     ids = [args.task_id] + list(getattr(args, "ids", None) or [])
     failed: list[str] = []
@@ -2265,13 +2276,28 @@ def _cmd_block(args: argparse.Namespace) -> int:
         for tid in ids:
             if reason:
                 kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
-            if not kb.block_task(
+            result = kb.block_task(
                 conn,
                 tid,
                 reason=reason,
                 kind=kind,
+                waiting_for=waiting_for,
                 expected_run_id=_worker_run_id_for(tid),
-            ):
+            )
+            # block_task returns True (success), False (not blockable),
+            # or a dict soft-refusal (e.g. {ok: False, code:
+            # waiting_for_already_done}). A non-empty dict is truthy, so
+            # the old `if not result:` check silently swallowed refusals
+            # and reported a false success. See VFE-NERVE-FIX-01.
+            if isinstance(result, dict):
+                failed.append(tid)
+                code = result.get("code", "unknown")
+                msg = result.get("message", "")
+                print(
+                    f"cannot block {tid}: refused ({code}) — {msg}",
+                    file=sys.stderr,
+                )
+            elif not result:
                 failed.append(tid)
                 print(f"cannot block {tid}", file=sys.stderr)
             else:

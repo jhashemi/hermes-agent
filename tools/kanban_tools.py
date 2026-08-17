@@ -916,6 +916,15 @@ def _handle_block(args: dict, **kw) -> str:
                 f"on a specific ticket."
             )
         else:
+            if isinstance(ok, dict):
+                # Soft-refusal from block_task (e.g. waiting_for_already_done).
+                # State was NOT mutated — surface the refusal to the agent
+                # so it can re-read the upstream tree instead of believing
+                # the block succeeded. See VFE-NERVE-FIX-01 / t_153fa920.
+                return tool_error(
+                    f"kanban_block refused: {ok.get('code', 'unknown')} — "
+                    f"{ok.get('message', '')}"
+                )
             if not ok:
                 return tool_error(
                     f"could not block {tid} (unknown id or not in "

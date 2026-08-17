@@ -228,6 +228,61 @@ def test_block_happy_path(worker_env):
         conn.close()
 
 
+def test_block_waiting_for_already_done_surfaces_refusal(worker_env):
+    """Tool-layer regression for VFE-NERVE-FIX-01 / t_153fa920.
+
+    The DB layer (block_task) correctly returns a soft-refusal dict
+    {ok: False, code: 'waiting_for_already_done'} when waiting_for points
+    at a done task. The tool handler _handle_block must surface that
+    refusal as a tool_error — NOT silently swallow the truthy dict and
+    report {ok: true}. This test exercises the handler, not the DB layer
+    (test_block_task_waiting_for_already_done in test_typed_handoff.py
+    covers that).
+    """
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    # Create an upstream task in the same isolated DB and complete it.
+    conn = kb.connect()
+    try:
+        upstream_id = kb.create_task(
+            conn, title="Upstream", body="done dep", assignee="worker",
+        )
+        kb.complete_task(conn, upstream_id, summary="upstream done")
+        assert kb.get_task(conn, upstream_id).status == "done"
+    finally:
+        conn.close()
+
+    # The worker task (worker_env) is in 'running'. Call the tool with
+    # waiting_for pointing at the done upstream.
+    out = kt._handle_block({
+        "reason": "waiting on upstream",
+        "kind": "dependency",
+        "waiting_for": upstream_id,
+    })
+    d = json.loads(out)
+
+    # Must be an error, NOT a false success.
+    assert "error" in d, (
+        f"expected tool_error for soft-refusal, got false-success: {d}"
+    )
+    assert d.get("ok") is not True, (
+        f"_handle_block reported ok:true for a refused block: {d}"
+    )
+    assert "waiting_for_already_done" in d["error"], (
+        f"refusal code missing from error: {d['error']}"
+    )
+
+    # The worker task must NOT have been mutated — still running.
+    conn = kb.connect()
+    try:
+        assert kb.get_task(conn, worker_env).status == "running", (
+            "task was mutated despite soft-refusal"
+        )
+    finally:
+        conn.close()
+
+
 def _make_goal_mode_worker_env(monkeypatch, tmp_path):
     """Set up an isolated HERMES_HOME with one claimed goal_mode task,
     matching the pattern used by the kanban_complete judge gate tests."""

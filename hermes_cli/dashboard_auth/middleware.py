@@ -62,6 +62,10 @@ _GATE_PUBLIC_PREFIXES: tuple[str, ...] = (
     "/ds-assets/",
     "/fonts/",
     "/fonts-terminal/",
+    # Prometheus scrape endpoint (VFE-METRICS-01).  Exposes only aggregate
+    # kanban block-refusal counts per (code, board) — no task content, no
+    # PII.  Unauthenticated so external scrapers can poll it.
+    "/metrics",
 )
 
 
