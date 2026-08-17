@@ -336,6 +336,17 @@ class PluginManifest:
     # category plugin at ``plugins/image_gen/openai/`` the key is
     # ``image_gen/openai``. When empty, falls back to ``name``.
     key: str = ""
+    # Default-load policy — read from ``plugin.yaml``'s ``default_state``
+    # field (``enabled`` | ``disabled``). ``"disabled"`` (the default)
+    # preserves the historical opt-in behavior: the plugin only loads if
+    # its key or name appears in ``plugins.enabled``. ``"enabled"`` flips
+    # the polarity: the plugin loads unconditionally UNLESS its key or
+    # name appears in ``plugins.disabled``. Intended for
+    # first-party/bundled hooks-only plugins whose absence would break
+    # baseline agent behavior (e.g. the VFE cluster hook stack).
+    # Only honored for ``kind='standalone'`` — other kinds already have
+    # their own discovery/activation paths.
+    default_state: str = "disabled"
 
 
 @dataclass
@@ -1491,13 +1502,18 @@ class PluginManager:
                 continue
 
             # Everything else (standalone, user-installed backends,
-            # entry-point plugins) is opt-in via plugins.enabled.
+            # entry-point plugins) is opt-in via plugins.enabled — UNLESS
+            # the manifest declares ``default_state: enabled``, in which
+            # case the polarity flips: the plugin loads unless the operator
+            # explicitly names it in ``plugins.disabled`` (handled above).
             # Accept both the path-derived key and the legacy bare name
             # so existing configs keep working.
-            is_enabled = (
+            is_enabled_via_allowlist = (
                 enabled is not None
                 and (lookup_key in enabled or manifest.name in enabled)
             )
+            is_enabled_by_default = manifest.default_state == "enabled"
+            is_enabled = is_enabled_via_allowlist or is_enabled_by_default
             if not is_enabled:
                 loaded = LoadedPlugin(manifest=manifest, enabled=False)
                 loaded.error = (
@@ -1634,6 +1650,18 @@ class PluginManager:
                 )
                 kind = "standalone"
 
+            raw_default_state = data.get("default_state", "disabled")
+            if not isinstance(raw_default_state, str):
+                raw_default_state = "disabled"
+            default_state = raw_default_state.strip().lower()
+            if default_state not in ("enabled", "disabled"):
+                logger.warning(
+                    "Plugin %s: unknown default_state '%s' (valid: enabled, disabled); "
+                    "treating as 'disabled'",
+                    key, raw_default_state,
+                )
+                default_state = "disabled"
+
             # Auto-coerce user-installed memory providers to kind="exclusive"
             # so they're routed to plugins/memory discovery instead of being
             # loaded by the general PluginManager (which has no
@@ -1687,6 +1715,7 @@ class PluginManager:
                 path=str(plugin_dir),
                 kind=kind,
                 key=key,
+                default_state=default_state,
             )
         except Exception as exc:
             logger.warning(
@@ -2054,6 +2083,7 @@ class PluginManager:
                     "description": loaded.manifest.description,
                     "source": loaded.manifest.source,
                     "enabled": loaded.enabled,
+                    "default_state": loaded.manifest.default_state,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
                     "middleware": len(loaded.middleware_registered),
