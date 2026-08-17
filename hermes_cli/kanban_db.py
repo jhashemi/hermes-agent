@@ -137,22 +137,6 @@ VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 # not dispatcher spawn/crash/timeout failures.
 BLOCK_RECURRENCE_LIMIT = 2
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
-
-# Special assignee for convene-type tickets. The dispatcher recognizes this
-# value and routes the task to the convene-worker (an HTTP bridge to the
-# boardroom driver) instead of spawning an LLM-agent worker. Using a
-# dedicated sentinel — not a real profile — makes it structurally
-# impossible to file an arch-weight ticket to a single persona: the schema
-# itself refuses a non-convene assignee for convene-type tasks.
-CONVENE_ASSIGNEE = "livekit-boardroom"
-
-# Default boardroom driver endpoint. Override via the ``kanban.convene_driver_url``
-# config key or ``HERMES_CONVENE_DRIVER_URL`` env var.
-CONVENE_DRIVER_DEFAULT_URL = "http://localhost:8196"
-
-# Valid ticket types. ``convene`` routes to the convene-worker; all others
-# (the implicit default) route to an LLM-agent worker as before.
-VALID_TASK_TYPES = {"default", "convene"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
@@ -983,11 +967,6 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
-    # Convene ticket type: JSON boardroom spec when this task convenes the
-    # boardroom via HTTP POST instead of spawning an LLM-agent worker.
-    # None on all normal agent-worker tasks. When set, the dispatcher routes
-    # to the convene-worker (an HTTP bridge) rather than ``hermes -p <assignee>``.
-    convene_spec: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1076,9 +1055,6 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
-            ),
-            convene_spec=(
-                row["convene_spec"] if "convene_spec" in keys and row["convene_spec"] else None
             ),
         )
 
@@ -1256,22 +1232,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- to ``blocked`` for a human. Preserved across unblock so a re-block for
     -- the SAME kind can be recognised as a loop.
     block_kind           TEXT,
-    -- Unblock-loop counter. Incremented each time a task is re-blocked for
-    -- the same truly-blocked reason after having been unblocked. When it reaches
+    -- Unblock-loop counter. Incremented each time a task is re-blocked for the
+    -- same truly-blocked reason after having been unblocked. When it reaches
     -- BLOCK_RECURRENCE_LIMIT the task is routed to ``triage`` instead of
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0,
-    -- Convene ticket type: when ``convene``, this task routes to the
-    -- convene-worker (an HTTP bridge to the boardroom driver) instead of an
-    -- LLM-agent worker. The assignee is forced to ``livekit-boardroom`` (a
-    -- dispatch-recognized special value) so filing an arch-weight ticket to
-    -- a single persona is structurally impossible — the schema itself
-    -- refuses. ``convene_spec`` carries the JSON boardroom spec
-    -- ({room_id, participants, phases, transcript_output_path}). NULL on
-    -- all normal (agent-worker) tasks.
-    convene_spec         TEXT
+    block_recurrences    INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2464,14 +2431,6 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
-    if "convene_spec" not in cols:
-        # Convene ticket type: JSON boardroom spec for tasks that convene the
-        # boardroom via HTTP POST instead of spawning an LLM-agent worker.
-        # NULL on all normal agent-worker tasks (the common case).
-        _add_column_if_missing(
-            conn, "tasks", "convene_spec", "convene_spec TEXT"
-        )
-
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -2876,48 +2835,6 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
-def _validate_convene_spec(spec: str) -> None:
-    """Validate a convene_spec JSON string.
-
-    Required keys: ``room_id`` (str), ``participants`` (list[str]),
-    ``phases`` (list[dict]), ``transcript_output_path`` (str).
-    Raises ``ValueError`` on any structural problem so the caller surfaces
-    it at file-time rather than at dispatch-time.
-    """
-    if not spec or not spec.strip():
-        raise ValueError("convene_spec is required for convene tickets")
-    try:
-        parsed = json.loads(spec)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"convene_spec must be valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("convene_spec must be a JSON object")
-    required = ("room_id", "participants", "phases", "transcript_output_path")
-    missing = [k for k in required if k not in parsed]
-    if missing:
-        raise ValueError(
-            f"convene_spec missing required keys: {', '.join(missing)}. "
-            f"Expected: {', '.join(required)}"
-        )
-    if not isinstance(parsed["room_id"], str) or not parsed["room_id"].strip():
-        raise ValueError("convene_spec.room_id must be a non-empty string")
-    if not isinstance(parsed["participants"], list) or not parsed["participants"]:
-        raise ValueError("convene_spec.participants must be a non-empty list")
-    if not all(isinstance(p, str) and p.strip() for p in parsed["participants"]):
-        raise ValueError("convene_spec.participants must be a list of strings")
-    if not isinstance(parsed["phases"], list) or not parsed["phases"]:
-        raise ValueError("convene_spec.phases must be a non-empty list")
-    for i, phase in enumerate(parsed["phases"]):
-        if not isinstance(phase, dict):
-            raise ValueError(f"convene_spec.phases[{i}] must be a dict")
-        if "name" not in phase or "prompt" not in phase:
-            raise ValueError(
-                f"convene_spec.phases[{i}] must have 'name' and 'prompt'"
-            )
-    if not isinstance(parsed["transcript_output_path"], str):
-        raise ValueError("convene_spec.transcript_output_path must be a string")
-
-
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -2945,7 +2862,6 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
-    convene_spec: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -3001,31 +2917,6 @@ def create_task(
         branch_name = str(branch_name).strip() or None
     if branch_name and workspace_kind != "worktree":
         raise ValueError("branch_name is only valid for worktree workspaces")
-
-    # Convene ticket type: when a convene_spec is provided, force the
-    # assignee to the boardroom sentinel and reject any single-persona
-    # assignee the caller may have tried to set. This makes it structurally
-    # impossible to file an arch-weight ticket to a single persona — the
-    # schema itself refuses. The convene_spec must be valid JSON containing
-    # at minimum {room_id, participants, phases, transcript_output_path}.
-    is_convene = convene_spec is not None
-    if is_convene:
-        _validate_convene_spec(convene_spec)
-        if assignee and assignee != CONVENE_ASSIGNEE:
-            raise ValueError(
-                f"convene tickets must use assignee={CONVENE_ASSIGNEE!r} "
-                f"(got {assignee!r}). Convene IS the routing — no single "
-                f"persona assignee is allowed. Use --type=convene without "
-                f"--assignee, or --assignee={CONVENE_ASSIGNEE}."
-            )
-        assignee = CONVENE_ASSIGNEE
-        # Convene tickets don't use model/provider overrides or skills —
-        # the convene-worker is a lightweight HTTP bridge, not an LLM agent.
-        model_override = None
-        provider_override = None
-        skills_list = None
-        goal_mode = False
-        goal_max_turns = None
 
     # Inherit the board's scoped project when the caller didn't name one, so a
     # project-scoped board anchors every new task to that project's repo
@@ -3275,8 +3166,8 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
-                        goal_mode, goal_max_turns, session_id, convene_spec
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3301,7 +3192,6 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
-                        convene_spec,
                     ),
                 )
                 for pid in parents:
@@ -3326,7 +3216,6 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
-                        "convene": is_convene or None,
                     },
                 )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
@@ -9034,31 +8923,11 @@ def _dispatch_once_locked(
         # subprocess would crash on startup, get reaped as a zombie,
         # the task would loop back to ``ready`` on next tick, and we'd
         # burn CPU forever (#kanban-dispatcher-crash-loop 2026-05-05).
-        # Convene tickets bypass this check: their assignee is the
-        # sentinel ``livekit-boardroom`` (not a real profile) and they
-        # route to the convene-worker, not ``hermes -p``.
         try:
             from hermes_cli.profiles import profile_exists  # local import: avoids cycle
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        # Fetch the full task row to check convene_spec before the
-        # profile_exists gate. Convene tasks use a sentinel assignee
-        # that is intentionally not a real profile.
-        _row_task = get_task(conn, row["id"])
-        _is_convene = _row_task is not None and bool(_row_task.convene_spec)
-        # Check the convene_enabled config flag. When false, convene
-        # routing is disabled — convene tickets fall through to the
-        # profile_exists skip and sit idle (rollback without schema
-        # changes).
-        _convene_enabled = True
-        try:
-            from hermes_cli.config import load_config_readonly
-            _cfg = load_config_readonly()
-            _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
-            _convene_enabled = bool(_kanban_cfg.get("convene_enabled", True)) if isinstance(_kanban_cfg, dict) else True
-        except Exception:
-            pass
-        if profile_exists is not None and not (_is_convene and _convene_enabled) and not profile_exists(row_assignee):
+        if profile_exists is not None and not profile_exists(row_assignee):
             # Bucket separately from skipped_unassigned: the operator
             # cannot fix this by assigning a profile (the assignee IS the
             # intended owner — a terminal lane). Health telemetry uses
@@ -9134,31 +9003,19 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # ── Convene routing ─────────────────────────────────────────────
-        # Convene tickets route to the convene-worker (an HTTP bridge to
-        # the boardroom driver), NOT the LLM-agent ``hermes -p`` worker.
-        # The convene-worker is spawned as a lightweight subprocess that
-        # runs ``python -c "from hermes_cli.convene_worker import ..."``
-        # — no LLM cost, no profile, no hermes CLI. It POSTs the spec to
-        # the driver, polls, saves the transcript, and emits child tickets.
-        # Gated by kanban.convene_enabled config flag.
-        if claimed.convene_spec and _convene_enabled:
-            _spawn = _convene_spawn
-            target_node = None
-        else:
-            # Determine target node via cluster router (advisory — LLM may
-            # route to a different node). When None, spawn locally (default).
-            target_node = None
-            if node_router is not None:
-                try:
-                    target_node = node_router(claimed.id, claimed.assignee or "")
-                except Exception as exc:
-                    logger.warning(
-                        "[dispatch] node_router failed for %s: %s; "
-                        "spawning locally", claimed.id, exc,
-                    )
-                    target_node = None
-            _spawn = spawn_fn if spawn_fn is not None else _default_spawn
+        # Determine target node via cluster router (advisory — LLM may route
+        # to a different node). When None, spawn locally (default path).
+        target_node = None
+        if node_router is not None:
+            try:
+                target_node = node_router(claimed.id, claimed.assignee or "")
+            except Exception as exc:
+                logger.warning(
+                    "[dispatch] node_router failed for %s: %s; "
+                    "spawning locally", claimed.id, exc,
+                )
+                target_node = None
+        _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
             # (task, workspace). Test stubs in the suite rely on that.
@@ -9845,78 +9702,6 @@ def _default_spawn(
     # handle is kept alive by the child's inheritance.  The parent's
     # reference goes out of scope and is GC'd, but the OS-level FD stays
     # open in the child until the child exits.
-    return proc.pid
-
-
-def _convene_spawn(
-    task: Task,
-    workspace: str,
-    *,
-    board: Optional[str] = None,
-    target_node: Optional[str] = None,
-) -> Optional[int]:
-    """Spawn the convene-worker as a lightweight subprocess.
-
-    The convene-worker is a pure HTTP + JSON bridge — no LLM cost, no
-    ``hermes`` CLI, no profile. It runs
-    ``python -m hermes_cli.convene_worker <task_id> [board]`` and:
-
-    1. Reads ``convene_spec`` from the task row.
-    2. POSTs the spec to the boardroom driver.
-    3. Polls for completion.
-    4. Saves the transcript.
-    5. Emits child tickets from the transcript's ``child_tickets`` section.
-    6. Completes the task via ``complete_task``.
-
-    The subprocess writes to the same per-task log as ``_default_spawn``
-    so ``hermes kanban log`` picks it up identically.
-    """
-    import subprocess
-    import sys
-
-    env = dict(os.environ)
-    # Same session-source tagging as _default_spawn so the convene-worker
-    # session is labeled correctly in state.db.
-    env["HERMES_SESSION_SOURCE"] = "kanban"
-    env["HERMES_KANBAN_TASK"] = task.id
-    if workspace and os.path.isabs(workspace) and os.path.isdir(workspace):
-        env["TERMINAL_CWD"] = workspace
-    # Pin the board + DB path so the subprocess resolves the right DB.
-    env["HERMES_KANBAN_DB"] = str(kanban_db_path(board=board))
-    env["HERMES_KANBAN_BOARD"] = _normalize_board_slug(board) or get_current_board()
-    env["HERMES_KANBAN_WORKSPACES_ROOT"] = str(workspaces_root(board=board))
-
-    log_dir = worker_logs_dir(board=board)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{task.id}.log"
-    rotate_bytes, backup_count = worker_log_rotation_config()
-    _rotate_worker_log(log_path, rotate_bytes, backup_count)
-
-    cmd = [
-        sys.executable,
-        "-m",
-        "hermes_cli.convene_worker",
-        task.id,
-    ]
-    if board:
-        cmd.append(board)
-
-    log_f = open(log_path, "ab")
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=workspace if os.path.isdir(workspace) else None,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-            creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
-        )
-    except FileNotFoundError:
-        log_f.close()
-        raise RuntimeError("Python executable not found for convene-worker spawn")
-    # Keep log_f alive in the child (same rationale as _default_spawn).
     return proc.pid
 
 

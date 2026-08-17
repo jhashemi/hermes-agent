@@ -1280,49 +1280,8 @@ def _handle_create(args: dict, **kw) -> str:
     title = args.get("title")
     if not title or not str(title).strip():
         return tool_error("title is required")
-    # Convene ticket type: when type=convene, the task routes to the
-    # convene-worker (HTTP bridge to boardroom driver) instead of an
-    # LLM-agent worker. The assignee is forced to ``livekit-boardroom``
-    # so filing an arch-weight ticket to a single persona is structurally
-    # impossible.
-    from hermes_cli import kanban_db as _kb_module
-    task_type = (args.get("type") or "default").strip().lower()
-    if task_type not in ("default", "convene"):
-        return tool_error(
-            f"type must be 'default' or 'convene', got {task_type!r}"
-        )
-    is_convene = task_type == "convene"
-    convene_spec = args.get("convene_spec")
-    if is_convene and not convene_spec:
-        return tool_error(
-            "convene_spec is required when type=convene. Provide a JSON "
-            "object with {room_id, participants, phases, "
-            "transcript_output_path}."
-        )
-    if convene_spec is not None and not is_convene:
-        return tool_error(
-            "convene_spec was provided but type is not 'convene'. "
-            "Set type='convene' to file a convene ticket."
-        )
-    # Normalize convene_spec to a JSON string for storage.
-    if convene_spec is not None and not isinstance(convene_spec, str):
-        import json as _json
-        try:
-            convene_spec = _json.dumps(convene_spec)
-        except (TypeError, ValueError) as e:
-            return tool_error(f"convene_spec must be JSON-serializable: {e}")
     assignee = args.get("assignee")
-    if is_convene:
-        # Force the boardroom sentinel; reject any single-persona assignee.
-        if assignee and assignee.strip().lower() != _kb_module.CONVENE_ASSIGNEE:
-            return tool_error(
-                f"convene tickets must use assignee={_kb_module.CONVENE_ASSIGNEE!r} "
-                f"(got {assignee!r}). Convene IS the routing — no single "
-                f"persona assignee is allowed. Omit --assignee or set "
-                f"assignee='{_kb_module.CONVENE_ASSIGNEE}'."
-            )
-        assignee = _kb_module.CONVENE_ASSIGNEE
-    elif not assignee:
+    if not assignee:
         return tool_error(
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
@@ -1430,7 +1389,6 @@ def _handle_create(args: dict, **kw) -> str:
                 initial_status=str(initial_status),
                 created_by=os.environ.get("HERMES_PROFILE") or "worker",
                 session_id=session_id,
-                convene_spec=convene_spec,
             )
             new_task = kb.get_task(conn, new_tid)
             subscribed = _maybe_auto_subscribe(conn, new_tid)
@@ -2111,9 +2069,8 @@ KANBAN_CREATE_SCHEMA = {
                 "description": (
                     "Profile name that should execute this task "
                     "(e.g. 'researcher-a', 'reviewer', 'writer'). "
-                    "Required for default-type tasks — tasks without an "
-                    "assignee are never dispatched. For type=convene, omit "
-                    "this (the assignee is forced to 'livekit-boardroom')."
+                    "Required — tasks without an assignee are never "
+                    "dispatched."
                 ),
             },
             "body": {
@@ -2265,51 +2222,8 @@ KANBAN_CREATE_SCHEMA = {
                 ),
             },
             "board": _board_schema_prop(),
-            "type": {
-                "type": "string",
-                "enum": ["default", "convene"],
-                "description": (
-                    "Ticket type. 'default' (omit) = LLM-agent worker. "
-                    "'convene' = convene the boardroom via HTTP POST to the "
-                    "boardroom driver — the convene-worker is a lightweight "
-                    "HTTP bridge (no LLM cost), and the assignee is forced to "
-                    "'livekit-boardroom'. Use 'convene' for architectural-"
-                    "weight decisions that need multi-persona deliberation, "
-                    "NOT a single-persona assignee. Requires convene_spec."
-                ),
-            },
-            "convene_spec": {
-                "type": "object",
-                "description": (
-                    "Boardroom spec for type=convene tickets. Required when "
-                    "type='convene'. Must contain: room_id (string), "
-                    "participants (list of profile names), phases (list of "
-                    "{name, phase_type, speaker, prompt, timeout_s}), and "
-                    "transcript_output_path (string). The convene-worker "
-                    "POSTs this to the boardroom driver, polls for "
-                    "completion, ingests the transcript, and auto-emits "
-                    "child tickets from the transcript's child_tickets "
-                    "section."
-                ),
-                "properties": {
-                    "room_id": {"type": "string"},
-                    "participants": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                    },
-                    "phases": {
-                        "type": "array",
-                        "items": {"type": "object"},
-                    },
-                    "transcript_output_path": {"type": "string"},
-                },
-                "required": [
-                    "room_id", "participants", "phases",
-                    "transcript_output_path",
-                ],
-            },
         },
-        "required": ["title"],
+        "required": ["title", "assignee"],
     },
 }
 

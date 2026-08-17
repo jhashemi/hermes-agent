@@ -399,15 +399,6 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
                           help="Initial card status. Use 'blocked' for cards "
                                "that require immediate human ops (R3 gate) "
                                "to skip the brief running-to-blocked transition.")
-    p_create.add_argument("--type", choices=["default", "convene"],
-                          default="default", dest="task_type",
-                          help="Ticket type: 'default' = LLM-agent worker, "
-                               "'convene' = convene the boardroom via HTTP POST "
-                               "(assignee forced to 'livekit-boardroom')")
-    p_create.add_argument("--convene-spec", default=None, dest="convene_spec",
-                          help="JSON boardroom spec for --type=convene. "
-                               "Must contain: {room_id, participants, phases, "
-                               "transcript_output_path}")
     p_create.add_argument("--json", action="store_true", help="Emit JSON output")
 
     # --- swarm ---
@@ -1512,41 +1503,12 @@ def _cmd_create(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    # Convene ticket type: validate --type/--convene-spec consistency.
-    task_type = getattr(args, "task_type", "default")
-    convene_spec = getattr(args, "convene_spec", None)
-    is_convene = task_type == "convene"
-    if is_convene and not convene_spec:
-        print(
-            "kanban: --type=convene requires --convene-spec (JSON boardroom spec "
-            "with {room_id, participants, phases, transcript_output_path})",
-            file=sys.stderr,
-        )
-        return 2
-    if convene_spec is not None and not is_convene:
-        print(
-            "kanban: --convene-spec was provided but --type is not 'convene",
-            file=sys.stderr,
-        )
-        return 2
-    # Force the convene assignee so the CLI path and the tool path agree.
-    convene_assignee = None
-    if is_convene:
-        if args.assignee and args.assignee.strip().lower() != kb.CONVENE_ASSIGNEE:
-            print(
-                f"kanban: convene tickets must use assignee={kb.CONVENE_ASSIGNEE!r} "
-                f"(got {args.assignee!r}). Convene IS the routing — no single "
-                f"persona assignee is allowed.",
-                file=sys.stderr,
-            )
-            return 2
-        convene_assignee = kb.CONVENE_ASSIGNEE
     with kb.connect_closing() as conn:
         task_id = kb.create_task(
             conn,
             title=args.title,
             body=args.body,
-            assignee=convene_assignee or args.assignee,
+            assignee=args.assignee,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind,
             workspace_path=ws_path,
@@ -1565,7 +1527,6 @@ def _cmd_create(args: argparse.Namespace) -> int:
             goal_mode=bool(getattr(args, "goal_mode", False)),
             goal_max_turns=getattr(args, "goal_max_turns", None),
             initial_status=getattr(args, "initial_status", "running"),
-            convene_spec=convene_spec,
         )
         task = kb.get_task(conn, task_id)
     if getattr(args, "json", False):
