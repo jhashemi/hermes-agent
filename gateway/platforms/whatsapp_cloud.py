@@ -444,19 +444,39 @@ class WhatsAppCloudAdapter(WhatsAppBehaviorMixin, BasePlatformAdapter):
             timeout=30.0, limits=platform_httpx_limits()
         )
 
-        # Inbound webhook server.
-        # client_max_size backstops the bounded reader in _handle_webhook —
-        # aiohttp enforces the cap on request.read()/post() paths too
-        # (#58536/#58902/#59180 pattern).
-        app = web.Application(client_max_size=WEBHOOK_MAX_BODY_BYTES)
-        app.router.add_get(self._health_path, self._handle_health)
-        app.router.add_get(self._webhook_path, self._handle_verify)
-        app.router.add_post(self._webhook_path, self._handle_webhook)
+        # SESSION-CLEANUP-INVARIANT (KR-1): Wrap the webhook server setup in
+        # try/except so that if _runner.setup() or site.start() fails, we clean
+        # up the already-created _http_client before returning. Without this,
+        # a port-bind or runner failure leaves an httpx.AsyncClient orphaned
+        # (connection pool + FD leak).
+        try:
+            # Inbound webhook server.
+            # client_max_size backstops the bounded reader in _handle_webhook —
+            # aiohttp enforces the cap on request.read()/post() paths too
+            # (#58536/#58902/#59180 pattern).
+            app = web.Application(client_max_size=WEBHOOK_MAX_BODY_BYTES)
+            app.router.add_get(self._health_path, self._handle_health)
+            app.router.add_get(self._webhook_path, self._handle_verify)
+            app.router.add_post(self._webhook_path, self._handle_webhook)
 
-        self._runner = web.AppRunner(app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, self._webhook_host, self._webhook_port)
-        await site.start()
+            self._runner = web.AppRunner(app)
+            await self._runner.setup()
+            site = web.TCPSite(self._runner, self._webhook_host, self._webhook_port)
+            await site.start()
+        except Exception as exc:
+            logger.error("[whatsapp_cloud] webhook server setup failed: %s", exc, exc_info=True)
+            if self._http_client is not None:
+                try:
+                    await self._http_client.aclose()
+                except Exception:
+                    pass
+                self._http_client = None
+            self._set_fatal_error(
+                "whatsapp_cloud_webhook_setup_error",
+                str(exc),
+                retryable=True,
+            )
+            return False
 
         self._mark_connected()
         logger.info(

@@ -16,12 +16,81 @@ import asyncio
 import logging
 import hmac
 import os
+import re
 import time
 import threading
 from functools import lru_cache
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# INPUT-INVARIANT-01 (KR-1): Bounded chat_id validation
+#
+# chat_id is an opaque platform identifier (Telegram numeric, Discord snowflake,
+# WhatsApp phone ID, etc.) carried in session_id or agent routing. It must be
+# bounded to prevent:
+#   - Resource exhaustion (unbounded string → memory DoS in session DB indexes)
+#   - Injection (control characters, SQL/NoSQL payloads in routing keys)
+#   - Log forging (newlines in chat_id → agent.log manipulation)
+#
+# Invariant:
+#   max_length = 256 (covers Discord snowflake ~20 chars, Telegram ~12, with
+#   generous headroom for composite keys like "telegram:user:12345:thread:67890")
+#   charset = printable ASCII excluding control chars and shell metacharacters
+#   format = non-empty after strip, no newlines, no null bytes
+#
+# Enforced at 2 layers:
+#   1. API layer (ExecuteRequest.session_id validator)
+#   2. Queue consumer layer (validate_chat_id called before routing)
+# ---------------------------------------------------------------------------
+
+CHAT_ID_MAX_LENGTH = 256
+_CHAT_ID_ALLOWED_CHARS = re.compile(
+    r"^[a-zA-Z0-9_\-.:/@]+$"
+)
+
+
+def validate_chat_id(chat_id: Optional[str], *, field_name: str = "chat_id") -> Optional[str]:
+    """Validate and normalize a chat_id against the documented invariant.
+
+    Returns the stripped, validated chat_id, or None if the input is None.
+    Raises ValueError if the input violates any invariant:
+      - exceeds CHAT_ID_MAX_LENGTH
+      - contains control characters, newlines, null bytes
+      - contains characters outside the allowed charset
+      - is empty after stripping
+
+    This function is the single source of truth for chat_id validation —
+    both the API layer (Pydantic validator) and the queue consumer layer
+    call it, ensuring defense in depth.
+    """
+    if chat_id is None:
+        return None
+    if not isinstance(chat_id, str):
+        raise ValueError(f"{field_name} must be a string")
+
+    stripped = chat_id.strip()
+    if not stripped:
+        raise ValueError(f"{field_name} cannot be empty or whitespace")
+
+    if len(stripped) > CHAT_ID_MAX_LENGTH:
+        raise ValueError(
+            f"{field_name} exceeds maximum length of {CHAT_ID_MAX_LENGTH} characters"
+        )
+
+    # Reject control characters, null bytes, newlines (log forging / injection)
+    if any(ord(c) < 32 or ord(c) == 127 for c in stripped):
+        raise ValueError(f"{field_name} contains control characters")
+
+    # Enforce charset: alphanumeric, underscore, hyphen, dot, colon, slash, at
+    if not _CHAT_ID_ALLOWED_CHARS.match(stripped):
+        raise ValueError(
+            f"{field_name} contains disallowed characters "
+            f"(allowed: alphanumeric, _-./:@)"
+        )
+
+    return stripped
 
 
 # P3-005: RATE LIMITING — Per-API-key rate limiter
@@ -294,9 +363,18 @@ async def create_remote_api_blueprint(app, gateway_runner):
             @field_validator('session_id', mode='before')
             @classmethod
             def validate_session_id(cls, v):
-                """Validate session_id: optional, but if provided must be non-empty."""
+                """Validate session_id (carries chat_id): bounded by INPUT-INVARIANT-01.
+
+                Enforces chat_id invariant at the API layer:
+                - max 256 chars
+                - no control characters / newlines / null bytes
+                - allowed charset: alphanumeric, _-./:@
+                - empty → None (optional field)
+                """
                 if v is not None and isinstance(v, str):
                     v = v.strip() or None  # Convert empty string to None
+                    if v is not None:
+                        validate_chat_id(v, field_name="session_id")
                 return v
             
             model_config = {
@@ -388,6 +466,21 @@ async def create_remote_api_blueprint(app, gateway_runner):
             agent_id = request.agent_id
             session_id = request.session_id or "remote-exec"
 
+            # INPUT-INVARIANT-01 (KR-1): Layer-2 enforcement at the queue
+            # consumer boundary. Even if the Pydantic validator passes,
+            # re-validate session_id (which carries chat_id) here before it
+            # reaches the orchestrator routing. Defense in depth: the API
+            # layer (Pydantic) is layer 1, this is layer 2.
+            try:
+                validate_chat_id(session_id, field_name="session_id")
+            except ValueError as ve:
+                logger.warning(
+                    "[RemoteAPI] Rejected session_id at layer-2: %s", ve
+                )
+                raise HTTPException(
+                    status_code=400, detail=str(ve)
+                ) from ve
+
             try:
                 logger.info(
                     f"[RemoteAPI] Executing prompt from {x_hermes_user} "
@@ -455,8 +548,24 @@ async def create_remote_api_blueprint(app, gateway_runner):
                 )
 
         @app.get("/health")
-        async def health_check():
-            """Simple health check endpoint."""
+        async def health_check(
+            x_hermes_key: Optional[str] = Header(None),
+        ):
+            """Simple health check endpoint.
+
+            AUTH-GATE-ZERO (KR-1): Even health checks must be authenticated on
+            remote API surfaces. An unauthenticated /health leaks deployment
+            fingerprints (instance name, timestamp, uptime) to scanners and
+            is a standard reconnaissance vector. We return 401 if no key is
+            configured (fail-closed) or if the key is missing/invalid.
+
+            A minimal unauthenticated liveness probe is intentionally NOT
+            provided here — operators should use the dashboard's own
+            /api/health (loopback-bound) or a TCP-level check instead.
+            """
+            if not verify_api_key(x_hermes_key):
+                logger.warning("Unauthorized health check from unknown")
+                raise HTTPException(status_code=401, detail="Unauthorized")
             return {
                 "status": "ok",
                 "instance": "hermes",

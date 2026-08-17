@@ -1300,30 +1300,55 @@ class WeixinAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("[%s] Token lock unavailable (non-fatal): %s", self.name, exc)
 
-        self._poll_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector())
-        # Disable aiohttp's built-in ClientTimeout (total=None) to prevent
-        # "Timeout context manager should be used inside a task" errors when
-        # send() is invoked via asyncio.run_coroutine_threadsafe() from cron.
-        # Timeout is managed externally via asyncio.wait_for() in _api_post/_api_get.
-        _no_aiohttp_timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
-        self._send_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector(), timeout=_no_aiohttp_timeout)
-        self._token_store.restore(self._account_id)
-        self._poll_task = asyncio.create_task(self._poll_loop(), name="weixin-poll")
-        self._mark_connected()
-        _LIVE_ADAPTERS[self._token] = self
-        logger.info("[%s] Connected account=%s base=%s", self.name, _safe_id(self._account_id), self._base_url)
-        if self._group_policy != "disabled":
-            logger.warning(
-                "[%s] WEIXIN_GROUP_POLICY=%s is set, but QR-login connects an iLink bot "
-                "identity (e.g. ...@im.bot) which typically cannot be invited into ordinary "
-                "WeChat groups. iLink usually does not deliver ordinary-group events for "
-                "these accounts, so group messages may never reach Hermes regardless of this "
-                "policy. If group delivery doesn't work, the limitation is on the iLink side, "
-                "not in Hermes.",
-                self.name,
-                self._group_policy,
-            )
-        return True
+        # SESSION-CLEANUP-INVARIANT (KR-1): Wrap session creation + task
+        # scheduling in a try/except so that if ANY step after session creation
+        # fails, we clean up the HTTP sessions before returning. Without this,
+        # a failure in _token_store.restore() or _poll_loop task creation leaves
+        # two aiohttp.ClientSession objects orphaned (socket + FD leak).
+        try:
+            self._poll_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector())
+            # Disable aiohttp's built-in ClientTimeout (total=None) to prevent
+            # "Timeout context manager should be used inside a task" errors when
+            # send() is invoked via asyncio.run_coroutine_threadsafe() from cron.
+            # Timeout is managed externally via asyncio.wait_for() in _api_post/_api_get.
+            _no_aiohttp_timeout = aiohttp.ClientTimeout(total=None, connect=None, sock_connect=None, sock_read=None)
+            self._send_session = aiohttp.ClientSession(trust_env=True, connector=_make_ssl_connector(), timeout=_no_aiohttp_timeout)
+            self._token_store.restore(self._account_id)
+            self._poll_task = asyncio.create_task(self._poll_loop(), name="weixin-poll")
+            self._mark_connected()
+            _LIVE_ADAPTERS[self._token] = self
+            logger.info("[%s] Connected account=%s base=%s", self.name, _safe_id(self._account_id), self._base_url)
+            if self._group_policy != "disabled":
+                logger.warning(
+                    "[%s] WEIXIN_GROUP_POLICY=%s is set, but QR-login connects an iLink bot "
+                    "identity (e.g. ...@im.bot) which typically cannot be invited into ordinary "
+                    "WeChat groups. iLink usually does not deliver ordinary-group events for "
+                    "these accounts, so group messages may never reach Hermes regardless of this "
+                    "policy. If group delivery doesn't work, the limitation is on the iLink side, "
+                    "not in Hermes.",
+                    self.name,
+                    self._group_policy,
+                )
+            return True
+        except Exception as exc:
+            # SESSION-CLEANUP-INVARIANT: clean up any sessions we created
+            # before the exception, then re-raise as a fatal error.
+            logger.error("[%s] connect() failed: %s — cleaning up sessions", self.name, exc, exc_info=True)
+            if self._poll_session and not self._poll_session.closed:
+                try:
+                    await self._poll_session.close()
+                except Exception:
+                    pass
+            self._poll_session = None
+            if self._send_session and not self._send_session.closed:
+                try:
+                    await self._send_session.close()
+                except Exception:
+                    pass
+            self._send_session = None
+            self._set_fatal_error("weixin_connect_error", str(exc), retryable=True)
+            self._release_platform_lock()
+            return False
 
     async def disconnect(self) -> None:
         _LIVE_ADAPTERS.pop(self._token, None)
