@@ -300,6 +300,177 @@ class TestPluginLoading:
         assert "exclusive" in (entry.error or "").lower()
 
 
+class TestDefaultStateResolution:
+    """VFE-INFRA-03: opt-out-by-default via ``default_state: enabled``.
+
+    A plugin whose ``plugin.yaml`` sets ``default_state: enabled`` must
+    load in a fresh profile with no ``plugins.enabled`` allow-list, and
+    must still be turnable-off via ``plugins.disabled``. Plugins without
+    the field (or with ``default_state: disabled``) preserve the historic
+    opt-in behavior.
+    """
+
+    def test_default_state_enabled_loads_without_allowlist_entry(
+        self, tmp_path, monkeypatch
+    ):
+        """A ``default_state: enabled`` plugin loads even with no ``plugins:`` section."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_out_plugin",
+            manifest_extra={"default_state": "enabled"},
+            auto_enable=False,  # Do NOT write into plugins.enabled.
+        )
+        # Also ensure no config.yaml exists (fresh-profile scenario).
+        hermes_home = tmp_path / "hermes_test"
+        cfg_path = hermes_home / "config.yaml"
+        if cfg_path.exists():
+            cfg_path.unlink()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert "opt_out_plugin" in mgr._plugins
+        entry = mgr._plugins["opt_out_plugin"]
+        assert entry.enabled, (
+            f"Expected default_state=enabled plugin to load, got error={entry.error!r}"
+        )
+        assert entry.manifest.default_state == "enabled"
+
+    def test_default_state_enabled_respects_disabled_denylist(
+        self, tmp_path, monkeypatch
+    ):
+        """Operator can still opt-out a default-enabled plugin via ``plugins.disabled``."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_out_plugin",
+            manifest_extra={"default_state": "enabled"},
+            auto_enable=False,
+        )
+        hermes_home = tmp_path / "hermes_test"
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump({"plugins": {"disabled": ["opt_out_plugin"]}})
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert "opt_out_plugin" in mgr._plugins
+        entry = mgr._plugins["opt_out_plugin"]
+        assert not entry.enabled, (
+            "Expected disabled plugin to be skipped, "
+            f"got enabled={entry.enabled}, error={entry.error!r}"
+        )
+        assert "disabled" in (entry.error or "").lower()
+
+    def test_default_state_disabled_requires_explicit_enable(
+        self, tmp_path, monkeypatch
+    ):
+        """The historic default (opt-in only) is preserved when the field is absent."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_in_plugin",
+            # No manifest_extra → no default_state key → default 'disabled'.
+            auto_enable=False,
+        )
+        hermes_home = tmp_path / "hermes_test"
+        cfg_path = hermes_home / "config.yaml"
+        if cfg_path.exists():
+            cfg_path.unlink()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        assert "opt_in_plugin" in mgr._plugins
+        entry = mgr._plugins["opt_in_plugin"]
+        assert not entry.enabled
+        assert entry.manifest.default_state == "disabled"
+        assert "not enabled" in (entry.error or "").lower()
+
+    def test_default_state_enabled_via_allowlist_still_works(
+        self, tmp_path, monkeypatch
+    ):
+        """Belt-and-suspenders: naming a default-enabled plugin in
+        ``plugins.enabled`` is a no-op (still enabled, no dup)."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_out_plugin",
+            manifest_extra={"default_state": "enabled"},
+            auto_enable=True,  # explicitly listed in plugins.enabled
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        entry = mgr._plugins["opt_out_plugin"]
+        assert entry.enabled
+        assert entry.manifest.default_state == "enabled"
+
+    def test_unknown_default_state_falls_back_to_disabled(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Invalid ``default_state`` values log a warning and default to opt-in."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "typo_plugin",
+            manifest_extra={"default_state": "on"},  # not 'enabled'/'disabled'
+            auto_enable=False,
+        )
+        hermes_home = tmp_path / "hermes_test"
+        cfg_path = hermes_home / "config.yaml"
+        if cfg_path.exists():
+            cfg_path.unlink()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+            mgr = PluginManager()
+            mgr.discover_and_load()
+
+        entry = mgr._plugins["typo_plugin"]
+        assert entry.manifest.default_state == "disabled"
+        assert not entry.enabled
+        assert any(
+            "default_state" in rec.getMessage() and "on" in rec.getMessage()
+            for rec in caplog.records
+        ), (
+            "Expected a warning about the unknown default_state value, "
+            f"got: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_list_plugins_surfaces_default_state(
+        self, tmp_path, monkeypatch
+    ):
+        """``hermes plugins list`` output includes ``default_state`` per entry."""
+        plugins_dir = tmp_path / "hermes_test" / "plugins"
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_out_plugin",
+            manifest_extra={"default_state": "enabled"},
+            auto_enable=False,
+        )
+        _make_plugin_dir(
+            plugins_dir,
+            "opt_in_plugin",
+            auto_enable=False,
+        )
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
+
+        mgr = PluginManager()
+        mgr.discover_and_load()
+
+        by_key = {row["key"]: row for row in mgr.list_plugins()}
+        assert by_key["opt_out_plugin"]["default_state"] == "enabled"
+        assert by_key["opt_in_plugin"]["default_state"] == "disabled"
+
+
 # ── TestPluginHooks ────────────────────────────────────────────────────────
 
 
