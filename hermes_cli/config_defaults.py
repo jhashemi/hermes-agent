@@ -2217,6 +2217,18 @@ DEFAULT_CONFIG = {
         # large bulk-load of triage tasks from spending a burst of aux
         # LLM calls in one tick. Excess tasks defer to the next tick.
         "auto_decompose_per_tick": 3,
+        # Convene ticket type (type=convene). When true, the dispatcher
+        # routes convene tickets to the convene-worker (an HTTP bridge
+        # to the boardroom driver) instead of an LLM-agent worker. Set
+        # to false to disable convene routing — convene tickets will
+        # fall through to the normal profile_exists skip (they'll sit
+        # in ready and never spawn, effectively a rollback without
+        # schema changes).
+        "convene_enabled": True,
+        # Boardroom driver URL. Override only if the driver runs on a
+        # non-default host/port. Can also be set via
+        # HERMES_CONVENE_DRIVER_URL env var (takes priority).
+        "convene_driver_url": "http://localhost:8196",
         # Stale detection: running tasks that have exceeded this many
         # seconds without a heartbeat (since ``last_heartbeat_at``) are
         # auto-reclaimed to ``ready`` on the next dispatcher tick. The
