@@ -4743,32 +4743,6 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
-class MissingWaitingForError(ValueError):
-    """Raised by ``block_task`` when ``waiting_for`` names a ticket that
-    doesn't exist.
-
-    Mirrors :class:`HallucinatedCardsError`: the phantom id list is on
-    ``.phantom`` for structured access, and the class remains a
-    ``ValueError`` so existing tool-error handlers treat it as a
-    recoverable user error rather than a crash. VFE-NERVE-01 introduces
-    this so the auto-heal loop has something enforceable to reason
-    about — a block claiming to wait on ticket X that doesn't exist is
-    an incoherent block, not a hint the kernel should honor.
-    """
-
-    def __init__(self, phantom: list[str], blocking_task_id: str):
-        self.phantom = list(phantom)
-        self.blocking_task_id = blocking_task_id
-        super().__init__(
-            f"block blocked: waiting_for references ticket(s) that do "
-            f"not exist: {', '.join(phantom)}"
-        )
-
-
-# Cascade unblock guardrails: human-required block kinds cannot cascade.
-_CASCADE_HUMAN_GATED_BLOCK_KINDS = frozenset({"capability", "needs_input"})
-
-
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4777,10 +4751,10 @@ def complete_task(
     summary: Optional[str] = None,
     metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None,
+    expected_run_id: Optional[int] = None,
     unblocks: Optional[Iterable[str]] = None,
     commit_hash: Optional[str] = None,
     test_run_id: Optional[str] = None,
-    expected_run_id: Optional[int] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -4809,24 +4783,6 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
-
-    ``unblocks`` / ``commit_hash`` / ``test_run_id`` (all optional, all
-    schema-additive per VFE-NERVE-01) let a completing worker publish
-    structured handoff facts that downstream automation can query
-    without prose-scanning ``summary``:
-
-    * ``unblocks`` — a list of ticket ids this completion is expected
-      to unblock. Every id must exist (else :class:`HallucinatedCardsError`
-      is raised, same failure model as ``created_cards``); ids that
-      exist but are NOT currently in ``blocked``/``todo`` are recorded
-      on the ``completed`` event as ``unblocks_not_blocked`` so the
-      kernel can warn without breaking the completion.
-    * ``commit_hash`` — the canonical fix commit for this task.
-    * ``test_run_id`` — the CI run id that provides green-evidence
-      for this fix.
-
-    All three ride the ``completed`` event payload alongside the
-    existing ``verified_cards`` / ``artifacts`` fields.
     """
     now = int(time.time())
 
@@ -4856,57 +4812,6 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
-
-    # Gate: verify ``unblocks`` BEFORE the main write txn. Same failure
-    # model as ``created_cards`` — a phantom id blocks the completion
-    # (auditable via ``completion_blocked_hallucination`` w/ an
-    # ``unblocks_phantom`` marker). Ids that exist but aren't in a
-    # blockable status are non-fatal: they're recorded on the completed
-    # event as ``unblocks_not_blocked`` so a downstream rechecker can
-    # warn without breaking the completion. See VFE-NERVE-01.
-    unblocks_verified: list[str] = []
-    unblocks_not_blocked: list[str] = []
-    if unblocks:
-        unblocks_list = [str(u).strip() for u in unblocks if str(u).strip()]
-        # Dedupe while preserving order.
-        _seen_u: set[str] = set()
-        unblocks_ordered: list[str] = []
-        for uid in unblocks_list:
-            if uid not in _seen_u:
-                _seen_u.add(uid)
-                unblocks_ordered.append(uid)
-        if unblocks_ordered:
-            phantom_unblocks = _find_missing_parents(conn, unblocks_ordered)
-            if phantom_unblocks:
-                with write_txn(conn):
-                    _append_event(
-                        conn, task_id, "completion_blocked_hallucination",
-                        {
-                            "unblocks_phantom": phantom_unblocks,
-                            "unblocks_claimed": unblocks_ordered,
-                            "summary_preview": (
-                                (summary or result or "").strip().splitlines()[0][:200]
-                                if (summary or result)
-                                else None
-                            ),
-                        },
-                    )
-                raise HallucinatedCardsError(phantom_unblocks, task_id)
-            # All ids exist — check which are NOT currently blocked/todo.
-            _placeholders = ",".join("?" * len(unblocks_ordered))
-            rows = conn.execute(
-                f"SELECT id, status FROM tasks WHERE id IN ({_placeholders})",
-                tuple(unblocks_ordered),
-            ).fetchall()
-            status_by_id = {r["id"]: r["status"] for r in rows}
-            for uid in unblocks_ordered:
-                if status_by_id.get(uid) in ("blocked", "todo"):
-                    unblocks_verified.append(uid)
-                else:
-                    unblocks_not_blocked.append(uid)
-    # Normalize the plain string fields.
-    commit_hash_str = str(commit_hash).strip() if commit_hash else None
-    test_run_id_str = str(test_run_id).strip() if test_run_id else None
 
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
@@ -4990,17 +4895,6 @@ def complete_task(
         }
         if verified_cards:
             completed_payload["verified_cards"] = verified_cards
-        if unblocks_verified:
-            completed_payload["unblocks"] = unblocks_verified
-        if unblocks_not_blocked:
-            # Non-fatal: recorded so a rechecker can warn ("you said you'd
-            # unblock these, but they aren't in blocked/todo — did you
-            # mean a different card?"). See VFE-NERVE-01.
-            completed_payload["unblocks_not_blocked"] = unblocks_not_blocked
-        if commit_hash_str:
-            completed_payload["commit_hash"] = commit_hash_str
-        if test_run_id_str:
-            completed_payload["test_run_id"] = test_run_id_str
         # Carry artifact paths in the event payload so the gateway
         # notifier can upload them as native attachments alongside the
         # completion message. Workers pass these via
@@ -5015,72 +4909,20 @@ def complete_task(
                 ]
                 if cleaned_artifacts:
                     completed_payload["artifacts"] = cleaned_artifacts
+        # Record unblocks, commit_hash, and test_run_id in the event payload
+        if unblocks:
+            unblocks_list = [str(u).strip() for u in unblocks if str(u).strip()]
+            if unblocks_list:
+                completed_payload["unblocks"] = unblocks_list
+        if commit_hash:
+            completed_payload["commit_hash"] = str(commit_hash).strip()
+        if test_run_id:
+            completed_payload["test_run_id"] = str(test_run_id).strip()
         _append_event(
             conn, task_id, "completed",
             completed_payload,
             run_id=run_id,
         )
-        # VFE-NERVE-02: atomic cascade auto-unblock.
-        #
-        # For every id in ``unblocks_verified`` (existence + blockable
-        # status already checked above), attempt to transition it out of
-        # ``blocked`` in the SAME write_txn as this completion.  This
-        # closes the two-step handoff race that repeatedly stranded
-        # parent tickets after a reviewer forgot to also call
-        # ``kanban_unblock`` (motivating incidents: ``t_762d2626``,
-        # ``t_35c1632b``, ``t_c43af288``).
-        #
-        # Guardrails (must ALL pass; otherwise emit
-        # ``cascade_skipped`` with the failing reason and leave the
-        # downstream task untouched):
-        #
-        # * ``waiting_for`` on the latest block-family event of the
-        #   downstream ticket must match ``task_id`` (this completion).
-        #   Belt-and-suspenders: prevents a completion from unblocking a
-        #   task that was actually gated on a different ticket.  A
-        #   downstream with no typed ``waiting_for`` on record (legacy
-        #   prose-only block) is skipped as ``waiting_for_missing`` —
-        #   the reviewer needs to manually ``kanban_unblock`` those.
-        #
-        # * ``block_kind`` must not be ``capability`` or ``needs_input``
-        #   — those require human confirmation to clear.
-        #   ``dependency`` / ``transient`` / legacy-None cascade fine.
-        #
-        # * Downstream must currently be in ``blocked`` OR ``todo``
-        #   (``unblocks_verified`` filtered to these already, but the
-        #   status is re-read here inside the txn so a concurrent
-        #   writer that flipped the status between validation and the
-        #   cascade cannot cause a spurious transition).  If already
-        #   ready/running/done: idempotent no-op with ``already_clear``
-        #   outcome.
-        #
-        # On success:
-        #  - status flips ``blocked -> ready`` (or ``blocked -> todo``
-        #    when the downstream still has other undone parents — the
-        #    same parent-gate ``unblock_task`` enforces at line ~6017);
-        #  - any dangling ``current_run_id`` is reclaimed;
-        #  - ``consecutive_failures`` / ``last_failure_error`` cleared,
-        #    matching the ``unblock_task`` contract;
-        #  - ``block_kind`` / ``block_recurrences`` are DELIBERATELY
-        #    preserved (same rationale as manual unblock — resetting
-        #    would break the block-loop breaker).
-        #  - a ``cascade_unblocked`` event is emitted on the
-        #    downstream task, carrying ``source_task=task_id`` and
-        #    ``new_status`` so operators can trace the cascade.
-        #
-        # NB: cannot call ``unblock_task()`` here — that opens its own
-        # ``write_txn`` (BEGIN IMMEDIATE) which SQLite forbids nesting.
-        # The cascade is inline SQL that mirrors ``unblock_task``'s
-        # semantics (parent-gate + run reclaim + event) atomically
-        # inside the completion txn.  If the completion txn rolls back,
-        # the cascade rolls back with it.
-        if unblocks_verified:
-            for downstream_id in unblocks_verified:
-                _cascade_unblock_one(
-                    conn, downstream_id,
-                    source_task_id=task_id,
-                    now=now,
-                )
     # Prose-scan the summary + result for t_<hex> references that do
     # not resolve. Advisory — does not block the completion. Runs in
     # its own txn so the completion itself is already durable by the
@@ -5745,28 +5587,7 @@ def block_task(
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
         )
-
-    # Gate: verify ``waiting_for`` up front (like ``created_cards`` in
-    # ``complete_task``). A rejected block still needs an auditable
-    # event, so we emit it in a tiny dedicated txn and then raise.
-    # State is NOT mutated on rejection.
-    if waiting_for is not None:
-        waiting_for = str(waiting_for).strip() or None
-    if waiting_for:
-        missing = _find_missing_parents(conn, [waiting_for])
-        if missing:
-            with write_txn(conn):
-                _append_event(
-                    conn, task_id, "block_rejected_missing_waiting_for",
-                    {
-                        "reason": reason,
-                        "kind": kind,
-                        "waiting_for": waiting_for,
-                        "waiting_for_missing": missing,
-                    },
-                )
-            raise MissingWaitingForError(missing, task_id)
-
+    
     # Soft-refusal: check waiting_for status before entering write transaction
     if waiting_for is not None and not force:
         upstream = conn.execute(
@@ -6129,171 +5950,6 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             {"status": new_status} if new_status != "ready" else None,
         )
         return True
-
-
-def _cascade_unblock_one(
-    conn: sqlite3.Connection,
-    downstream_id: str,
-    *,
-    source_task_id: str,
-    now: int,
-) -> None:
-    """Atomic in-txn cascade unblock of a single downstream ticket.
-
-    Called from inside ``complete_task``'s ``write_txn`` (see VFE-NERVE-02).
-    Mirrors ``unblock_task``'s semantics — parent-gate on transition,
-    reclaim any dangling run, emit an ``unblocked``-family event — but
-    inline so it participates in the completion txn atomically (no
-    nested BEGIN IMMEDIATE).
-
-    Every path here emits exactly one event on ``downstream_id``:
-    ``cascade_unblocked`` on success, ``cascade_skipped`` when a
-    guardrail rejects the cascade.  The event payload always includes
-    ``source_task`` = the completing task's id so operators can trace
-    the cascade in the event log.
-    """
-    row = conn.execute(
-        "SELECT status, block_kind, current_run_id FROM tasks WHERE id = ?",
-        (downstream_id,),
-    ).fetchone()
-    if row is None:
-        # Vanished between validate & cascade (concurrent archive/delete).
-        # Non-fatal — completion still stands.  Record for audit.
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {"source_task": source_task_id, "reason": "task_missing"},
-        )
-        return
-
-    status = row["status"]
-    block_kind = row["block_kind"] if "block_kind" in row.keys() else None
-
-    # Idempotent no-op: already out of blocked.  ``ready`` / ``running``
-    # / ``done`` all fall here.  ``todo`` is a special case — a
-    # dependency-block lands there, and if the caller says "I unblock
-    # you" we still don't need to flip it (recompute_ready handles the
-    # todo -> ready promotion when parents are done).  Emit a small
-    # audit trail so an operator can see the cascade attempted.
-    if status not in ("blocked",):
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {
-                "source_task": source_task_id,
-                "reason": "already_clear",
-                "status": status,
-            },
-        )
-        return
-
-    # Guardrail: refuse to cascade past human-required block kinds.
-    if block_kind in _CASCADE_HUMAN_GATED_BLOCK_KINDS:
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {
-                "source_task": source_task_id,
-                "reason": "human_gated_block_kind",
-                "block_kind": block_kind,
-            },
-        )
-        return
-
-    # Guardrail: waiting_for on the most recent block-family event must
-    # match the completing task.  block_task persists it in the payload
-    # of ``blocked`` / ``dependency_wait`` / ``block_loop_detected`` —
-    # any of those is a valid source.  Legacy prose-only blocks (no
-    # ``waiting_for`` field) are skipped as ``waiting_for_missing`` so
-    # the reviewer notices they still need a manual unblock (typed
-    # envelopes are the whole point of NERVE-01/02).
-    latest_block_event = conn.execute(
-        """
-        SELECT payload FROM task_events
-         WHERE task_id = ?
-           AND kind IN ('blocked', 'dependency_wait', 'block_loop_detected')
-         ORDER BY created_at DESC, id DESC
-         LIMIT 1
-        """,
-        (downstream_id,),
-    ).fetchone()
-    latest_waiting_for: Optional[str] = None
-    if latest_block_event and latest_block_event["payload"]:
-        try:
-            _bp = json.loads(latest_block_event["payload"])
-        except Exception:
-            _bp = None
-        if isinstance(_bp, dict):
-            _wf = _bp.get("waiting_for")
-            if isinstance(_wf, str) and _wf.strip():
-                latest_waiting_for = _wf.strip()
-
-    if latest_waiting_for is None:
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {
-                "source_task": source_task_id,
-                "reason": "waiting_for_missing",
-            },
-        )
-        return
-
-    if latest_waiting_for != source_task_id:
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {
-                "source_task": source_task_id,
-                "reason": "waiting_for_mismatch",
-                "waiting_for": latest_waiting_for,
-            },
-        )
-        return
-
-    # All guardrails passed.  Reclaim any dangling run first (invariant:
-    # ``current_run_id`` must be NULL once status leaves ``running``).
-    stale_run_id = row["current_run_id"]
-    if stale_run_id:
-        conn.execute(
-            """
-            UPDATE task_runs
-               SET status = 'reclaimed', outcome = 'reclaimed',
-                   summary = COALESCE(summary, 'invariant recovery on cascade unblock'),
-                   ended_at = ?,
-                   claim_lock = NULL, claim_expires = NULL, worker_pid = NULL
-             WHERE id = ? AND ended_at IS NULL
-            """,
-            (now, int(stale_run_id)),
-        )
-
-    # Parent-gate: re-check parent completion before flipping to ready.
-    # Same rationale as ``unblock_task`` — the dispatcher trusts
-    # ``status = ready`` means "all parents done".  If other parents
-    # are still open, land in ``todo`` and let recompute_ready promote.
-    undone_parents = conn.execute(
-        "SELECT 1 FROM task_links l "
-        "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
-        (downstream_id,),
-    ).fetchone()
-    new_status = "todo" if undone_parents else "ready"
-
-    cur = conn.execute(
-        "UPDATE tasks SET status = ?, current_run_id = NULL, "
-        "consecutive_failures = 0, last_failure_error = NULL "
-        "WHERE id = ? AND status = 'blocked'",
-        (new_status, downstream_id),
-    )
-    if cur.rowcount != 1:
-        # Lost a race — someone else transitioned it out of blocked
-        # after our SELECT.  Emit a skipped audit event so the anomaly
-        # is visible and move on (idempotent — the other writer got there).
-        _append_event(
-            conn, downstream_id, "cascade_skipped",
-            {"source_task": source_task_id, "reason": "race_lost"},
-        )
-        return
-
-    _append_event(
-        conn, downstream_id, "cascade_unblocked",
-        {"source_task": source_task_id, "new_status": new_status},
-    )
 
 
 def specify_triage_task(
