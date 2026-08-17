@@ -92,42 +92,7 @@ DECIDE_SCHEMA = {
     },
 }
 
-PREDICT_SCHEMA = {
-    "name": "cognitive_predict",
-    "description": (
-        "Record a prediction before declaring completion. Use this to pre-declare "
-        "an empirical claim with its falsifier, measurement substrate, and remaining budget. "
-        "Prevents unratified predictions from being treated as verified. "
-        "Keywords that trigger heartbeat inspection: DONE, COMPLETE, VERIFIED, WORKING, FIXED, SHIPPED."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "prediction": {
-                "type": "string",
-                "description": "The claim being made (e.g., 'NERVE chain is COMPLETE', 'test passes on main')",
-            },
-            "falsifier": {
-                "type": "string",
-                "description": "Empirical observation that would falsify this prediction. What must NOT happen for the claim to hold?",
-            },
-            "substrate": {
-                "type": "string",
-                "enum": ["python-repl-fresh-import", "running-gateway", "h1-tree", "h2-tree", "bare-repo-main", "production-service"],
-                "description": "Measurement substrate on which this prediction was verified. Substrate-hops require new predictions.",
-            },
-            "budget": {
-                "type": "integer",
-                "description": "Remaining turns/iterations until this prediction is considered stale (must be empirically ratified or reprobe).",
-                "minimum": 0,
-                "default": 3,
-            },
-        },
-        "required": ["prediction", "falsifier", "substrate"],
-    },
-}
-
-ALL_TOOL_SCHEMAS = [RECALL_SCHEMA, DECIDE_SCHEMA, PREDICT_SCHEMA]
+ALL_TOOL_SCHEMAS = [RECALL_SCHEMA, DECIDE_SCHEMA]
 
 
 # ── Standalone JSONL audit trail (no EAF dependency) ──────────────────────
@@ -137,15 +102,11 @@ class _StandaloneAuditTrail:
 
     Drop-in replacement for executive_agents.infrastructure.systems.decision_audit
     when running without the EAF package installed.
-    
-    Also maintains open predictions (first-class objects with budget tracking).
     """
 
     def __init__(self, storage_path: str):
         self._storage_path = storage_path
         self._log: list[dict] = []
-        self._predictions: dict[str, dict] = {}  # prediction_id → {prediction, falsifier, substrate, budget, created_at}
-        self._prediction_counter: int = 0
         self._load_existing()
 
     def _load_existing(self):
@@ -233,55 +194,6 @@ class _StandaloneAuditTrail:
     def size(self) -> int:
         """Number of decisions in the audit trail."""
         return len(self._log)
-    
-    def record_prediction(self, agent_id: str, prediction: str, falsifier: str, 
-                         substrate: str, budget: int = 3) -> str:
-        """Record an open prediction with budget tracking.
-        
-        Returns: prediction_id (e.g., "P-000001-hermes")
-        """
-        self._prediction_counter += 1
-        prediction_id = f"P-{self._prediction_counter:06d}-{agent_id[:8]}"
-        self._predictions[prediction_id] = {
-            "id": prediction_id,
-            "agent_id": agent_id,
-            "prediction": prediction,
-            "falsifier": falsifier,
-            "substrate": substrate,
-            "budget": budget,
-            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "status": "open",  # open | ratified | falsified | stale
-        }
-        return prediction_id
-    
-    def get_open_predictions(self, agent_id: str = None) -> list[dict]:
-        """Return all open predictions, optionally filtered by agent."""
-        results = []
-        for pred_id, pred in self._predictions.items():
-            if agent_id and pred.get("agent_id") != agent_id:
-                continue
-            if pred.get("status") == "open":
-                results.append(pred)
-        return results
-    
-    def ratify_prediction(self, prediction_id: str) -> bool:
-        """Mark a prediction as empirically verified."""
-        if prediction_id in self._predictions:
-            self._predictions[prediction_id]["status"] = "ratified"
-            return True
-        return False
-    
-    def decrement_prediction_budget(self, prediction_id: str) -> bool:
-        """Decrement prediction budget by 1. Return True if still has budget."""
-        if prediction_id not in self._predictions:
-            return False
-        pred = self._predictions[prediction_id]
-        if pred.get("status") != "open":
-            return False
-        pred["budget"] = max(0, pred.get("budget", 0) - 1)
-        if pred["budget"] <= 0:
-            pred["status"] = "stale"
-        return pred["budget"] > 0
 
 
 # ── Decision extraction from turns ────────────────────────────────────────
@@ -598,32 +510,6 @@ class CognitiveMemoryProvider(MemoryProvider):
                     "result": f"Decision {did} recorded.",
                     "decision_id": did,
                     "total_decisions": self._audit.size,
-                })
-            
-            elif tool_name == "cognitive_predict":
-                prediction = args.get("prediction", "")
-                falsifier = args.get("falsifier", "")
-                substrate = args.get("substrate", "")
-                budget = int(args.get("budget", 3))
-                
-                if not prediction or not falsifier or not substrate:
-                    return tool_error(
-                        "cognitive_predict requires: prediction, falsifier, substrate (all non-empty)"
-                    )
-                
-                pid = self._audit.record_prediction(
-                    agent_id=self._agent_id,
-                    prediction=prediction,
-                    falsifier=falsifier,
-                    substrate=substrate,
-                    budget=budget,
-                )
-                open_count = len(self._audit.get_open_predictions(agent_id=self._agent_id))
-                return json.dumps({
-                    "result": f"Prediction {pid} recorded.",
-                    "prediction_id": pid,
-                    "open_predictions": open_count,
-                    "remaining_budget": budget,
                 })
 
             return tool_error(f"Unknown cognitive tool: {tool_name}")
