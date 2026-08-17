@@ -8633,7 +8633,6 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     node_router=None,
-    velocity_overrides: Optional[dict] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -8669,7 +8668,6 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             node_router=node_router,
-            velocity_overrides=velocity_overrides,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -8687,7 +8685,6 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             node_router=node_router,
-            velocity_overrides=velocity_overrides,
         )
         # Still under the dispatch lock: opportunistically truncate the WAL
         # at a coarse interval so it cannot grow unbounded between restarts.
@@ -8709,7 +8706,6 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     node_router=None,
-    velocity_overrides: Optional[dict] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -8791,30 +8787,10 @@ def _dispatch_once_locked(
         )
 
     ready_rows = conn.execute(
-        "SELECT id, assignee, priority FROM tasks "
+        "SELECT id, assignee FROM tasks "
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
-    # VFE-PULSE-01: apply HRV velocity_factor to dispatch ordering.
-    # Agents with low velocity_factor (STRESS=0.75, CRISIS=0.5) get
-    # deprioritized by boosting the effective priority of HOMEOSTATIC
-    # agents. The boost is a fractional priority add (0-1000 range)
-    # scaled by (velocity_factor - 0.5) * 1000 so:
-    #   CRISIS (0.5) → +0   (no boost, natural priority)
-    #   STRESS (0.75) → +250
-    #   HOMEOSTATIC (1.0) → +500
-    # This keeps the base priority as the primary sort key while
-    # nudging stressed agents down within their priority band.
-    if velocity_overrides:
-        def _effective_priority(row) -> tuple[float, str]:
-            base_prio = row["priority"] if "priority" in row.keys() else 0
-            assignee = row["assignee"] if "assignee" in row.keys() else None
-            vf = 1.0
-            if assignee and assignee in velocity_overrides:
-                vf = velocity_overrides[assignee]
-            boost = (vf - 0.5) * 1000.0
-            return (base_prio + boost, row["id"])
-        ready_rows.sort(key=_effective_priority, reverse=True)
     # Honour kanban.max_in_progress: if the board already has enough running
     # tasks, skip spawning this tick so slow workers (local LLMs,
     # resource-constrained hosts) can finish what they have before more tasks

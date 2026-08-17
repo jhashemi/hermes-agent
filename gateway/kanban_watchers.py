@@ -1168,36 +1168,6 @@ class GatewayKanbanWatchersMixin:
                     cluster_routers[slug] = local_node_router
             return cluster_routers[slug]
 
-        # ── HRV velocity factor cache ────────────────────────────────
-        # Subscribe to hrv.pulse.tick so the dispatcher can adjust
-        # dispatch ordering based on per-agent autonomic state.
-        # Agents in STRESS/CRISIS get deprioritized (lower velocity_factor)
-        # so HOMEOSTATIC agents pick up work first (VFE-PULSE-01).
-        hrv_cache = None
-        try:
-            from hermes_cli.hrv_velocity_cache import get_velocity_cache
-            hrv_cache = get_velocity_cache()
-            try:
-                await hrv_cache.start()
-                logger.info("kanban dispatcher: HRV velocity cache started")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "kanban dispatcher: HRV velocity cache start failed (%s); "
-                    "dispatching without velocity adjustment", exc,
-                )
-                hrv_cache = None
-        except ImportError:
-            logger.debug(
-                "kanban dispatcher: hrv_velocity_cache module unavailable; "
-                "dispatching without velocity adjustment",
-            )
-
-        def _velocity_factor_for(agent_id: str) -> float:
-            """Return the cached velocity_factor for an agent (1.0 if no data)."""
-            if hrv_cache is None:
-                return 1.0
-            return hrv_cache.velocity_factor(agent_id)
-
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1295,18 +1265,6 @@ class GatewayKanbanWatchersMixin:
                             "kanban dispatcher: cluster router refresh failed "
                             "for board %s (%s); routing locally", slug, exc,
                         )
-                # Build velocity overrides from the HRV cache for this tick.
-                # Passed to dispatch_once which applies them as a sort boost
-                # on top of the base priority (VFE-PULSE-01).
-                velocity_overrides = None
-                if hrv_cache is not None and not hrv_cache.is_stale():
-                    all_agents = hrv_cache.all_agents()
-                    if all_agents:
-                        velocity_overrides = {
-                            aid: data.get("velocity_factor", 1.0)
-                            for aid, data in all_agents.items()
-                            if isinstance(data, dict)
-                        }
                 return _kb.dispatch_once(
                     conn,
                     board=slug,
@@ -1317,7 +1275,6 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     node_router=_router,
-                    velocity_overrides=velocity_overrides,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -1580,5 +1537,3 @@ class GatewayKanbanWatchersMixin:
 
         _release_singleton_lock(self._kanban_dispatcher_lock_handle)
         self._kanban_dispatcher_lock_handle = None
-        if hrv_cache is not None:
-            hrv_cache.stop()
