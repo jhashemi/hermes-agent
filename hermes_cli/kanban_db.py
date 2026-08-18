@@ -4104,6 +4104,34 @@ def _dependency_waiting_for_satisfied(
     return wf_row["status"] in ("done", "archived")
 
 
+def _last_dependency_wait_envelope(
+    conn: sqlite3.Connection, task_id: str,
+) -> Optional[dict]:
+    """Return the parsed payload of the most recent ``dependency_wait``
+    event on ``task_id``, or ``None`` if no such event exists.
+
+    Used by :func:`detect_crashed_workers` to decide whether a crashed
+    worker had already declared a dependency wait before exiting. If it
+    had, the crash-reclaim path routes the task to ``todo`` (where the
+    DISPATCH-01 ``_dependency_waiting_for_satisfied`` guard holds) instead
+    of ``ready`` (where it would be re-claimed immediately, bypassing the
+    guard and burning LLM inference in a respawn loop — VFE-DISPATCH-02).
+    """
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'dependency_wait' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
@@ -7675,13 +7703,54 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload["exit_kind"] = kind
                     event_payload["exit_code"] = code
 
-            cur = conn.execute(
-                "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL "
-                "WHERE id = ? AND status = 'running' "
-                "  AND worker_pid = ? AND claim_lock IS ?",
-                (row["id"], pid, row["claim_lock"]),
-            )
+            # VFE-DISPATCH-02: if the worker emitted a ``dependency_wait``
+            # event (via ``block_task(kind='dependency')``) before exiting
+            # but the task is still ``running`` (the block transition failed
+            # — e.g. ``expected_run_id`` mismatch on a re-claimed run), do
+            # NOT reset to ``ready``. That bypasses the DISPATCH-01 guard
+            # (which only fires for ``todo``/``blocked`` rows in
+            # ``recompute_ready``) and lets ``claim_task`` immediately
+            # re-claim the task, respawning the worker, which re-blocks for
+            # the same unsatisfied dependency — burning LLM inference in a
+            # ~30s loop. Instead, route to ``todo`` with
+            # ``block_kind='dependency'`` so the DISPATCH-01
+            # ``_dependency_waiting_for_satisfied`` guard holds.
+            dep_envelope = _last_dependency_wait_envelope(conn, row["id"])
+            dep_route_to_todo = False
+            dep_wf: Optional[str] = None
+            if dep_envelope:
+                dep_wf = dep_envelope.get("waiting_for")
+                if dep_wf:
+                    wf_row = conn.execute(
+                        "SELECT status FROM tasks WHERE id = ?",
+                        (str(dep_wf),),
+                    ).fetchone()
+                    # Only route to todo if the dependency is genuinely
+                    # unsatisfied. If the waited-on task is already done
+                    # (or gone), let the normal ready-reset happen so
+                    # ``recompute_ready`` can promote it immediately.
+                    if wf_row is not None and wf_row["status"] not in (
+                        "done", "archived",
+                    ):
+                        dep_route_to_todo = True
+
+            if dep_route_to_todo:
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'todo', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, "
+                    "block_kind = 'dependency' "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND worker_pid = ? AND claim_lock IS ?",
+                    (row["id"], pid, row["claim_lock"]),
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL "
+                    "WHERE id = ? AND status = 'running' "
+                    "  AND worker_pid = ? AND claim_lock IS ?",
+                    (row["id"], pid, row["claim_lock"]),
+                )
             if cur.rowcount == 1:
                 # Rate-limited requeues are a clean release, not a crash —
                 # record the run outcome as ``rate_limited`` so the board
@@ -7698,6 +7767,25 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
+                if dep_route_to_todo:
+                    # Emit a ``dependency_wait_reclaim`` event so the audit
+                    # trail shows the crash-reclaim respected the pending
+                    # dependency wait and routed to ``todo`` instead of
+                    # ``ready``. Without this the ``crashed``/``protocol_
+                    # violation`` event above is the only signal, and an
+                    # operator inspecting the board would not know why the
+                    # task landed in ``todo`` rather than ``ready``.
+                    _append_event(
+                        conn, row["id"], "dependency_wait_reclaim",
+                        {
+                            "pid": pid,
+                            "claimer": row["claim_lock"],
+                            "waiting_for": str(dep_wf),
+                            "exit_kind": kind,
+                            "exit_code": code,
+                        },
+                        run_id=run_id,
+                    )
                 if rate_limited_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
@@ -7709,6 +7797,16 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         (error_text[:500], row["id"]),
                     )
                     rate_limited.append(row["id"])
+                elif dep_route_to_todo:
+                    # VFE-DISPATCH-02: dependency-wait reclaim is a legitimate
+                    # block, not a crash — do NOT add to ``crashed`` /
+                    # ``crash_details`` so ``_record_task_failure`` is never
+                    # called. The task sits in ``todo`` with
+                    # ``block_kind='dependency'`` and the DISPATCH-01 guard
+                    # gates its promotion. Counting a failure here would
+                    # eventually trip the circuit breaker on a task that
+                    # is simply waiting for its parent.
+                    pass
                 else:
                     if protocol_violation:
                         # Stamp the failure error now: a below-budget

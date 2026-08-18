@@ -260,3 +260,185 @@ def test_sticky_blocked_task_untouched_by_guard(conn):
 
     kb.recompute_ready(conn)
     assert _status(conn, t) == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# VFE-DISPATCH-02: running → dependency_wait → exit must not respawn-loop
+# ---------------------------------------------------------------------------
+
+
+class TestDispatch02DependencyWaitCrashReclaim:
+    """VFE-DISPATCH-02: when a worker on a ``running`` ticket emits a
+    ``dependency_wait`` event (via ``block_task(kind='dependency')``) but
+    the task stays ``running`` (block transition failed — e.g.
+    ``expected_run_id`` mismatch on a re-claimed run), and the worker then
+    exits, ``detect_crashed_workers`` must route the task to ``todo`` (where
+    the DISPATCH-01 guard holds) instead of ``ready`` (where it would be
+    immediately re-claimed, respawning the worker in a ~30s inference-burning
+    loop).
+    """
+
+    @pytest.fixture
+    def crash_env(self, kanban_home, monkeypatch):
+        """Disable the crash grace period and force ``_pid_alive`` to False."""
+        monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+        import hermes_cli.kanban_db as _kb
+        monkeypatch.setattr(_kb, "_pid_alive", lambda pid: False)
+        # ``_classify_worker_exit`` reads from ``_recent_worker_exits``;
+        # leave it empty so the exit is classified as ``"unknown"`` (a
+        # genuine crash), not ``"clean_exit"`` (which would be a protocol
+        # violation). The fix must fire regardless of exit classification.
+        _kb._recent_worker_exits.clear()
+        return monkeypatch
+
+    def _emit_dep_wait(self, conn, task_id, waiting_for):
+        """Simulate what ``block_task(kind='dependency')`` does: emit the
+        ``dependency_wait`` event with a ``waiting_for`` handle but leave
+        the task in ``running`` (simulating a failed transition).
+        """
+        import json as _json
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'dependency_wait', ?, strftime('%s','now'))",
+            (task_id, _json.dumps({"waiting_for": waiting_for, "kind": "dependency"})),
+        )
+        conn.commit()
+
+    def test_crash_with_dep_wait_routes_to_todo_not_ready(self, conn, crash_env):
+        """DoD #2: worker emits ``dependency_wait`` + exits → task moves
+        to ``todo``, NOT ``ready``.
+        """
+        parent = kb.create_task(conn, title="parent")
+        kb.claim_task(conn, parent)  # parent is running
+
+        child = kb.create_task(conn, title="child")
+        kb.claim_task(conn, child)  # child is running
+        kb._set_worker_pid(conn, child, 999999)
+
+        # Simulate: block_task emitted the event but the UPDATE failed
+        # (expected_run_id mismatch on a re-claimed run). Task is still
+        # ``running`` with a ``dependency_wait`` event on record.
+        self._emit_dep_wait(conn, child, waiting_for=parent)
+
+        crashed = kb.detect_crashed_workers(conn)
+        assert child not in crashed, (
+            "dependency-wait reclaim must NOT count as a crash — the task "
+            "is waiting on a parent, not failing"
+        )
+        assert _status(conn, child) == "todo", (
+            "crash-reclaim of a dependency-wait task must route to ``todo`` "
+            "(where the DISPATCH-01 guard holds), not ``ready`` (where "
+            "claim_task would immediately re-claim and respawn the worker)"
+        )
+
+    def test_crash_with_dep_wait_blocks_recompute_ready(self, conn, crash_env):
+        """DoD #3: after crash-reclaim routes to ``todo``,
+        ``recompute_ready`` must NOT promote the task while the parent
+        is still running.
+        """
+        parent = kb.create_task(conn, title="parent")
+        kb.claim_task(conn, parent)
+
+        child = kb.create_task(conn, title="child")
+        kb.claim_task(conn, child)
+        kb._set_worker_pid(conn, child, 999999)
+        self._emit_dep_wait(conn, child, waiting_for=parent)
+
+        kb.detect_crashed_workers(conn)
+        assert _status(conn, child) == "todo"
+
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 0
+        assert _status(conn, child) == "todo", (
+            "DISPATCH-01 guard must hold for the crash-reclaimed task — "
+            "no promotion while the parent is still running"
+        )
+
+    def test_crash_with_dep_wait_promotes_when_parent_done(self, conn, crash_env):
+        """DoD #4: once the parent completes, the crash-reclaimed task
+        promotes exactly once (same as a normal dependency block).
+        """
+        parent = kb.create_task(conn, title="parent")
+        kb.claim_task(conn, parent)
+
+        child = kb.create_task(conn, title="child")
+        kb.claim_task(conn, child)
+        kb._set_worker_pid(conn, child, 999999)
+        self._emit_dep_wait(conn, child, waiting_for=parent)
+
+        kb.detect_crashed_workers(conn)
+        assert _status(conn, child) == "todo"
+
+        # Parent completes
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+        conn.commit()
+
+        promoted = kb.recompute_ready(conn)
+        assert promoted == 1
+        assert _status(conn, child) == "ready"
+
+        # Repeat ticks are no-ops
+        for _ in range(3):
+            assert kb.recompute_ready(conn) == 0
+        assert _status(conn, child) == "ready"
+
+    def test_crash_without_dep_wait_still_resets_to_ready(self, conn, crash_env):
+        """Regression: a normal crash (no ``dependency_wait`` event) must
+        still reset to ``ready``. The DISPATCH-02 fix only diverts tasks
+        that have a pending dependency wait.
+        """
+        t = kb.create_task(conn, title="plain crash")
+        kb.claim_task(conn, t)
+        kb._set_worker_pid(conn, t, 999999)
+
+        crashed = kb.detect_crashed_workers(conn)
+        assert t in crashed
+        assert _status(conn, t) == "ready"
+
+    def test_crash_with_dep_wait_parent_done_resets_to_ready(self, conn, crash_env):
+        """Regression: if the waited-on task is already ``done`` when the
+        worker crashes, the dependency is satisfied — the crash-reclaim
+        should reset to ``ready`` (not ``todo``) so ``recompute_ready`` can
+        promote it immediately.
+        """
+        parent = kb.create_task(conn, title="parent")
+        kb.claim_task(conn, parent)
+        conn.execute("UPDATE tasks SET status = 'done' WHERE id = ?", (parent,))
+        conn.commit()
+
+        child = kb.create_task(conn, title="child")
+        kb.claim_task(conn, child)
+        kb._set_worker_pid(conn, child, 999999)
+        self._emit_dep_wait(conn, child, waiting_for=parent)
+
+        kb.detect_crashed_workers(conn)
+        assert _status(conn, child) == "ready", (
+            "when the waited-on task is already done, the crash-reclaim "
+            "must reset to ``ready`` so the task can be re-claimed — "
+            "routing to ``todo`` would strand it unnecessarily"
+        )
+
+    def test_dep_wait_reclaim_emits_audit_event(self, conn, crash_env):
+        """The crash-reclaim must emit a ``dependency_wait_reclaim`` event
+        so an operator inspecting the board understands why the task
+        landed in ``todo`` instead of ``ready``.
+        """
+        parent = kb.create_task(conn, title="parent")
+        kb.claim_task(conn, parent)
+
+        child = kb.create_task(conn, title="child")
+        kb.claim_task(conn, child)
+        kb._set_worker_pid(conn, child, 999999)
+        self._emit_dep_wait(conn, child, waiting_for=parent)
+
+        kb.detect_crashed_workers(conn)
+
+        events = conn.execute(
+            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id DESC",
+            (child,),
+        ).fetchall()
+        kinds = [e["kind"] for e in events]
+        assert "dependency_wait_reclaim" in kinds, (
+            "a ``dependency_wait_reclaim`` event must be emitted so the "
+            "audit trail shows the crash-reclaim respected the pending dep"
+        )
