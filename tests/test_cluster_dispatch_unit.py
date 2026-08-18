@@ -4,6 +4,7 @@ and the node-hosts loader. All subprocess/LLM/SSH effects are mocked.
 """
 from __future__ import annotations
 
+import os
 import sys
 import types
 from unittest import mock
@@ -184,6 +185,123 @@ class TestRemoteSpawnCmd:
     def test_env_extra_forwarded(self):
         cmd = self._cmd(env_extra={"HERMES_FOO": "bar"})
         assert "export HERMES_FOO=bar" in cmd[-1]
+
+    def test_env_extra_with_shell_metacharacters_is_quoted(self, monkeypatch):
+        """env_extra values that contain shell metachars must be quoted.
+
+        Without shlex.quote, a workspace path with spaces or a token
+        containing ``$`` or ``;`` would be interpreted by the remote
+        login shell — either splitting the value or worse, executing
+        code. Values without metachars pass through untouched.
+        """
+        # Clear any resolver env so this test is deterministic.
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        cmd = self._cmd(env_extra={"HERMES_FOO": "hello world; rm -rf /"})
+        payload = cmd[-1]
+        # shlex.quote wraps in single quotes and escapes embedded quotes.
+        assert "export HERMES_FOO='hello world; rm -rf /'" in payload
+        # Value never appears un-quoted (would be an injection vector).
+        assert " rm -rf /" not in payload.replace("'hello world; rm -rf /'", "")
+
+    def test_api_env_injected_when_both_configured(self, monkeypatch):
+        """Both URL and token in env → both exported (this is the whole point)."""
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_URL", "http://100.79.15.66:9119")
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_TOKEN", "s3cr3t-token")
+        cmd = self._cmd()
+        payload = cmd[-1]
+        assert "export HERMES_KANBAN_API_URL=http://100.79.15.66:9119" in payload
+        assert "export HERMES_KANBAN_API_TOKEN=s3cr3t-token" in payload
+
+    def test_api_env_not_injected_when_absent(self, monkeypatch):
+        """No env, no config → no exports. Legacy local-open behaviour."""
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        # Also mask config so a laptop with kanban.remote_api_* set locally
+        # doesn't false-positive this test.
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"kanban": {}},
+        )
+        cmd = self._cmd()
+        payload = cmd[-1]
+        assert "HERMES_KANBAN_API_URL" not in payload
+        assert "HERMES_KANBAN_API_TOKEN" not in payload
+
+    def test_api_env_half_configured_is_refused(self, monkeypatch, caplog):
+        """URL set but token missing → nothing exported, warning logged."""
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_URL", "http://100.79.15.66:9119")
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"kanban": {}},
+        )
+        with caplog.at_level("WARNING", logger="gateway.cluster_dispatch"):
+            cmd = self._cmd()
+        payload = cmd[-1]
+        # No half-configured exports.
+        assert "HERMES_KANBAN_API_URL" not in payload
+        assert "HERMES_KANBAN_API_TOKEN" not in payload
+        # Warning surfaces to operator logs.
+        assert any(
+            "half-configured" in rec.message and "hermes1" in rec.message
+            for rec in caplog.records
+        ), f"expected half-configured warning; got {[r.message for r in caplog.records]!r}"
+
+    def test_api_env_per_target_env_beats_global(self, monkeypatch):
+        """HERMES_KANBAN_REMOTE_API_URL_HERMES1 wins over the unsuffixed one."""
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_URL", "http://global:9119")
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_URL_HERMES1", "http://per-target:9119")
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_TOKEN", "tok")
+        cmd = self._cmd()
+        payload = cmd[-1]
+        assert "export HERMES_KANBAN_API_URL=http://per-target:9119" in payload
+        # Global default was NOT used.
+        assert "http://global:9119" not in payload
+
+    def test_api_env_falls_back_to_config(self, monkeypatch):
+        """Config.yaml kanban.remote_api_{url,token} is the last fallback."""
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"kanban": {
+                "remote_api_url": "http://from-config:9119",
+                "remote_api_token": "config-token",
+            }},
+        )
+        cmd = self._cmd()
+        payload = cmd[-1]
+        assert "export HERMES_KANBAN_API_URL=http://from-config:9119" in payload
+        assert "export HERMES_KANBAN_API_TOKEN=config-token" in payload
+
+    def test_api_env_token_with_shell_metachars_is_shell_quoted(self, monkeypatch):
+        """A token containing $, ;, or spaces must survive the SSH shell.
+
+        JWTs are dot-separated base64url so alnum + dashes + underscores,
+        but a paranoid deploy might use a token generated by a system that
+        emits ``+`` or ``/``. shlex.quote is unconditional insurance.
+        """
+        for k in list(os.environ):
+            if k.startswith("HERMES_KANBAN_REMOTE_API_"):
+                monkeypatch.delenv(k, raising=False)
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_URL", "http://ok:9119")
+        monkeypatch.setenv("HERMES_KANBAN_REMOTE_API_TOKEN", "abc; rm -rf /")
+        cmd = self._cmd()
+        payload = cmd[-1]
+        # Present, quoted, and NOT executed.
+        assert "export HERMES_KANBAN_API_TOKEN='abc; rm -rf /'" in payload
 
     def test_extra_skills_included(self):
         cmd = self._cmd(skills=["kanban-worker", "custom-skill"])
