@@ -4546,21 +4546,106 @@ def recompute_ready(
 # Claim / complete / block
 # ---------------------------------------------------------------------------
 
+# Cache for version ancestry checks (VFE-DEPLOY-03)
+_version_ancestry_cache: dict[tuple[str, str], bool] = {}
+
+
+def _is_version_ancestor(candidate: str, highest: str) -> bool:
+    """Check if candidate is an ancestor of highest using git merge-base.
+    
+    Used in VFE-DEPLOY-03 to detect version divergence on the cluster.
+    A "stale" version is one that is a strict ancestor (older commit) than
+    the highest version observed.
+    
+    Returns True if candidate is an ancestor (is stale), False if equal or
+    a descendant (is newer or equal).
+    
+    If git is not available or merge-base fails, falls back to string
+    comparison: if they differ and candidate sorts lower, assume stale.
+    """
+    key = (candidate, highest)
+    if key in _version_ancestry_cache:
+        return _version_ancestry_cache[key]
+    
+    # Try git merge-base check for real SHAs
+    try:
+        hermes_root = Path(__file__).parent.parent
+        result = subprocess.run(
+            ["git", "-C", str(hermes_root), "merge-base", "--is-ancestor", candidate, highest],
+            capture_output=True,
+            timeout=2,
+        )
+        # Only trust the result if git succeeded (returncode 0 or 1 for ancestor check)
+        # If returncode is 128 (fatal error), fall through to string comparison
+        if result.returncode in (0, 1):
+            is_ancestor = result.returncode == 0
+            _version_ancestry_cache[key] = is_ancestor
+            return is_ancestor
+    except Exception:
+        pass
+    
+    # Fallback: simple string comparison (works for SHAs lexicographically)
+    # If they're different and candidate < highest, assume candidate is older.
+    is_ancestor = candidate != highest and candidate < highest
+    _version_ancestry_cache[key] = is_ancestor
+    return is_ancestor
+
 def claim_task(
     conn: sqlite3.Connection,
     task_id: str,
     *,
     ttl_seconds: Optional[int] = None,
     claimer: Optional[str] = None,
+    hermes_agent_version: Optional[str] = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
+    
+    If hermes_agent_version is provided and a newer version has been observed
+    in the last 15 minutes (VFE-DEPLOY-03), the claim is refused to prevent
+    version divergence on the cluster.
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    
+    # Check version ancestry if provided (VFE-DEPLOY-03)
+    if hermes_agent_version is not None:
+        refusal_window_seconds = 900  # 15 minutes
+        cutoff_time = now - refusal_window_seconds
+        
+        recent_claims = conn.execute(
+            """
+            SELECT payload FROM task_events
+            WHERE kind = 'claimed' 
+              AND created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 100
+            """,
+            (cutoff_time,),
+        ).fetchall()
+        
+        highest_version = None
+        for row in recent_claims:
+            try:
+                payload = json.loads(row["payload"]) if row["payload"] else None
+                if payload and "hermes_agent_version" in payload:
+                    highest_version = payload["hermes_agent_version"]
+                    break
+            except Exception:
+                pass
+        
+        if highest_version and highest_version != hermes_agent_version:
+            is_stale = _is_version_ancestor(hermes_agent_version, highest_version)
+            if is_stale:
+                _append_event(
+                    conn, task_id, "claim_refused_stale_version",
+                    {"incoming": hermes_agent_version, "highest": highest_version},
+                )
+                return None
+    
     with write_txn(conn):
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
@@ -4652,9 +4737,12 @@ def claim_task(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
         )
+        event_payload = {"lock": lock, "expires": expires, "run_id": run_id}
+        if hermes_agent_version is not None:
+            event_payload["hermes_agent_version"] = hermes_agent_version
         _append_event(
             conn, task_id, "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
+            event_payload,
             run_id=run_id,
         )
         claimed = get_task(conn, task_id)
