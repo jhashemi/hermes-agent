@@ -5126,6 +5126,45 @@ def unset_config_value(key: str):
 
 
 # =============================================================================
+# INCIDENT-01 — `hermes config lint` (fallback-chain diversity)
+# =============================================================================
+
+def _run_config_lint() -> None:
+    """Run the fallback-chain diversity lint and exit non-zero on findings.
+
+    Wired to ``hermes config lint``. Pure delegation to
+    ``lint_fallback_chain`` for testability — this wrapper handles I/O
+    (config load, stdout/stderr, exit code) only.
+    """
+    try:
+        from hermes_cli.fallback_config import lint_fallback_chain
+    except Exception as exc:  # pragma: no cover — import failure = broken install
+        print(f"error: could not import fallback_config: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        config = load_config() or {}
+    except Exception as exc:
+        print(f"error: could not load config: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    warnings = lint_fallback_chain(config)
+    if not warnings:
+        print("config lint: no issues found in fallback_providers chain.")
+        sys.exit(0)
+
+    print("config lint: fallback_providers diversity warnings:", file=sys.stderr)
+    for i, w in enumerate(warnings, 1):
+        print(f"  [{i}] {w}", file=sys.stderr)
+    print(
+        "\nSee ticket t_3e1634d9 (INCIDENT-01) for context. Fix by "
+        "interleaving entries from different provider accounts.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+# =============================================================================
 # Command handler
 # =============================================================================
 
@@ -5184,6 +5223,13 @@ def config_command(args):
     
     elif subcmd == "env-path":
         print(get_env_path())
+
+    elif subcmd == "lint":
+        # INCIDENT-01 (2026-08-18) — warn on same-account consecutive fallbacks.
+        # Exit non-zero when the chain has diversity warnings so CI / cron /
+        # kanban dispatch can surface the misconfig instead of finding out at
+        # 3am when the whole cascade dies on one account outage.
+        _run_config_lint()
     
     elif subcmd == "migrate":
         print()

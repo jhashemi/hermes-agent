@@ -13887,6 +13887,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             # Get the final response
             response = result.get("final_response", "") if result else ""
 
+            # INCIDENT-01 (2026-08-18) — expose the run outcome so the
+            # non-quiet ``hermes chat -q`` path (used by kanban workers
+            # and cron) can derive a non-zero exit code when the agent
+            # failed to produce assistant messages. Previously the
+            # non-quiet -q path just returned from main() with rc=0
+            # even on a terminal API failure, which the dispatcher
+            # read as success and re-fired into the same wall.
+            # See ticket t_3e1634d9.
+            self._last_run_result = result if isinstance(result, dict) else None
+
             # Auto-generate session title after first exchange (non-blocking)
             if response and result and not result.get("failed") and not result.get("partial"):
                 try:
@@ -14143,6 +14153,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
             
         except Exception as e:
             print(f"Error: {e}")
+            # INCIDENT-01 — surface exception-path failure to callers so
+            # the -q exit-code branch can distinguish it from a clean run.
+            self._last_run_result = {
+                "failed": True,
+                "failure_reason": "chat_exception",
+                "error": str(e),
+                "final_response": "",
+            }
             return None
         finally:
             # Stop the ambient thinking sound the moment the turn ends —
@@ -17961,8 +17979,46 @@ def main(
                 # Surface security advisories before the agent runs — short
                 # banner, doesn't depend on the welcome banner being shown.
                 cli._show_security_advisories()
-                cli.chat(query, images=single_query_images or None)
+                _q_response = cli.chat(query, images=single_query_images or None)
                 cli._print_exit_summary(clear_screen=False)
+
+                # INCIDENT-01 (2026-08-18) — non-quiet -q must NOT exit rc=0
+                # on a terminal failure.
+                #
+                # Kanban workers spawn as ``hermes chat -q "work kanban task
+                # <id>"``; the dispatcher reads the shell exit code to decide
+                # success vs failure. Prior to this fix, ``main()`` fell
+                # through to a bare ``return`` after ``cli.chat(...)`` — and
+                # ``fire.Fire(main)`` turns that into shell exit 0, EVEN when
+                # the agent hit 5x HTTP 429 → died with zero assistant
+                # messages. The dispatcher marked "protocol violation"
+                # (no completion signal) and re-fired into the same wall
+                # until gave_up. See ticket t_3e1634d9 for the RCA.
+                #
+                # Signal chain: run_conversation() sets result["failed"] on
+                # terminal API errors; cli.chat() captures that on
+                # self._last_run_result before returning. Here we consult
+                # it, mapping failures to a non-zero exit that respects
+                # the special kanban rate-limit convention (EX_TEMPFAIL
+                # so the dispatcher requeues without a failure-counter
+                # tick, matching the fully-quiet -Q path at line ~17915).
+                _last_run = getattr(cli, "_last_run_result", None) or {}
+                if _last_run.get("failed"):
+                    _exit_code = 1
+                    if os.environ.get("HERMES_KANBAN_TASK") and _last_run.get(
+                        "failure_reason"
+                    ) in ("rate_limit", "billing"):
+                        try:
+                            from hermes_cli.kanban_db import (
+                                KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
+                            )
+                            _exit_code = _RL_CODE
+                        except Exception:
+                            _exit_code = 1
+                    # The outer ``finally:`` block runs _finalize_single_query,
+                    # so we don't call it inline — sys.exit unwinds through
+                    # the finally.
+                    sys.exit(_exit_code)
         finally:
             _finalize_single_query(cli)
         return

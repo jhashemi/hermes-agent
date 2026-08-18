@@ -99,6 +99,55 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# INCIDENT-01 — dispatch-gate model-liveness KV reader
+# =============================================================================
+#
+# Wires a shared, in-memory KV reader used by the spawn-time liveness gate
+# (see ``dispatch_gate.check_model_liveness`` and its call site in the
+# cluster-routing branch of ``dispatch_once``). Kept as a module-level
+# singleton so:
+#   - the KV survives across dispatch ticks (a model marked dead once
+#     stays dead until its TTL expires — no re-checking every tick);
+#   - a future NATS-bridged reader can be plugged in with a single-line
+#     swap here, without threading a writer through every call site;
+#   - tests can monkeypatch ``_LIVENESS_KV`` directly if they need to
+#     drive the gate deterministically.
+#
+# Fail-safe posture: the reader ALWAYS returns None on missing keys,
+# which the gate treats as "no signal → fail open". A dead reader can
+# never block real work. See ticket t_3e1634d9 for the RCA.
+
+_LIVENESS_KV: dict[str, dict] | None = None
+
+
+def _get_liveness_kv_reader():
+    """Return the shared KV reader for the dispatch-gate liveness probe.
+
+    Lazy-init on first call so import-time is unaffected. Returns a
+    zero-arg-safe callable: ``reader(key) -> dict | None``.
+    """
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+    return _kv.get
+
+
+def _get_liveness_kv_writer():
+    """Companion writer for tests and post-mortem recorders."""
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+
+    def _write(key: str, value: dict) -> None:
+        _kv[key] = value
+
+    return _write
+
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -9580,6 +9629,52 @@ def _default_spawn(
                 "spawning locally", target_node,
             )
         else:
+            # INCIDENT-01 (2026-08-18) — model liveness gate.
+            #
+            # Before spawning, consult the ``hrv.node_state.<node>.<provider>.<model>``
+            # KV. If a fresh entry says the resolved model is quota-dead on
+            # this node, decline the (task, node) pair and fall back to local
+            # spawn — the dispatcher can then re-route or the card will
+            # naturally re-queue elsewhere. Fail-open on any error / missing
+            # signal so a broken gate NEVER blocks real work. See
+            # ``hermes_cli/dispatch_gate.py`` for the contract and
+            # ticket t_3e1634d9 for the RCA.
+            try:
+                from hermes_cli.dispatch_gate import check_model_liveness
+                # KV reader is a module-level singleton (lazy-init inline
+                # so import-time is unaffected). In-memory until the NATS
+                # bridge lands — reads return None, gate fails open, and
+                # dispatch behavior is preserved. Wired here so the import
+                # path is exercised at dispatch time and any future NATS
+                # bridge slot-in is a single-line change.
+                _gate_reader = _get_liveness_kv_reader()
+                _resolved_provider = getattr(task, "provider_override", None) or ""
+                _resolved_model = getattr(task, "model_override", None) or ""
+                if _resolved_provider and _resolved_model:
+                    _verdict = check_model_liveness(
+                        node=target_node,
+                        provider=_resolved_provider,
+                        model=_resolved_model,
+                        kv_reader=_gate_reader,
+                    )
+                    if not _verdict.allow:
+                        logger.warning(
+                            "[dispatch] model-liveness gate rejected %s "
+                            "for task %s (node=%s, provider=%s, model=%s): %s "
+                            "— spawning locally instead",
+                            target_node, task.id, target_node,
+                            _resolved_provider, _resolved_model, _verdict.reason,
+                        )
+                        host = None   # fall through to local spawn
+            except Exception as _gate_exc:
+                # Fail-open on any gate error — the incident is worse if
+                # the gate itself blocks dispatch than if it fails silent.
+                logger.debug(
+                    "[dispatch] model-liveness gate raised %r — failing open",
+                    _gate_exc,
+                )
+
+        if host is not None:
             # Validate that the remote node is reachable (basic SSH probe).
             # If the probe fails, fall back to local spawn rather than
             # blocking the dispatch loop. The audit trail in the LLM

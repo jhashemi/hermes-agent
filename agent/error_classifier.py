@@ -214,6 +214,31 @@ _USAGE_LIMIT_TRANSIENT_SIGNALS = [
     "window",
 ]
 
+# INCIDENT-01 (2026-08-18) — quota-exhaustion patterns.
+#
+# Bodies that unambiguously mean "your account's quota window is
+# exhausted; retrying within the retry-backoff budget will not help".
+# These require an immediate cascade to fallback_providers rather than
+# 5 same-model retries (2s → 40s of backoff = 60+ wasted seconds
+# guaranteed to hit the same wall). See ticket t_3e1634d9.
+#
+# Kept narrow so a transient burst 429 ("rate limit exceeded, please
+# slow down") still takes the backoff path — over-generalizing here
+# would make the agent hop providers on every transient hiccup.
+_QUOTA_EXHAUSTED_PATTERNS = [
+    "session usage limit",          # ollama-cloud
+    "reached your usage limit",     # generic phrasing
+    "reached your daily",           # daily/monthly variants
+    "reached your monthly",
+    "reached your weekly",
+    "usage limit exceeded",         # explicit exhaustion
+    "quota exceeded",               # OpenAI classic
+    "insufficient_quota",           # OpenAI error code as body substring
+    "billing hard limit",           # Anthropic/OpenAI hard-cap
+    "monthly token limit",          # generic
+    "daily request limit",          # generic
+]
+
 # Payload-too-large patterns detected from message text (no status_code attr).
 # Proxies and some backends embed the HTTP status in the error message.
 _PAYLOAD_TOO_LARGE_PATTERNS = [
@@ -1080,6 +1105,21 @@ def _classify_by_status(
             return result_fn(
                 FailoverReason.overloaded,
                 retryable=True,
+            )
+        # INCIDENT-01 — quota-exhaustion 429 bodies must cascade IMMEDIATELY
+        # to fallback_providers, not burn 5 same-model retries. The 2026-08-18
+        # ollama-cloud "session usage limit" incident burned 60+s of backoff on
+        # an exhausted account before dying rc=0 with no fallback attempt.
+        # A transient retry signal in the same body overrides — "quota
+        # exceeded, retry in 30s" is legitimately retryable. See t_3e1634d9.
+        if any(p in error_msg for p in _QUOTA_EXHAUSTED_PATTERNS) and not any(
+            p in error_msg for p in _USAGE_LIMIT_TRANSIENT_SIGNALS
+        ):
+            return result_fn(
+                FailoverReason.rate_limit,
+                retryable=False,
+                should_rotate_credential=True,
+                should_fallback=True,
             )
         # Distinguish an OpenRouter-aggregator upstream 429 (an upstream model
         # like DeepSeek rate-limited OpenRouter's aggregate traffic) from an
