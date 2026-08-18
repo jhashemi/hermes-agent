@@ -141,6 +141,102 @@ KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
 
+# Per-task resource declarations that a task body's YAML front-matter may carry
+# under the ``min_resources:`` key. Any other key found in that block is
+# silently dropped so a future extension of the schema (e.g. ``gpu_count``)
+# lands on unrecognised keys as data — never as a create_task crash — until
+# the dispatcher is taught to honour it. Values are coerced to the type shown
+# below (``float`` / ``int``); anything that fails coercion is dropped rather
+# than blowing up ingest.
+SUPPORTED_MIN_RESOURCE_KEYS: dict[str, type] = {
+    "mem_gb": float,
+    "cpu_cores": int,
+    "bedrock_tpm_reservation": int,
+}
+
+# Applied by ``get_task_min_resources`` when the DB column is NULL (no
+# declaration on the card) OR only partially declared. Kept at Python level
+# — NEVER written into the ``min_resources`` column — so a card with a NULL
+# column is provably "worker didn't declare, apply defaults" and not "worker
+# declared these exact defaults". That distinction lets a future dispatcher
+# change the defaults without silently rewriting every existing card.
+DEFAULT_MIN_RESOURCES: dict[str, Any] = {
+    "mem_gb": 0.5,
+    "cpu_cores": 1,
+    "bedrock_tpm_reservation": 10000,
+}
+
+
+def _parse_min_resources_from_body(body: Optional[str]) -> Optional[dict]:
+    """Extract a ``min_resources`` dict from a task body's YAML front-matter.
+
+    Returns ``None`` when the body has no front-matter, when the front-matter
+    doesn't declare ``min_resources:``, or when the YAML is malformed. Errors
+    are swallowed on purpose: task ingest must not fail because someone
+    wrote sloppy YAML in the card body — the caller falls back to NULL,
+    which means "defaults apply at dispatch time".
+
+    Only keys in :data:`SUPPORTED_MIN_RESOURCE_KEYS` are kept; the rest are
+    dropped so an unknown key never lands as a mystery column value that
+    downstream code has to defensively strip. Type coercion is best-effort;
+    a value that fails to coerce is dropped rather than crashing ingest.
+    """
+    if not body:
+        return None
+
+    # Accept front-matter delimited by ``---`` on its own line, optionally
+    # preceded by BOM/whitespace. We deliberately don't try to parse the whole
+    # body as YAML — task bodies are markdown, not structured docs.
+    match = re.match(r"^\s*---\s*\n(.*?)\n---\s*(?:\n|$)", body, re.DOTALL)
+    if not match:
+        return None
+    fm_text = match.group(1)
+
+    try:
+        # Local import — kanban_db is a hot-path module and pyyaml isn't
+        # otherwise imported here. Keeps the import cost off the fast path
+        # for callers that never touch ingest.
+        import yaml  # type: ignore
+
+        parsed = yaml.safe_load(fm_text)
+    except Exception:
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+    raw = parsed.get("min_resources")
+    if not isinstance(raw, dict):
+        return None
+
+    out: dict[str, Any] = {}
+    for key, coerce in SUPPORTED_MIN_RESOURCE_KEYS.items():
+        if key not in raw:
+            continue
+        value = raw[key]
+        try:
+            out[key] = coerce(value)
+        except (TypeError, ValueError):
+            # Silently drop bad values — matches the "sloppy YAML doesn't
+            # break ingest" contract above.
+            continue
+    return out or None
+
+
+def _parse_min_resources_json(raw: Optional[str]) -> Optional[dict]:
+    """Decode the ``min_resources`` JSON column back into a dict.
+
+    Returns ``None`` for a NULL column, a blank string, or malformed JSON.
+    Used by :meth:`Task.from_row`.
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 
 def _assert_not_delegated_child_mutation() -> None:
     """Reject Kanban state mutations from ``delegate_task`` child contexts.
@@ -967,6 +1063,12 @@ class Task:
     # Unblock-loop counter. See the column comment in SCHEMA_SQL and
     # ``BLOCK_RECURRENCE_LIMIT``. Reset only on successful completion.
     block_recurrences: int = 0
+    # Per-task resource declaration parsed from YAML front-matter's
+    # ``min_resources:`` key at ``create_task`` time. ``None`` == column
+    # is NULL == worker didn't declare; the dispatcher merges in
+    # DEFAULT_MIN_RESOURCES for missing keys via ``get_task_min_resources``.
+    # See :func:`_parse_min_resources_from_body` for the ingest contract.
+    min_resources: Optional[dict] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1055,6 +1157,11 @@ class Task:
                 int(row["block_recurrences"])
                 if "block_recurrences" in keys and row["block_recurrences"] is not None
                 else 0
+            ),
+            min_resources=(
+                _parse_min_resources_json(row["min_resources"])
+                if "min_resources" in keys
+                else None
             ),
         )
 
@@ -1238,7 +1345,15 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- ``blocked`` so a cron can't spin it forever. Reset to 0 only on a
     -- successful completion — NOT on unblock (resetting on unblock is exactly
     -- the amnesia that let the loop run unbounded).
-    block_recurrences    INTEGER NOT NULL DEFAULT 0
+    block_recurrences    INTEGER NOT NULL DEFAULT 0,
+    -- Per-task resource declaration (JSON blob, nullable) parsed from the
+    -- task body's YAML front-matter ``min_resources:`` key. Supported sub-keys:
+    -- ``mem_gb`` (float), ``cpu_cores`` (int), ``bedrock_tpm_reservation``
+    -- (int). Used by the VCG dispatcher to filter unfit nodes. NULL means
+    -- "use defaults" — the default dict lives at Python-level in
+    -- DEFAULT_MIN_RESOURCES and is applied at dispatch time, NOT written
+    -- to the column, so declared-vs-default is distinguishable.
+    min_resources        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2431,6 +2546,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             "block_recurrences INTEGER NOT NULL DEFAULT 0",
         )
 
+    if "min_resources" not in cols:
+        # Per-task resource declaration (JSON blob, nullable). Parsed from
+        # the task body's YAML front-matter ``min_resources:`` key at
+        # ``create_task`` time. NULL on legacy rows and on any task that
+        # didn't declare one — the dispatcher applies DEFAULT_MIN_RESOURCES
+        # at dispatch time, so leaving the column NULL distinguishes
+        # declared-vs-default without lying about intent.
+        _add_column_if_missing(
+            conn, "tasks", "min_resources", "min_resources TEXT"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -3158,6 +3284,20 @@ def create_task(
                         except Exception:
                             branch_name = None
 
+                # Parse min_resources front-matter (if any) BEFORE the INSERT
+                # so an ingest-time write is atomic with the task creation and
+                # readers see either the row-plus-declaration or nothing at
+                # all. See ``_parse_min_resources_from_body`` for the contract
+                # — a missing / malformed / empty declaration lands as None,
+                # which stores NULL in the column and lets the dispatcher
+                # apply DEFAULT_MIN_RESOURCES at dispatch time.
+                min_resources_dict = _parse_min_resources_from_body(body)
+                min_resources_json = (
+                    json.dumps(min_resources_dict)
+                    if min_resources_dict is not None
+                    else None
+                )
+
                 conn.execute(
                     """
                     INSERT INTO tasks (
@@ -3166,8 +3306,8 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
-                        goal_mode, goal_max_turns, session_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, min_resources
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -3192,6 +3332,7 @@ def create_task(
                         1 if goal_mode else 0,
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
+                        min_resources_json,
                     ),
                 )
                 for pid in parents:
@@ -3285,6 +3426,42 @@ def _inherit_notify_subs(
 def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
     row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return Task.from_row(row) if row else None
+
+
+def get_task_min_resources(
+    conn: sqlite3.Connection, task_id: str
+) -> dict:
+    """Return the resource requirements for ``task_id``, merged with defaults.
+
+    The VCG dispatcher calls this at dispatch time to decide whether a
+    candidate node has enough headroom. Contract:
+
+    * When the column is NULL (worker didn't declare) OR the task doesn't
+      exist, returns a fresh copy of :data:`DEFAULT_MIN_RESOURCES`.
+    * When only some keys were declared, the missing ones are filled from
+      :data:`DEFAULT_MIN_RESOURCES` so the caller always gets a fully
+      populated dict — no ``KeyError`` on a partial declaration.
+    * Unknown keys already in the stored JSON are preserved so a future
+      dispatcher extension can start consulting them without a schema
+      migration. Ingest strips unknown keys today, so this branch only
+      fires on rows written by a newer version of this module.
+
+    The returned dict is always a fresh copy — callers can mutate it
+    without touching :data:`DEFAULT_MIN_RESOURCES`.
+    """
+    row = conn.execute(
+        "SELECT min_resources FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    stored: Optional[dict]
+    if row is None:
+        stored = None
+    else:
+        stored = _parse_min_resources_json(row["min_resources"])
+
+    merged: dict = dict(DEFAULT_MIN_RESOURCES)
+    if stored:
+        merged.update(stored)
+    return merged
 
 
 # Canonical sort-order mappings for ``hermes kanban list --sort``.
