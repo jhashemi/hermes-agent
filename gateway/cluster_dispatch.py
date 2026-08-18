@@ -197,6 +197,80 @@ _KNOWN_NODES: set[str] = set(_NODE_HOSTS.keys())
 # Remote spawn via SSH
 # ---------------------------------------------------------------------------
 
+def _worker_api_env_for_remote(target_node: str) -> dict[str, str]:
+    """Return the ``HERMES_KANBAN_API_*`` env pairs for a remote-spawn worker.
+
+    Cross-host workers cannot safely open ``kanban.db`` files over NFS
+    (see ``hermes_cli.kanban_db.KanbanDbOnNetworkFsError``). Instead,
+    when the dispatcher SSH-spawns a worker onto a REMOTE node, we
+    export the API endpoint + bearer token so the worker's kanban_*
+    tools route over HTTP to the DB owner (hermes2) — never touching
+    the DB file directly.
+
+    Config precedence:
+      * ``HERMES_KANBAN_REMOTE_API_URL_<UPPER_NODE>`` (per-target override)
+      * ``HERMES_KANBAN_REMOTE_API_URL``              (default for all)
+      * ``kanban.remote_api_url`` in config.yaml      (persistent default)
+
+    Same three-tier lookup for the token:
+      * ``HERMES_KANBAN_REMOTE_API_TOKEN_<UPPER_NODE>``
+      * ``HERMES_KANBAN_REMOTE_API_TOKEN``
+      * ``kanban.remote_api_token`` in config.yaml
+
+    Returns an empty dict when neither URL nor token is configured — the
+    worker then falls back to the legacy local-open path, which is what
+    the NFS gate will refuse. That is the intended safety net: opt-in
+    plumbing failure surfaces as a clean refusal instead of silent
+    resumed corruption.
+
+    Never returns partial state: if either URL or token is missing when
+    the other is set, we log a warning and return empty. Half-configured
+    remote workers must never appear to be working.
+    """
+    node_key = target_node.upper().replace("-", "_")
+
+    def _pick(prefix: str, cfg_key: str) -> str:
+        # 1. Per-target env override.
+        per_target = os.environ.get(f"{prefix}_{node_key}", "").strip()
+        if per_target:
+            return per_target
+        # 2. Global env default.
+        glob = os.environ.get(prefix, "").strip()
+        if glob:
+            return glob
+        # 3. Persistent config.
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+        except Exception:
+            return ""
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        val = kanban_cfg.get(cfg_key, "") or ""
+        return str(val).strip()
+
+    url = _pick("HERMES_KANBAN_REMOTE_API_URL", "remote_api_url")
+    token = _pick("HERMES_KANBAN_REMOTE_API_TOKEN", "remote_api_token")
+
+    if not url and not token:
+        return {}  # legacy local-open behaviour (NFS gate will refuse — by design).
+    if not (url and token):
+        # Half-configured — refuse to produce env so the operator sees a
+        # loud failure instead of a silent bypass of the auth token.
+        logger.warning(
+            "[cluster_dispatch] Remote kanban API env is half-configured for %s: "
+            "url=%r token=%s. Refusing to export partial env; remote workers "
+            "will fall back to the local-open path (which the NFS gate refuses "
+            "when the workspace sits on an unsafe mount).",
+            target_node, url, "<set>" if token else "<empty>",
+        )
+        return {}
+
+    return {
+        "HERMES_KANBAN_API_URL": url,
+        "HERMES_KANBAN_API_TOKEN": token,
+    }
+
+
 def remote_spawn_cmd(
     task_id: str,
     assignee: str,
@@ -220,7 +294,10 @@ def remote_spawn_cmd(
         board: Kanban board slug
         target_node: Node name from NODE_HOSTS (must have a non-None host)
         skills: Additional skills to load (already includes kanban-worker)
-        env_extra: Extra environment variables to forward via SSH
+        env_extra: Extra environment variables to forward via SSH. Any
+            worker API env keys resolved from :func:`_worker_api_env_for_remote`
+            are merged in AFTER these, so callers passing an explicit
+            ``HERMES_KANBAN_API_URL``/``_TOKEN`` are honoured verbatim.
 
     Returns:
         Command list for ``subprocess.Popen``
@@ -259,9 +336,26 @@ def remote_spawn_cmd(
     env_lines.append(f"export HERMES_KANBAN_TASK={task_id}")
     env_lines.append(f"export HERMES_KANBAN_WORKSPACE={workspace}")
     env_lines.append(f"export HERMES_KANBAN_BOARD={board}")
+
+    # Merge caller-supplied env with the resolved API endpoint env. The
+    # resolved values LAST so an explicit test/override in env_extra can
+    # be strengthened (not overridden) — callers who want to force a
+    # different endpoint can set the resolver's own inputs instead.
+    #
+    # The API token especially can contain shell metacharacters (base64
+    # padding, JWT dots, random URL-safe alphabet) that WOULD be safe under
+    # ``export FOO=bar`` in most cases but must not be relied on across all
+    # token formats. Shell-quote every merged value so the SSH remote-shell
+    # sees the literal string. (The three env vars above ship raw for
+    # bug-for-bug parity with the original implementation; task_id/board/
+    # workspace are already validated upstream.)
+    import shlex
+    merged_env: dict[str, str] = {}
     if env_extra:
-        for k, v in env_extra.items():
-            env_lines.append(f"export {k}={v}")
+        merged_env.update(env_extra)
+    merged_env.update(_worker_api_env_for_remote(target_node))
+    for k, v in merged_env.items():
+        env_lines.append(f"export {k}={shlex.quote(str(v))}")
 
     # Wrap in bash -l so ~/.bashrc / ~/.profile runs and the venv hermes shim
     # is on PATH.  Without -l the SSH non-interactive shell has a bare minimal
