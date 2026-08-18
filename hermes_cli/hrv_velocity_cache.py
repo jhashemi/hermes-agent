@@ -152,6 +152,16 @@ class HRVVelocityCache:
                 break
             except Exception as e:  # noqa: BLE001
                 logger.warning("hrv velocity cache: connection failed (%s); retrying", e)
+                # close-on-failure (2026-08-18): if connect succeeded but a later
+                # step threw, self._nc still holds an open connection; looping
+                # without closing leaks one socket per retry (~1 per 5s, the
+                # EMFILE disease vector from the INV-FD incident).
+                if self._nc is not None:
+                    try:
+                        await self._nc.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    self._nc = None
                 await asyncio.sleep(5)
 
     async def start(self) -> None:
