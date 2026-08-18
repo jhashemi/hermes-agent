@@ -705,6 +705,56 @@ class TestInitMissingLines:
         result = pre_gateway_dispatch_hook({"user_id": "u1"})
         assert result is None
 
+    def test_hook_accepts_message_event_dataclass(self):
+        """SMOKE-FAIL-01 regression: real gateway MessageEvent dataclass must
+        not raise AttributeError on .get. Reproduces the traceback observed
+        in journalctl -u hermes-gateway.service:
+
+            AttributeError: 'MessageEvent' object has no attribute 'get'
+              File "plugins/executive_activation/__init__.py", line 175
+        """
+        from plugins.executive_activation import pre_gateway_dispatch_hook
+        from gateway.platforms.base import MessageEvent
+        from gateway.session import SessionSource
+        from gateway.config import Platform
+
+        source = SessionSource(platform=Platform.LOCAL, chat_id="c1", user_id="u1")
+
+        # Empty text → returns None (no exception)
+        event = MessageEvent(text="", source=source)
+        assert pre_gateway_dispatch_hook(event) is None
+
+        # Non-command text → returns None (background resolve, no exception).
+        # Length >10 exercises the background-resolution branch.
+        event2 = MessageEvent(text="tell me about distributed consensus", source=source)
+        # Must not raise. Result may be None or a dict — both are valid non-error outcomes.
+        result = pre_gateway_dispatch_hook(event2)
+        assert result is None or isinstance(result, dict)
+
+    def test_hook_message_event_executive_resolve(self):
+        """MessageEvent with /executive-resolve slash command returns a reply dict."""
+        from plugins.executive_activation import pre_gateway_dispatch_hook
+        from gateway.platforms.base import MessageEvent
+        from gateway.session import SessionSource
+        from gateway.config import Platform
+
+        source = SessionSource(platform=Platform.LOCAL, chat_id="c1", user_id="u1")
+        event = MessageEvent(text="/executive-resolve explain rocket propulsion", source=source)
+        result = pre_gateway_dispatch_hook(event)
+        assert result is not None
+        assert result["action"] == "reply"
+        assert "Executive Agent Resolved" in result["text"]
+
+    def test_hook_message_event_no_source_does_not_crash(self):
+        """MessageEvent with source=None (edge case) does not raise."""
+        from plugins.executive_activation import pre_gateway_dispatch_hook
+        from gateway.platforms.base import MessageEvent
+
+        event = MessageEvent(text="hello there", source=None)  # type: ignore[arg-type]
+        # Must not raise.
+        result = pre_gateway_dispatch_hook(event)
+        assert result is None or isinstance(result, dict)
+
     def test_hook_executive_resolve_command(self):
         """/executive-resolve <cmd> returns resolve reply dict."""
         from plugins.executive_activation import pre_gateway_dispatch_hook
