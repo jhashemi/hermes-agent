@@ -1118,6 +1118,14 @@ class Task:
     # DEFAULT_MIN_RESOURCES for missing keys via ``get_task_min_resources``.
     # See :func:`_parse_min_resources_from_body` for the ingest contract.
     min_resources: Optional[dict] = None
+    # Cluster node the worker was actually spawned on. Set by
+    # ``_default_spawn`` after a successful remote SSH spawn (via
+    # ``_set_worker_node`` in the dispatch loop). ``None`` means "local
+    # spawn" — the pre-existing case where the worker runs on the same
+    # host as the dispatcher. Non-None values are consulted by
+    # ``detect_crashed_workers`` and ``release_stale_claims`` so a node
+    # never runs ``_pid_alive`` against a pid owned by another host.
+    worker_node: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1210,6 +1218,11 @@ class Task:
             min_resources=(
                 _parse_min_resources_json(row["min_resources"])
                 if "min_resources" in keys
+                else None
+            ),
+            worker_node=(
+                row["worker_node"]
+                if "worker_node" in keys and row["worker_node"]
                 else None
             ),
         )
@@ -1402,7 +1415,17 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- "use defaults" — the default dict lives at Python-level in
     -- DEFAULT_MIN_RESOURCES and is applied at dispatch time, NOT written
     -- to the column, so declared-vs-default is distinguishable.
-    min_resources        TEXT
+    min_resources        TEXT,
+    -- Cluster node where the worker was actually spawned. Populated by
+    -- ``_default_spawn`` after a successful remote SSH spawn. NULL means
+    -- "local spawn" — reap loops on the local node police liveness the
+    -- normal way. When set, ``detect_crashed_workers`` and
+    -- ``release_stale_claims`` on OTHER nodes skip the local-pid check
+    -- (they can't see remote pids), leaving liveness to that node's own
+    -- reap loop plus the heartbeat-staleness backstop. Fixes the false-
+    -- crash storm on cluster boards where SSH-spawned workers were
+    -- reaped by the wrong host because ``_pid_alive`` couldn't see them.
+    worker_node          TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -2683,6 +2706,19 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # declared-vs-default without lying about intent.
         _add_column_if_missing(
             conn, "tasks", "min_resources", "min_resources TEXT"
+        )
+
+    if "worker_node" not in cols:
+        # Cluster node the worker was actually spawned on. Populated by
+        # ``_default_spawn`` after a successful SSH spawn to a remote
+        # node; NULL means "local" (the pre-existing behaviour). Reap
+        # loops on OTHER nodes gate the local ``_pid_alive`` check on
+        # this column so remote workers aren't false-crashed. See
+        # ticket t_78fbccf4 (RCA t_360c2eb1). Idempotent: existing rows
+        # keep NULL, which is treated as "local" — the same policy they
+        # had before the column existed.
+        _add_column_if_missing(
+            conn, "tasks", "worker_node", "worker_node TEXT"
         )
 
     # Indexes over additive ``tasks`` columns must be created after the
@@ -5051,8 +5087,10 @@ def release_stale_claims(
     now = int(time.time())
     reclaimed = 0
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    _local_node = _local_node_id()
     stale = conn.execute(
-        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at "
+        "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at, "
+        "       worker_node "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
         "  AND claim_expires < ?",
@@ -5062,6 +5100,8 @@ def release_stale_claims(
         lock = row["claim_lock"] or ""
         host_local = lock.startswith(host_prefix)
         hb = row["last_heartbeat_at"]
+        wn = row["worker_node"] if "worker_node" in row.keys() else None
+        remote_node = bool(wn and wn != _local_node)
         # Heartbeat staleness backstop: if we have a heartbeat at all
         # and it's older than the max-stale threshold, the worker is
         # not making observable progress.  Reclaim instead of extending,
@@ -5070,6 +5110,90 @@ def release_stale_claims(
             hb is not None
             and (now - int(hb)) > DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
         )
+        # Cluster gate: for tasks routed to a different node, this host
+        # can't see the pid — ``_pid_alive`` would return False against
+        # nothing (or worse, True against an unrelated local pid). Skip
+        # pid-based extension; treat a fresh heartbeat as the liveness
+        # signal instead. The remote node's own reap loop remains
+        # authoritative for genuine crashes (its worker_pid matches a
+        # real local pid there). Only reclaim on genuine heartbeat
+        # staleness — no heartbeat ever OR heartbeat past the max-stale
+        # window — so a healthy remote worker keeps its claim.
+        if remote_node:
+            has_recent_hb = (
+                hb is not None
+                and (now - int(hb)) <= DEFAULT_CLAIM_HEARTBEAT_MAX_STALE_SECONDS
+            )
+            if has_recent_hb:
+                new_expires = now + _resolve_claim_ttl_seconds()
+                with write_txn(conn):
+                    cur = conn.execute(
+                        "UPDATE tasks SET claim_expires = ? "
+                        "WHERE id = ? AND status = 'running' "
+                        "  AND claim_lock IS ? "
+                        "  AND claim_expires IS NOT NULL "
+                        "  AND claim_expires < ?",
+                        (new_expires, row["id"], row["claim_lock"], now),
+                    )
+                    if cur.rowcount != 1:
+                        continue
+                    run_id = _current_run_id(conn, row["id"])
+                    if run_id is not None:
+                        conn.execute(
+                            "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
+                            (new_expires, run_id),
+                        )
+                    _append_event(
+                        conn, row["id"], "claim_extended",
+                        {
+                            "reason": "remote_worker_heartbeat_fresh",
+                            "worker_node": wn,
+                            "worker_pid": (
+                                int(row["worker_pid"])
+                                if row["worker_pid"] else None
+                            ),
+                            "claim_lock": row["claim_lock"],
+                            "claim_expires_was": int(row["claim_expires"]),
+                            "claim_expires_now": new_expires,
+                            "last_heartbeat_at": int(hb) if hb is not None else None,
+                        },
+                        run_id=run_id,
+                    )
+                continue
+            # No fresh heartbeat + TTL expired → legit stale reclaim.
+            # Fall through to the standard release path below, but skip
+            # ``_terminate_reclaimed_worker`` (it's host-local-only; the
+            # remote reap loop handles process cleanup on the other node).
+            with write_txn(conn):
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
+                    "claim_expires = NULL, worker_pid = NULL, "
+                    "worker_node = NULL "
+                    "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
+                    "AND claim_expires IS NOT NULL AND claim_expires < ?",
+                    (row["id"], row["claim_lock"], now),
+                )
+                if cur.rowcount != 1:
+                    continue
+                payload = {
+                    "stale_lock": row["claim_lock"],
+                    "worker_node": wn,
+                    "heartbeat_age_seconds": (
+                        int(now - int(hb)) if hb is not None else None
+                    ),
+                    "reason": "remote_worker_heartbeat_stale",
+                }
+                run_id = _end_run(
+                    conn, row["id"],
+                    outcome="reclaimed", status="reclaimed",
+                    error=f"remote-stale lock={row['claim_lock']}",
+                    metadata=payload,
+                )
+                _append_event(
+                    conn, row["id"], "reclaimed", payload, run_id=run_id,
+                )
+            reclaimed += 1
+            continue
         if (
             host_local
             and row["worker_pid"]
@@ -8166,13 +8290,24 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # counter (see the post-txn loop below).
     crash_details: list[tuple[str, int, str, bool, str]] = []
     # (task_id, pid, claimer, protocol_violation, error_text)
+    _local_node = _local_node_id()
     with write_txn(conn):
         rows = conn.execute(
-            "SELECT id, worker_pid, claim_lock, started_at FROM tasks "
+            "SELECT id, worker_pid, claim_lock, started_at, worker_node "
+            "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
+            # Cluster gate: skip tasks that were spawned on another node.
+            # Their pids belong to that host; ``_pid_alive`` here would
+            # false-positive against unrelated (or nonexistent) local
+            # pids and mass-reclaim healthy remote workers every tick.
+            # A NULL ``worker_node`` means "local" (pre-migration default
+            # and single-host boards), which still hits the check.
+            wn = row["worker_node"] if "worker_node" in row.keys() else None
+            if wn and wn != _local_node:
+                continue
             # Only check liveness for claims owned by this host.
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):
@@ -8668,6 +8803,39 @@ def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
                 (int(pid), run_id),
             )
         _append_event(conn, task_id, "spawned", {"pid": int(pid)}, run_id=run_id)
+
+
+def _local_node_id() -> str:
+    """Return the cluster node id for this host.
+
+    Sourced from ``HERMES_CLUSTER_LOCAL_NODE`` (see the identical constant
+    in ``gateway/cluster_dispatch.py``). Kept as a tiny helper so reap
+    loops can compare against ``tasks.worker_node`` without inlining the
+    env-var default in three places.
+    """
+    return os.environ.get("HERMES_CLUSTER_LOCAL_NODE", "hermes2")
+
+
+def _set_worker_node(
+    conn: sqlite3.Connection,
+    task_id: str,
+    node: Optional[str],
+) -> None:
+    """Record the cluster node a worker was actually spawned on.
+
+    Called from the dispatch loop after ``_default_spawn`` returns, only
+    when the worker went to a remote node (``node != local``). Local
+    spawns leave the column NULL so legacy rows and single-host boards
+    keep behaving as they did before this column existed.
+
+    Idempotent: passing ``None`` clears the column (used when the spawn
+    actually fell through to local after a remote probe failed).
+    """
+    with write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET worker_node = ? WHERE id = ?",
+            (node, task_id),
+        )
 
 
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
@@ -9274,6 +9442,17 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                # Persist which node the worker actually landed on so
+                # the reap loops on OTHER nodes don't run ``_pid_alive``
+                # against a remote pid (which would false-crash the
+                # task every tick). ``getattr`` keeps custom
+                # ``spawn_fn`` stubs (tests, plugins) from tripping on
+                # the missing attribute — they simply record None,
+                # which is treated as a local spawn (same as before
+                # this column existed).
+                _actual_node = getattr(_spawn, "_last_actual_node", None)
+                if _actual_node and _actual_node != _local_node_id():
+                    _set_worker_node(conn, claimed.id, _actual_node)
             # NOTE: we intentionally do NOT reset consecutive_failures
             # here. A successful spawn proves the worker can start but
             # doesn't prove the run will succeed. Under unified
@@ -9369,6 +9548,12 @@ def _dispatch_once_locked(
                 pid = _spawn(claimed, str(workspace))
             if pid:
                 _set_worker_pid(conn, claimed.id, int(pid))
+                # Mirror the ready-dispatch path: persist worker_node
+                # if the review agent was routed to a remote node so
+                # this host's reap loops don't false-crash it.
+                _actual_node = getattr(_spawn, "_last_actual_node", None)
+                if _actual_node and _actual_node != _local_node_id():
+                    _set_worker_node(conn, claimed.id, _actual_node)
             result.spawned.append((claimed.id, claimed.assignee or "", str(workspace)))
             spawned += 1
         except Exception as exc:
@@ -9861,7 +10046,16 @@ def _default_spawn(
     # worker on the remote node via SSH. This is the integration point
     # for the LLM cluster dispatcher: it decides which node runs the
     # task, and _default_spawn routes the worker accordingly.
-    LOCAL_NODE_ID = os.environ.get("HERMES_CLUSTER_LOCAL_NODE", "hermes2")
+    #
+    # Bookkeeping contract: ``_last_actual_node`` records where the
+    # worker was actually placed so the dispatch loop can persist it to
+    # ``tasks.worker_node``. Set to ``target_node`` only when the SSH
+    # spawn actually returned a pid; on every fall-through to local
+    # spawn it's reset to ``None`` (== "this host"). See
+    # ``detect_crashed_workers`` + ``release_stale_claims`` for the reap
+    # loops that consume the column. Ticket t_78fbccf4.
+    _default_spawn._last_actual_node = None  # type: ignore[attr-defined]
+    LOCAL_NODE_ID = _local_node_id()
     if target_node and target_node != LOCAL_NODE_ID:
         # Remote spawn via SSH
         from gateway.cluster_dispatch import spawn_on_remote, _NODE_HOSTS
@@ -9955,6 +10149,11 @@ def _default_spawn(
                         "[dispatch] spawned task %s on remote node %s "
                         "(pid=%s)", task.id, target_node, pid,
                     )
+                    # Signal to dispatch loop that this pid lives on a
+                    # different host — the caller writes it to
+                    # ``tasks.worker_node`` so reap loops here skip
+                    # ``_pid_alive`` (they can't see remote pids).
+                    _default_spawn._last_actual_node = target_node  # type: ignore[attr-defined]
                     return pid
             except Exception as exc:
                 logger.warning(
