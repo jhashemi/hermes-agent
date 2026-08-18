@@ -236,8 +236,14 @@ def remote_spawn_cmd(
     profile_arg = normalize_profile_name(assignee)
     prompt = f"work kanban task {task_id}"
 
-    # Build the remote command — mirrors _default_spawn exactly
-    remote_cmd = [
+    # Build the remote command — mirrors _default_spawn exactly.
+    # RC-2 fix 2026-08-18: bare "hermes" fails in non-interactive SSH sessions
+    # because the venv PATH is not sourced.  Wrap the command in `bash -l -c "..."`
+    # so the remote's login profile (.bashrc / .profile) activates the venv and
+    # puts `hermes` on PATH.  This is the same reason _resolve_hermes_argv() falls
+    # back to the absolute venv python path for local spawns — a non-login shell
+    # does not inherit the user's PATH.
+    remote_cmd_parts = [
         "hermes",
         "-p", profile_arg,
         "--skills", "kanban-worker",
@@ -245,8 +251,8 @@ def remote_spawn_cmd(
     if skills:
         for sk in skills:
             if sk and sk != "kanban-worker":
-                remote_cmd.extend(["--skills", sk])
-    remote_cmd.extend(["chat", "-q", prompt])
+                remote_cmd_parts.extend(["--skills", sk])
+    remote_cmd_parts.extend(["chat", "-q", prompt])
 
     # Environment variables for the remote worker
     env_lines = []
@@ -257,15 +263,17 @@ def remote_spawn_cmd(
         for k, v in env_extra.items():
             env_lines.append(f"export {k}={v}")
 
-    # SSH command: connect, set env, cd to workspace, run hermes
-    # Using BashLogin shell so profile PATH/venv is set up
+    # Wrap in bash -l so ~/.bashrc / ~/.profile runs and the venv hermes shim
+    # is on PATH.  Without -l the SSH non-interactive shell has a bare minimal
+    # PATH and "hermes: command not found" silently exits rc=127.
+    inline_cmd = "; ".join(env_lines) + "; " + " ".join(remote_cmd_parts)
     ssh_cmd = [
         "ssh",
         "-o", "ConnectTimeout=10",
         "-o", "BatchMode=yes",
         "-o", "StrictHostKeyChecking=accept-new",
         host,
-        "; ".join(env_lines) + "; " + " ".join(remote_cmd),
+        f"bash -l -c {inline_cmd!r}",
     ]
     return ssh_cmd
 
