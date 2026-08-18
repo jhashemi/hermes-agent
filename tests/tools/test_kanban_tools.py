@@ -45,7 +45,23 @@ def test_kanban_tools_hidden_without_env_var(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def worker_env(monkeypatch, tmp_path):
+def allow_synthetic_assignees(monkeypatch):
+    """Make ``profile_exists`` return True for every name in the tests.
+
+    Most tool-layer tests use synthetic assignees ("peer", "qa",
+    "test-worker") that don't correspond to real profile directories on
+    disk. Without this patch the assignee-validation check added by
+    VFE-ROUTE-01 Front A1 (t_114ee131) refuses to create those tasks.
+
+    Applied automatically by the ``worker_env`` fixture and inherited by
+    every test that composes on it.
+    """
+    import hermes_cli.profiles as _profiles
+    monkeypatch.setattr(_profiles, "profile_exists", lambda name: True)
+
+
+@pytest.fixture
+def worker_env(monkeypatch, tmp_path, allow_synthetic_assignees):
     """Simulate being a worker: HERMES_HOME isolated, HERMES_KANBAN_TASK set
     after we've created the task."""
     home = tmp_path / ".hermes"
@@ -1023,3 +1039,188 @@ def test_attach_url_happy_path_public_host(worker_env, default_url_guard, monkey
         assert Path(atts[0].stored_path).read_bytes() == payload
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Assignee validation (VFE-ROUTE-01 Front A1 / t_114ee131)
+#
+# ``kanban_create`` must refuse tickets whose assignee is neither a known
+# Hermes profile on disk nor a name in the virtual-assignees registry.
+# Otherwise the dispatcher silently falls back to a CLI worker under an
+# implicit profile, produces prose, exits without kanban_complete, and the
+# ticket loops forever burning inference budget
+# (okr_audit ``acct_fail_e9b3a1532629``).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def strict_assignee_env(monkeypatch, tmp_path):
+    """Like ``worker_env`` but WITHOUT the ``profile_exists`` monkeypatch,
+    so validate_assignee runs against the real (empty) profile set."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "test-worker")
+    monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    from hermes_cli import kanban_db as kb
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    return home
+
+
+def test_create_refuses_unknown_assignee(strict_assignee_env):
+    """``kanban_create`` with an assignee that is neither a real profile
+    nor a registered virtual assignee returns a structured error and
+    does NOT create the task."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+
+    out = kt._handle_create({
+        "title": "route to unwired handler",
+        "assignee": "livekit-boardroom",  # canonical example from the bug
+    })
+    d = json.loads(out)
+    assert d.get("error"), d
+    assert d.get("error_code") == "unknown_assignee", d
+    assert d.get("assignee") == "livekit-boardroom", d
+    assert "virtual_assignees" in (d.get("hint") or ""), d
+
+    # No task row created.
+    conn = kb.connect()
+    try:
+        rows = conn.execute(
+            "SELECT id FROM tasks WHERE title = ?", ("route to unwired handler",)
+        ).fetchall()
+        assert rows == []
+    finally:
+        conn.close()
+
+
+def test_create_accepts_known_profile(monkeypatch, strict_assignee_env):
+    """A real profile on disk passes validation."""
+    profiles_root = strict_assignee_env / "profiles"
+    profiles_root.mkdir(parents=True, exist_ok=True)
+    (profiles_root / "researcher-a").mkdir()
+
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "handled by researcher-a",
+        "assignee": "researcher-a",
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, d
+    assert d.get("task_id"), d
+
+
+def test_create_accepts_registered_virtual_assignee(monkeypatch, strict_assignee_env):
+    """A name in the virtual-assignees registry passes validation without
+    a profile directory on disk."""
+    registry_path = strict_assignee_env / "kanban" / "virtual_assignees.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(
+        "livekit-boardroom:\n  handler: boardroom-driver\n"
+    )
+    monkeypatch.setenv(
+        "HERMES_KANBAN_VIRTUAL_ASSIGNEES", str(registry_path)
+    )
+
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "convene the board",
+        "assignee": "livekit-boardroom",
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, d
+    assert d.get("task_id"), d
+
+
+def test_create_accepts_default_profile(strict_assignee_env):
+    """``default`` is always a valid profile (see ``profile_exists``)."""
+    from tools import kanban_tools as kt
+    out = kt._handle_create({
+        "title": "default profile task",
+        "assignee": "default",
+    })
+    d = json.loads(out)
+    assert d.get("ok") is True, d
+
+
+def test_validate_assignee_helper_returns_none_on_valid(monkeypatch):
+    """Direct test of the ``validate_assignee`` helper: known profile -> None."""
+    from hermes_cli import kanban_db as kb
+    import hermes_cli.profiles as _profiles
+    monkeypatch.setattr(_profiles, "profile_exists", lambda name: True)
+    assert kb.validate_assignee("anything") is None
+
+
+def test_validate_assignee_helper_returns_structured_error(monkeypatch, tmp_path):
+    """Direct test of the ``validate_assignee`` helper: unknown -> dict."""
+    from hermes_cli import kanban_db as kb
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+
+    err = kb.validate_assignee("no-such-profile")
+    assert isinstance(err, dict)
+    assert err["error"] == "unknown_assignee"
+    assert err["assignee"] == "no-such-profile"
+    assert "hint" in err
+
+
+def test_validate_assignee_helper_treats_empty_as_valid():
+    """None / empty assignee returns None (upstream tool handles the
+    ``assignee is required`` case with its own dedicated error)."""
+    from hermes_cli import kanban_db as kb
+    assert kb.validate_assignee(None) is None
+    assert kb.validate_assignee("") is None
+
+
+def test_load_virtual_assignees_missing_file_is_empty(monkeypatch, tmp_path):
+    """No registry file on disk -> empty dict, not an error."""
+    from hermes_cli import kanban_db as kb
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", raising=False)
+    from pathlib import Path as _Path
+    monkeypatch.setattr(_Path, "home", lambda: tmp_path)
+    assert kb.load_virtual_assignees() == {}
+
+
+def test_load_virtual_assignees_malformed_yaml_is_empty(monkeypatch, tmp_path):
+    """Malformed registry -> empty dict (never raises)."""
+    from hermes_cli import kanban_db as kb
+    registry = tmp_path / "reg.yaml"
+    registry.write_text("[this is: not a: valid mapping")
+    monkeypatch.setenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", str(registry))
+    assert kb.load_virtual_assignees() == {}
+
+
+def test_load_virtual_assignees_json_supported(monkeypatch, tmp_path):
+    """JSON format is a first-class citizen alongside YAML."""
+    from hermes_cli import kanban_db as kb
+    registry = tmp_path / "reg.json"
+    registry.write_text('{"livekit-boardroom": {"handler": "boardroom-driver"}}')
+    monkeypatch.setenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", str(registry))
+    got = kb.load_virtual_assignees()
+    assert got == {"livekit-boardroom": {"handler": "boardroom-driver"}}
+
+
+def test_load_virtual_assignees_scalar_entries_normalise_to_empty_meta(monkeypatch, tmp_path):
+    """A bare name -> handler mapping with empty metadata is a valid entry.
+
+    This lets operators register with a compact ``name: null`` YAML form
+    when there is no handler metadata to attach yet.
+    """
+    from hermes_cli import kanban_db as kb
+    registry = tmp_path / "reg.json"
+    registry.write_text('{"livekit-boardroom": null, "route-primitive": 42}')
+    monkeypatch.setenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", str(registry))
+    got = kb.load_virtual_assignees()
+    assert got == {"livekit-boardroom": {}, "route-primitive": {}}
+
