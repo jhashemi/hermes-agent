@@ -1816,3 +1816,205 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# NFS / network-FS refuse gate — connect() must fail closed against
+# SQLite-over-network-FS corruption (incident 2026-08-18).
+# ---------------------------------------------------------------------------
+
+
+def test_kanban_allow_nfs_env_recognises_truthy_values(monkeypatch):
+    """The escape hatch accepts 1/true/yes/on (case-insensitive)."""
+    for truthy in ("1", "true", "TRUE", "yes", "Yes", "on", "ON"):
+        monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", truthy)
+        assert kb._kanban_allow_nfs_env() is True, f"expected True for {truthy!r}"
+    for falsy in ("", "0", "false", "no", "off", "unknown", "  "):
+        monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", falsy)
+        assert kb._kanban_allow_nfs_env() is False, f"expected False for {falsy!r}"
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    assert kb._kanban_allow_nfs_env() is False
+
+
+def test_guard_kanban_db_refuses_nfs_mount(tmp_path, monkeypatch):
+    """connect() must raise KanbanDbOnNetworkFsError on an NFS-mounted path."""
+    db_path = tmp_path / "kanban.db"
+    # Monkeypatch the mount-detection helper so we don't need a real NFS
+    # mount to exercise the failure path.
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p: (str(tmp_path), "nfs4"),
+    )
+    # Escape hatch must be OFF for this test.
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with pytest.raises(kb.KanbanDbOnNetworkFsError) as excinfo:
+        kb.connect(db_path=db_path)
+    err = excinfo.value
+    assert err.fstype == "nfs4"
+    assert err.mount_point == str(tmp_path)
+    assert str(db_path) in str(err)
+    assert "HERMES_KANBAN_ALLOW_NFS" in str(err)
+
+
+@pytest.mark.parametrize("fstype", ["nfs", "nfs3", "nfs4", "cifs", "smb3", "fuse", "fuseblk", "fuse.sshfs"])
+def test_guard_kanban_db_refuses_every_unsafe_fstype(tmp_path, monkeypatch, fstype):
+    """Every fstype in _KANBAN_UNSAFE_FSTYPES must be refused."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p, _fs=fstype: (str(tmp_path), _fs),
+    )
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with pytest.raises(kb.KanbanDbOnNetworkFsError):
+        kb.connect(db_path=db_path)
+
+
+@pytest.mark.parametrize("fstype", ["ext4", "xfs", "btrfs", "zfs", "tmpfs", "overlay"])
+def test_guard_kanban_db_accepts_local_fstypes(tmp_path, monkeypatch, fstype):
+    """Common local filesystems must never be refused."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p, _fs=fstype: (str(tmp_path), _fs),
+    )
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path=db_path) as conn:
+        conn.execute("SELECT 1").fetchone()
+    conn.close()
+
+
+def test_guard_kanban_db_escape_hatch_bypasses_refusal(tmp_path, monkeypatch):
+    """HERMES_KANBAN_ALLOW_NFS=1 must let a real open through even on NFS."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p: (str(tmp_path), "nfs4"),
+    )
+    monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", "1")
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    # Must not raise; must return a usable connection.
+    conn = kb.connect(db_path=db_path)
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_guard_kanban_db_no_proc_mounts_is_permissive(tmp_path, monkeypatch):
+    """When /proc/mounts is unreadable (non-Linux), the gate must not fire.
+
+    We can't observe the mount, so refusing would produce false positives
+    on macOS/Windows. Fail-open on detection failure is deliberate.
+    """
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: None)
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    conn = kb.connect(db_path=db_path)
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(
+    not Path("/proc/mounts").exists(),
+    reason="requires /proc/mounts (Linux) for real mount-table probe",
+)
+def test_resolve_mount_for_path_finds_a_local_mount_for_tmp_path(tmp_path):
+    """Sanity check the real /proc/mounts probe against a live tmp_path.
+
+    We don't assume a specific fstype (developer machines vary), but the
+    probe MUST return a matching mount and the fstype must NOT be one of
+    the network-fs we refuse — otherwise the whole gate would false-positive
+    on every developer laptop running the test suite.
+    """
+    result = kb._resolve_mount_for_path(tmp_path)
+    # Some sandboxed CI runners mask /proc — accept None as a valid answer.
+    if result is None:
+        pytest.skip("mount probe returned None on this host")
+    mount_point, fstype = result
+    assert str(tmp_path).startswith(mount_point.rstrip("/")), \
+        f"probed mount {mount_point!r} not an ancestor of tmp_path {tmp_path!r}"
+    assert fstype.lower() not in kb._KANBAN_UNSAFE_FSTYPES, \
+        f"tmp_path resolved to unsafe fstype {fstype!r}; test suite would false-positive"
+
+
+def test_resolve_mount_for_path_prefers_longest_prefix(tmp_path, monkeypatch):
+    """/proc/mounts must be scanned longest-prefix-first, matching kernel behaviour."""
+    fake_mounts = "\n".join([
+        "sysfs /sys sysfs rw 0 0",
+        "proc /proc proc rw 0 0",
+        # Parent mount is ext4 (local).
+        "/dev/root / ext4 rw 0 0",
+        # Nested NFS mount — deeper prefix must win.
+        f"nfs-server:/exports {tmp_path} nfs4 rw 0 0",
+    ]) + "\n"
+    # Monkeypatch the file read.
+    real_read_text = Path.read_text
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/proc/mounts":
+            return fake_mounts
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    result = kb._resolve_mount_for_path(tmp_path / "kanban.db")
+    assert result is not None
+    mp, fs = result
+    assert fs == "nfs4"
+    assert mp == str(tmp_path)
+
+
+def test_resolve_mount_for_path_avoids_false_prefix_match(tmp_path, monkeypatch):
+    """A mount at '/foo' must NOT match a file at '/foobar/x'.
+
+    Regression guard against the naïve ``resolved.startswith(mp)`` bug:
+    if the check doesn't add a trailing '/' to the mount point, a nested
+    directory whose name starts with the mount-point string would falsely
+    match.
+    """
+    unsafe_neighbour = tmp_path / "kanban_shared"
+    unsafe_neighbour.mkdir()
+    # Real target: tmp_path / "kanban" (a SIBLING of "kanban_shared", not
+    # a child). The gate must classify it by the parent ext4 mount, NOT
+    # by the trailing-letters-differ NFS mount.
+    target = tmp_path / "kanban" / "kanban.db"
+    target.parent.mkdir()
+
+    fake_mounts = "\n".join([
+        "/dev/root / ext4 rw 0 0",
+        f"nfs-server:/exports {unsafe_neighbour} nfs4 rw 0 0",
+    ]) + "\n"
+    real_read_text = Path.read_text
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/proc/mounts":
+            return fake_mounts
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    result = kb._resolve_mount_for_path(target)
+    assert result is not None
+    mp, fs = result
+    # Must fall through to the root mount, NOT the neighbouring NFS mount.
+    assert fs == "ext4"
+
+
+def test_init_db_also_refuses_nfs(tmp_path, monkeypatch):
+    """init_db() must fail closed against NFS, same as connect().
+
+    ``hermes kanban init`` and test rigs go through init_db, so it needs
+    the same guard — otherwise an operator running ``hermes kanban init``
+    against an NFS mount could set up a fresh DB in exactly the unsafe
+    location the gate on connect() is trying to prevent.
+    """
+    db_path = tmp_path / "kanban.db"
+    # First open on a healthy local mount.
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: (str(tmp_path), "ext4"))
+    conn = kb.connect(db_path=db_path)
+    conn.close()
+    # Now pretend the mount flipped to NFS.
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: (str(tmp_path), "nfs4"))
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    with pytest.raises(kb.KanbanDbOnNetworkFsError):
+        kb.init_db(db_path=db_path)

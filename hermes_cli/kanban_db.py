@@ -2175,6 +2175,173 @@ class KanbanDbCorruptError(RuntimeError):
         )
 
 
+class KanbanDbOnNetworkFsError(RuntimeError):
+    """Raised when a kanban DB file resolves onto a network filesystem.
+
+    SQLite over NFS/SMB/CIFS/FUSE is a documented data-corruption hazard —
+    the file-locking primitives (``fcntl(F_SETLK)`` byte-range locks +
+    WAL sidecar coordination) do not carry cache-coherence guarantees
+    across the client that opens them. Two concurrent writers on
+    different hosts, or one writer plus one late cache flush, can
+    silently produce a malformed b-tree page — the exact class of
+    corruption that hit ``okr-vfe-2026-q3`` 11 times on 2026-08-18 when
+    hermes1 workers reached the board DB across an NFS4 mount.
+
+    Fail-closed by default so an accidental or overlooked network mount
+    cannot start damaging a live board. Set ``HERMES_KANBAN_ALLOW_NFS=1``
+    to explicitly opt out (for read-only diagnostics, one-off recovery,
+    or single-writer setups the operator has verified).
+    """
+
+    def __init__(self, db_path: Path, mount_point: str, fstype: str):
+        self.db_path = db_path
+        self.mount_point = mount_point
+        self.fstype = fstype
+        super().__init__(
+            f"Refusing to open kanban DB {db_path}: resolved path sits on a "
+            f"network filesystem ({fstype} at {mount_point}). SQLite over "
+            f"{fstype} is unsafe (see #db-corrupt-cascade-20260818). "
+            f"Either move the DB to local disk, or route this host's kanban "
+            f"writes through the HTTP API on the DB owner. To bypass this "
+            f"guard for a one-off (read-only diagnostics or a verified "
+            f"single-writer setup) set HERMES_KANBAN_ALLOW_NFS=1."
+        )
+
+
+# Mount fstypes we refuse to open a kanban DB on top of.
+#
+# Rationale by family:
+#   nfs, nfs4, nfs3        — SQLite's locking assumptions don't hold across
+#                            client caches; WAL is silently disabled (falls
+#                            back to DELETE) but even DELETE-mode journals
+#                            are unsafe with concurrent writers on different
+#                            clients. This is the corruption that hit
+#                            okr-vfe-2026-q3 in the 2026-08-18 cascade.
+#   cifs, smb, smb2, smb3  — same class of problem (SMB locks are advisory
+#                            and cache-inconsistent).
+#   fuse, fuse.sshfs,      — FUSE filesystems vary wildly. sshfs is a
+#   fuseblk, fuse.rclone     network mount; overlay-style FUSE mounts may
+#                            reorder writes in ways SQLite doesn't tolerate.
+#                            We refuse the whole family; users who know
+#                            their specific FUSE mount is safe (e.g. a
+#                            local encrypted volume) use HERMES_KANBAN_ALLOW_NFS=1.
+#
+# Local filesystems (ext4, xfs, btrfs, zfs, tmpfs, etc.) are never in this
+# set, so the gate is transparent for the common case.
+_KANBAN_UNSAFE_FSTYPES: frozenset[str] = frozenset({
+    "nfs", "nfs3", "nfs4",
+    "cifs", "smb", "smb2", "smb3", "smbfs",
+    "fuse", "fuseblk",
+    "fuse.sshfs", "fuse.rclone", "fuse.gcsfuse", "fuse.s3fs",
+})
+
+
+def _kanban_allow_nfs_env() -> bool:
+    """True when HERMES_KANBAN_ALLOW_NFS is set to a truthy value.
+
+    Accepts 1/true/yes/on (case-insensitive) — same convention Hermes uses
+    for its other boolean env vars. Everything else (empty, ``0``, ``false``,
+    ``no``, ``off``) is treated as opt-out i.e. the gate STAYS active.
+    """
+    raw = os.environ.get("HERMES_KANBAN_ALLOW_NFS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_mount_for_path(path: Path) -> Optional[tuple[str, str]]:
+    """Return ``(mount_point, fstype)`` for the filesystem containing ``path``.
+
+    Reads ``/proc/mounts`` and picks the mount whose mount-point is the
+    longest prefix of the resolved ``path``. Returns ``None`` when
+    ``/proc/mounts`` is unreadable (non-Linux, sandboxed) or when no
+    matching mount can be found — the caller then treats the path as
+    local (fail-open on detection failure so we never wedge Windows/macOS
+    users behind a check they can't observe).
+
+    Path resolution matches the one done by :func:`_guard_existing_db_is_healthy`:
+    we ``resolve()`` (following symlinks and collapsing ``..``) before the
+    prefix search so a symlink that crosses a mount boundary is caught.
+    """
+    proc_mounts = Path("/proc/mounts")
+    if not proc_mounts.exists():
+        return None
+    try:
+        try:
+            resolved = str(path.resolve())
+        except OSError:
+            # Path doesn't exist yet (fresh install) — walk up until we
+            # find an existing ancestor so we can still classify the target
+            # mount for the future file.
+            probe = path
+            resolved = None
+            for parent in [probe, *probe.parents]:
+                try:
+                    resolved = str(parent.resolve())
+                    break
+                except OSError:
+                    continue
+            if resolved is None:
+                return None
+        entries: list[tuple[str, str]] = []
+        # /proc/mounts fields: <device> <mount_point> <fstype> <opts> <dump> <pass>
+        # Mount points may contain octal-escaped spaces (\040); we don't
+        # decode them because kanban DB paths never contain spaces on
+        # supported deployments, and a leading-substring match against a
+        # canonicalised path still works either way.
+        for line in proc_mounts.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mount_point = parts[1]
+            fstype = parts[2]
+            entries.append((mount_point, fstype))
+        # Longest-prefix wins. On tied lengths ``max`` keeps the last one
+        # seen, which matches kernel behaviour (later mounts shadow earlier
+        # ones at the same point).
+        best: Optional[tuple[str, str]] = None
+        best_len = -1
+        for mp, fs in entries:
+            # Ensure the mount point is a proper ancestor: either equal to
+            # the resolved path or a prefix that ends before a path
+            # separator. "/foo" must not match a file "/foobar".
+            if resolved == mp or resolved.startswith(mp.rstrip("/") + "/"):
+                if len(mp) > best_len:
+                    best = (mp, fs)
+                    best_len = len(mp)
+        return best
+    except OSError:
+        return None
+
+
+def _guard_kanban_db_not_on_network_fs(path: Path) -> None:
+    """Refuse to open a kanban DB file that resolves onto a network FS.
+
+    Fail-closed by design (see :class:`KanbanDbOnNetworkFsError` for the
+    corruption rationale). Escape hatch: ``HERMES_KANBAN_ALLOW_NFS=1``.
+
+    No-op when:
+      * The env escape hatch is set.
+      * ``/proc/mounts`` is unreadable (non-Linux, sandboxed, container
+        with a masked ``/proc`` — we can't observe the mount, so we
+        cannot refuse without producing false positives).
+      * The path's containing mount is not in
+        :data:`_KANBAN_UNSAFE_FSTYPES` (local disk — the common case).
+
+    Called from :func:`connect` after path resolution and BEFORE any
+    filesystem writes so a poisoned open never touches the DB file.
+    """
+    if _kanban_allow_nfs_env():
+        return
+    mount = _resolve_mount_for_path(path)
+    if mount is None:
+        return
+    mp, fstype = mount
+    # Match against a lowercased fstype so ``NFS4`` from a hand-crafted
+    # fstab entry can't slip through.
+    fstype_key = fstype.lower()
+    if fstype_key in _KANBAN_UNSAFE_FSTYPES:
+        raise KanbanDbOnNetworkFsError(path, mp, fstype)
+
+
 def _prune_corrupt_backups(
     parent: Path, base_name: str, keep: Optional[Path] = None,
 ) -> None:
@@ -2710,6 +2877,12 @@ def connect(
         path = db_path
     else:
         path = kanban_db_path(board=board)
+    # Fail-closed guard against SQLite-over-network-FS corruption.
+    # Runs before mkdir + preflight so a poisoned open cannot touch
+    # (or auto-create sidecars for) a DB file on an unsafe mount. Set
+    # HERMES_KANBAN_ALLOW_NFS=1 to opt out — see the class docstring for
+    # when that's appropriate.
+    _guard_kanban_db_not_on_network_fs(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fast path: once THIS process has initialized this path, the expensive
@@ -2849,6 +3022,11 @@ def init_db(
         path = db_path
     else:
         path = kanban_db_path(board=board)
+    # Same NFS refusal as connect(): init_db is called by CLI ``hermes
+    # kanban init`` and by test rigs / one-shot upgraders, and hitting an
+    # NFS-hosted DB from any of them is exactly the mixed-writer scenario
+    # we're guarding against.
+    _guard_kanban_db_not_on_network_fs(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = str(path.resolve())
     # Clear the cache entry so the underlying connect() re-runs the
