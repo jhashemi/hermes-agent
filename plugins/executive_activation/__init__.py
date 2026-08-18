@@ -172,9 +172,18 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any = None, session_store: An
     For all other messages: silently resolves agent in background (no skip).
     """
     try:
-        msg = event.get("message", {})
-        text = (msg.get("text") or msg.get("body") or "").strip()
-        user_id = str(event.get("user_id") or event.get("from") or "")
+        # ``event`` is a gateway.platforms.base.MessageEvent dataclass, NOT a
+        # dict. Access via attributes; ``event.source`` (a SessionSource) is
+        # where user_id lives. Fall back to duck-typed dict access so unit
+        # tests that pass raw dicts continue to work.
+        if hasattr(event, "text"):
+            text = (getattr(event, "text", "") or "").strip()
+            source = getattr(event, "source", None)
+            user_id = str(getattr(source, "user_id", "") or "") if source else ""
+        else:  # dict-shaped fallback (legacy tests / synthetic callers)
+            msg = event.get("message", {}) if hasattr(event, "get") else {}
+            text = (msg.get("text") or msg.get("body") or "").strip()
+            user_id = str(event.get("user_id") or event.get("from") or "") if hasattr(event, "get") else ""
 
         if not text:
             return None
