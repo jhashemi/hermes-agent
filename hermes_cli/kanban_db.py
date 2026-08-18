@@ -4042,6 +4042,68 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+def _dependency_waiting_for_satisfied(
+    conn: sqlite3.Connection, task_id: str,
+) -> bool:
+    """Return ``True`` iff a dependency-blocked task's ``waiting_for``
+    handoff points to a task that has reached ``done`` / ``archived``.
+
+    Used by :func:`recompute_ready` to gate auto-promotion of tasks
+    parked in ``status='todo'`` by ``block_task(kind='dependency')``.
+    Those blocks route to ``todo`` (not ``blocked``) so that the same
+    ``recompute_ready`` machinery that clears parent-gated tasks also
+    clears them — but ``waiting_for`` is stored on the emitted
+    ``dependency_wait`` event's payload, NOT as a ``task_links`` edge.
+    Without an extra lookup here the vacuous ``all([]) == True`` on an
+    empty ``parents`` list would let the dispatcher re-promote the task
+    on the next tick, respawn the worker, watch it re-block for the
+    same reason, and loop.
+
+    Semantics — a POSITIVE assertion, so new intermediate task states
+    (e.g. a future ``paused`` / ``review``) never silently satisfy the
+    predicate (Distillation Candidate #46):
+
+    * Legacy dependency blocks with no ``waiting_for`` on the event
+      payload return ``True`` (preserves pre-VFE-NERVE-01 behavior:
+      those tasks fall through to the ``task_links`` gate below).
+    * A ``waiting_for`` id that has since been deleted / archived
+      away is treated as satisfied (the dependency is unreachable, so
+      the block cannot be honoured; falling through lets the operator
+      unblock manually via ``kanban_unblock``).
+    * Otherwise, return ``True`` only when the waited-on task is
+      exactly ``done`` or ``archived``.
+    """
+    row = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE task_id = ? AND kind = 'dependency_wait' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if row is None:
+        # No ``dependency_wait`` event on record. The task carries
+        # ``block_kind='dependency'`` on the row but there's no envelope
+        # to check — legacy / racy data. Fall through to the parent-links
+        # gate (matches pre-fix behaviour).
+        return True
+    try:
+        payload = json.loads(row["payload"]) if row["payload"] else {}
+    except Exception:
+        payload = {}
+    waiting_for = payload.get("waiting_for") if isinstance(payload, dict) else None
+    if not waiting_for:
+        # Typed block with no waiting_for envelope — treat as legacy.
+        return True
+    wf_row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?", (str(waiting_for),),
+    ).fetchone()
+    if wf_row is None:
+        # Waited-on task no longer exists (archived away / deleted).
+        # Nothing we can gate on — let the operator resolve via
+        # ``kanban_unblock``. Return True to fall through.
+        return True
+    return wf_row["status"] in ("done", "archived")
+
+
 def recompute_ready(
     conn: sqlite3.Connection, failure_limit: int = None,
 ) -> int:
@@ -4078,7 +4140,7 @@ def recompute_ready(
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries "
+            "SELECT id, status, consecutive_failures, max_retries, block_kind "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
@@ -4089,6 +4151,24 @@ def recompute_ready(
                 # silently auto-recover.  ``unblock_task`` is the only
                 # legitimate exit (it emits ``"unblocked"`` which flips
                 # this predicate back).
+                continue
+            # VFE-DISPATCH-01 guard: a task with ``block_kind='dependency'``
+            # that carries a ``waiting_for`` handoff must NOT be promoted
+            # until the waited-on task reaches ``done`` / ``archived``.
+            # Without this, ``block_task(kind='dependency', waiting_for=X)``
+            # lands the task in ``todo`` with no ``task_links`` parent, and
+            # the ``all(p... in done/archived)`` check below evaluates to
+            # ``True`` vacuously (empty parents), promoting the task on the
+            # next dispatcher tick and burning LLM inference on a re-block
+            # loop. The correct predicate is a POSITIVE assertion that the
+            # waited-on task is done — never a negative "not blocked" — so
+            # new intermediate task states never silently start satisfying
+            # it (Distillation Candidate #46).
+            if (
+                cur_status == "todo"
+                and (row["block_kind"] if "block_kind" in row.keys() else None) == "dependency"
+                and not _dependency_waiting_for_satisfied(conn, task_id)
+            ):
                 continue
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
