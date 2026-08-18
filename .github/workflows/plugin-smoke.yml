@@ -1,0 +1,53 @@
+name: Plugin smoke check
+
+# Verify that livekit-plugins-openai imports cleanly after pip install.
+# Guards against openai version downgrades poisoning the realtime plugin
+# (regression from INCIDENT-01 venv poisoner, 2026-08-18).
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-smoke:
+    name: livekit-plugins-openai realtime import
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.11
+        run: uv python install 3.11
+
+      - name: Install hermes-agent
+        run: uv sync --extra livekit
+
+      - name: Install livekit-plugins-openai (voice-agents peer dep)
+        # livekit-plugins-openai is not declared in hermes-agent's own extras
+        # (it belongs to the executive-voice-agents plugin), but it hard-requires
+        # openai>=2.50. Installing it here validates that the openai pin in
+        # pyproject.toml satisfies the floor and that the realtime submodule
+        # (RealtimeReasoning etc.) is importable.
+        run: uv pip install "livekit-plugins-openai>=1.6"
+
+      - name: Smoke check — livekit.plugins.openai realtime must import
+        run: |
+          uv run python -c "
+          from livekit.plugins.openai import realtime
+          print('livekit.plugins.openai.realtime import OK')
+          "
+
+      - name: pip check — no unsatisfied requirements
+        run: uv run pip check

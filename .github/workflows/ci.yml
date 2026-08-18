@@ -115,6 +115,11 @@ jobs:
     needs: detect
     uses: ./.github/workflows/uv-lockfile-check.yml
 
+  plugin-smoke:
+    name: Plugin smoke check
+    needs: detect
+    uses: ./.github/workflows/plugin-smoke.yml
+
   infographic-check:
     name: Check no committed infographics
     needs: detect
@@ -265,6 +270,7 @@ jobs:
       - history-check
       - contributor-check
       - uv-lockfile
+      - plugin-smoke
       - lockfile-diff
       - docker-lint
       - supply-chain
