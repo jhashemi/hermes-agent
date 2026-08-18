@@ -1829,6 +1829,10 @@ def _prune_corrupt_backups(
     of its mtime — ``shutil.copy2`` preserves the source file's timestamp,
     which may be older than existing backups. Best-effort: prune failures
     never mask the corruption error the caller is about to raise.
+    
+    During an active corruption storm (≥3 backups minted in <1 min), pruning
+    is frozen to preserve the forensic corpus instead of deleting exactly the
+    files operators most need for root-cause analysis.
     """
     try:
         backups = [
@@ -1838,6 +1842,22 @@ def _prune_corrupt_backups(
         ]
     except OSError:
         return
+    
+    # Detect active corruption storm: if ≥3 backups were created in the past
+    # 60 seconds, freeze retention and log a warning. This preserves the
+    # forensic corpus during cascade events instead of pruning it.
+    now = time.time()
+    recent_backups = [b for b in backups if (now - b.stat().st_mtime) < 60]
+    if len(recent_backups) >= 3:
+        _log.warning(
+            "Corruption storm detected on %s: %d backups minted in past 60s. "
+            "Freezing retention cap to preserve forensic corpus. "
+            "Operator: review and manually archive backups in %s.",
+            parent / base_name, len(recent_backups), parent,
+        )
+        # Don't prune during the storm. Return early.
+        return
+    
     budget = _CORRUPT_BACKUP_RETENTION - (1 if keep is not None else 0)
     budget = max(budget, 0)
     if len(backups) <= budget:
@@ -1904,21 +1924,80 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
             resolved,
         )
         return None
+    # Create a temporary copy first, then compute its hash. This avoids
+    # fingerprinting the live file while other processes are actively writing
+    # to it, which produces N different hashes for the same logical corrupt
+    # state and bypasses content-addressed dedup. The temp file is stable once
+    # created and won't drift during hashing.
+    temp_candidate = parent / f"{base_name}.corrupt.temp-{os.getpid()}-{time.time()}"
+    try:
+        shutil.copy2(resolved, temp_candidate)
+    except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
+        return None
+    
     digest = hashlib.sha256()
     try:
-        with resolved.open("rb") as handle:
+        with temp_candidate.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
         return None
     token = digest.hexdigest()[:16]
     candidate = parent / f"{base_name}.corrupt.{token}.bak"
+    
+    # Move the temp file to the content-addressed location if it's new,
+    # or discard it if we already have this backup.
+    try:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            # Already have this backup; discard the temp.
+            temp_candidate.unlink()
+            return candidate
+        else:
+            # New backup; rename temp to final location.
+            if candidate.exists() and candidate.stat().st_size == 0:
+                candidate.unlink()
+            temp_candidate.rename(candidate)
+    except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
+        try:
+            if candidate.exists() and candidate.stat().st_size == 0:
+                candidate.unlink()
+        except OSError:
+            pass
+        return None
     # Defensive: candidate must still be inside parent after construction.
     if candidate.parent != parent:
         return None
+    # Skip if a complete backup already exists (not zero-byte).
+    if candidate.exists() and candidate.stat().st_size > 0:
+        return candidate
+    # Remove zero-byte files (interrupted writes) so they can be retried.
+    if candidate.exists() and candidate.stat().st_size == 0:
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
     if not candidate.exists():
         try:
             shutil.copy2(resolved, candidate)
+            # Verify the copy was not interrupted (zero-byte edge case).
+            if not candidate.exists() or candidate.stat().st_size == 0:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                return None
         except OSError:
             return None
         # A NEW backup landed on disk — enforce the retention cap so
