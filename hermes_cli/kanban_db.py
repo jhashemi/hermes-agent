@@ -697,6 +697,239 @@ def _resolve_rate_limit_cooldown_seconds() -> int:
     return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
 
 
+# ---------------------------------------------------------------------------
+# Hermes-agent version advertising (VFE-DEPLOY-03)
+# ---------------------------------------------------------------------------
+#
+# Every dispatcher host running against the same shared kanban.db MUST run
+# the same hermes-agent revision. Divergent versions produce silent
+# regression across arbitrary code paths — the hardest class of bug to
+# debug because the DB looks correct but predicates evaluate differently
+# per host. See VFE-DEPLOY-02 (t_054c00e6) for the concrete symptom.
+#
+# The fix advertises the caller's git HEAD SHA in every ``claimed`` event
+# and refuses claims that are STRICT git ancestors of a newer version
+# observed in the last N minutes. The refusal is fail-open by design: if
+# git is unavailable, the SHA can't be parsed, or we can't compute
+# ancestry, the claim proceeds. We only refuse when we can PROVE the
+# incoming version is older than a currently-in-flight newer one.
+#
+# Window default: 15 minutes. After the window expires the older host
+# can claim again, so a newer host that vanishes cannot permanently
+# strand the board.
+
+DEFAULT_STALE_VERSION_WINDOW_SECONDS = 15 * 60
+
+
+def _resolve_stale_version_window_seconds() -> int:
+    """Return the effective stale-version refusal window, in seconds.
+
+    Reads ``HERMES_KANBAN_STALE_VERSION_WINDOW_SECONDS`` from the
+    environment; falls back to ``DEFAULT_STALE_VERSION_WINDOW_SECONDS``
+    when absent, empty, non-integer, or negative. A value of ``0``
+    disables the refusal path entirely (useful for tests / recovery
+    modes where we want to accept every claim regardless of version).
+    """
+    raw = os.environ.get("HERMES_KANBAN_STALE_VERSION_WINDOW_SECONDS", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+        except ValueError:
+            parsed = -1
+        if parsed >= 0:
+            return parsed
+    return DEFAULT_STALE_VERSION_WINDOW_SECONDS
+
+
+# Cached SHA of the hermes-agent checkout containing this module. Resolved
+# lazily on first ``claim_task`` so import-time is unaffected, and cached
+# for the lifetime of the process so we don't shell out per claim. Value
+# is one of:
+#   * a 40-char git SHA        — normal case
+#   * ``""`` (empty string)    — resolution was attempted and failed
+#                                (non-git checkout, missing binary, etc.);
+#                                treated as "unknown" and never refused.
+# ``None`` means "not yet resolved".
+_HERMES_AGENT_VERSION: Optional[str] = None
+
+
+def _hermes_agent_root() -> Path:
+    """Return the directory of the hermes-agent checkout containing this
+    module. Two levels up from this file: ``.../hermes_cli/kanban_db.py``
+    → ``.../``.
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def _hermes_agent_version() -> Optional[str]:
+    """Return the git HEAD SHA of the hermes-agent checkout, or ``None``
+    if unresolvable.
+
+    Result is cached per-process; a dispatcher restart is required to pick
+    up a new SHA (which is the deployment invariant — restart-on-upgrade
+    is a first-class assumption of the model).
+
+    Fails open: any exception path returns ``None`` and downstream code
+    must treat that as "version unknown, never refuse".
+    """
+    global _HERMES_AGENT_VERSION
+    if _HERMES_AGENT_VERSION is not None:
+        return _HERMES_AGENT_VERSION or None
+
+    override = os.environ.get("HERMES_KANBAN_ADVERTISED_VERSION", "").strip()
+    if override:
+        # Test / manual-override hook: pin an explicit SHA without shelling
+        # out. Accept anything the caller passes so tests can use short
+        # deterministic strings like "sha-A" / "sha-B".
+        _HERMES_AGENT_VERSION = override
+        return override
+
+    try:
+        import subprocess as _sp
+        root = _hermes_agent_root()
+        res = _sp.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if res.returncode == 0:
+            sha = (res.stdout or "").strip()
+            if sha:
+                _HERMES_AGENT_VERSION = sha
+                return sha
+    except Exception:
+        pass
+
+    # Cache the negative result too so we don't retry the git shell-out on
+    # every claim in a non-git installation.
+    _HERMES_AGENT_VERSION = ""
+    return None
+
+
+def _reset_hermes_agent_version_cache() -> None:
+    """Test hook: forget the cached SHA so the next call re-resolves.
+
+    Not called from production paths. Tests that swap the
+    ``HERMES_KANBAN_ADVERTISED_VERSION`` env var mid-test must clear the
+    cache between swaps or they'll observe the first-seen value.
+    """
+    global _HERMES_AGENT_VERSION
+    _HERMES_AGENT_VERSION = None
+
+
+# Cache pairwise ancestry results across the process lifetime. Values are
+# tri-state: True (a is strict ancestor of b), False (not an ancestor, or
+# same commit), or None (couldn't be determined — treat as fail-open,
+# i.e. not stale).
+_ANCESTRY_CACHE: dict[tuple[str, str], Optional[bool]] = {}
+
+
+def _is_strict_ancestor(older: str, newer: str) -> Optional[bool]:
+    """Return True iff ``older`` is a strict git ancestor of ``newer``
+    (i.e. ``newer`` contains ``older`` and they are NOT the same commit).
+
+    Returns ``None`` when ancestry cannot be determined — missing SHAs,
+    missing git binary, or the local checkout doesn't have one of the
+    commits (e.g. the newer host hasn't been fetched here). Callers MUST
+    treat ``None`` as "unknown / fail open" and NOT refuse the claim.
+    """
+    if not older or not newer:
+        return None
+    if older == newer:
+        return False
+    cached = _ANCESTRY_CACHE.get((older, newer))
+    if cached is not None or (older, newer) in _ANCESTRY_CACHE:
+        return cached
+    try:
+        import subprocess as _sp
+        root = _hermes_agent_root()
+        res = _sp.run(
+            ["git", "-C", str(root), "merge-base", "--is-ancestor", older, newer],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        # git merge-base --is-ancestor: 0 = yes, 1 = no, other = error
+        if res.returncode == 0:
+            result: Optional[bool] = True
+        elif res.returncode == 1:
+            result = False
+        else:
+            result = None
+    except Exception:
+        result = None
+    _ANCESTRY_CACHE[(older, newer)] = result
+    return result
+
+
+def _highest_observed_version(
+    conn: sqlite3.Connection,
+    *,
+    window_seconds: int,
+    now: Optional[int] = None,
+) -> Optional[str]:
+    """Return the newest hermes-agent SHA observed in ``claimed`` events
+    inside the refusal window, or ``None`` if the window is empty.
+
+    "Newest" here means: among all SHAs advertised in the window, the one
+    that is a git DESCENDANT of every other SHA in the set. If no such
+    single dominant SHA exists (concurrent branches, unknown ancestry),
+    returns ``None`` — we don't refuse when we can't identify a single
+    unambiguous newest version.
+
+    Same-SHA claimants collapse to one candidate.
+    """
+    if window_seconds <= 0:
+        return None
+    now = now if now is not None else int(time.time())
+    cutoff = now - window_seconds
+
+    rows = conn.execute(
+        "SELECT payload FROM task_events "
+        "WHERE kind = 'claimed' AND created_at >= ? "
+        "ORDER BY created_at DESC LIMIT 200",
+        (cutoff,),
+    ).fetchall()
+
+    candidates: set[str] = set()
+    for row in rows:
+        pl = row["payload"] if row and row["payload"] else None
+        if not pl:
+            continue
+        try:
+            data = json.loads(pl)
+        except (ValueError, TypeError):
+            continue
+        sha = data.get("hermes_agent_version") if isinstance(data, dict) else None
+        if isinstance(sha, str) and sha:
+            candidates.add(sha)
+
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return next(iter(candidates))
+
+    # Find the SHA that is a strict-descendant-or-equal of every other
+    # candidate. If no single such SHA exists (branches diverged, or
+    # ancestry unknown), bail — we won't refuse on ambiguity.
+    cand_list = list(candidates)
+    dominant: Optional[str] = None
+    for cand in cand_list:
+        is_top = True
+        for other in cand_list:
+            if other == cand:
+                continue
+            # ``other`` must be an ancestor of ``cand`` (or the same).
+            ancestor = _is_strict_ancestor(other, cand)
+            if ancestor is not True:
+                is_top = False
+                break
+        if is_top:
+            if dominant is not None:
+                # Two candidates each dominate — impossible in a linear
+                # history, so ancestry data must be incomplete. Bail.
+                return None
+            dominant = cand
+    return dominant
+
+
 # Worker-context caps so build_worker_context() stays bounded on
 # pathological boards (retry-heavy tasks, comment storms, giant
 # summaries). Values chosen to fit a typical 100k-char LLM prompt with
@@ -5614,11 +5847,46 @@ def claim_task(
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
     already claimed (or is not in ``ready`` status).
+
+    VFE-DEPLOY-03: refuses claims from dispatchers whose advertised
+    ``hermes-agent`` version is a strict git ancestor of the highest
+    version observed in the last N minutes (see
+    :func:`_resolve_stale_version_window_seconds`). The refused claim
+    emits a ``claim_refused_stale_version`` audit event and leaves the
+    task in ``ready`` for a newer dispatcher to pick up. Fails open on
+    all git errors (missing binary, unknown SHAs, non-git checkout).
     """
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
+    # Resolve our own version once per claim. ``None`` = unknown; we
+    # advertise nothing and skip the refusal check in that case (fail
+    # open — we can't prove we're stale without a SHA).
+    my_version = _hermes_agent_version()
     with write_txn(conn):
+        # Version-divergence refusal (VFE-DEPLOY-03). Done inside the
+        # write txn so a concurrent claim from the newer version that
+        # lands between our read and our CAS still triggers refusal on
+        # our NEXT tick (its ``claimed`` event is now visible to us).
+        if my_version:
+            window = _resolve_stale_version_window_seconds()
+            if window > 0:
+                highest = _highest_observed_version(
+                    conn, window_seconds=window, now=now,
+                )
+                if highest and highest != my_version:
+                    ancestor = _is_strict_ancestor(my_version, highest)
+                    if ancestor is True:
+                        _append_event(
+                            conn, task_id, "claim_refused_stale_version",
+                            {
+                                "incoming": my_version,
+                                "highest": highest,
+                                "window_seconds": window,
+                                "claimer": lock,
+                            },
+                        )
+                        return None
         # Structural invariant: never transition ready -> running while any
         # parent is not yet 'done'. This is the single enforcement point
         # regardless of which writer (create_task, link_tasks, unblock_task,
@@ -5718,10 +5986,16 @@ def claim_task(
             "UPDATE tasks SET current_run_id = ? WHERE id = ?",
             (run_id, task_id),
         )
+        claimed_payload: dict[str, Any] = {
+            "lock": lock, "expires": expires, "run_id": run_id,
+        }
+        if my_version:
+            # VFE-DEPLOY-03: advertise the dispatcher's hermes-agent
+            # version so peers on newer commits can refuse stale claims.
+            # Absent field == pre-fix dispatcher; treated as "unknown".
+            claimed_payload["hermes_agent_version"] = my_version
         _append_event(
-            conn, task_id, "claimed",
-            {"lock": lock, "expires": expires, "run_id": run_id},
-            run_id=run_id,
+            conn, task_id, "claimed", claimed_payload, run_id=run_id,
         )
         claimed = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
