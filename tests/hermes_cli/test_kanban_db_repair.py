@@ -283,3 +283,175 @@ def test_cli_repair_json_shape(cli_home, capsys):
     assert Path(payload["backup_path"]).exists()
 
 
+# ---------------------------------------------------------------------------
+# Observability signal — VFE-KANBAN-CORRUPTION-02
+# ---------------------------------------------------------------------------
+#
+# Every ``.corrupt.<hash>.bak`` quarantine event fires two always-on
+# signals that operators/plugins can pick up without hermes-agent core
+# growing a prometheus/NATS dependency:
+#
+# 1. A structured WARNING log record on ``hermes_cli.kanban_db`` with a
+#    ``event="kanban_db_corrupt_quarantine"`` extra.
+# 2. The ``kanban_db_corrupt_quarantine`` lifecycle hook, so any plugin
+#    can translate it into a Prometheus counter / NATS event / alert.
+#
+# Both surfaces are wired at every corruption-detection site — the
+# connect-time guard AND both branches of ``repair_db``.
+
+def _read_quarantine_log_records(caplog) -> list:
+    """Return the subset of caplog records that are quarantine notifications."""
+    return [
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "kanban_db_corrupt_quarantine"
+    ]
+
+
+def test_board_slug_from_db_path_covers_layouts(tmp_path):
+    """The reverse-map from DB path to board slug handles every real layout."""
+    default_db = tmp_path / "kanban.db"
+    default_db.touch()
+    assert kb._board_slug_from_db_path(default_db) == kb.DEFAULT_BOARD
+
+    named_db = tmp_path / "kanban" / "boards" / "my-board" / "kanban.db"
+    named_db.parent.mkdir(parents=True)
+    named_db.touch()
+    assert kb._board_slug_from_db_path(named_db) == "my-board"
+
+    # An HERMES_KANBAN_DB override or a test-only layout doesn't match either
+    # convention — we surface a stable ``unknown`` label rather than raising.
+    weird = tmp_path / "some-other-place.db"
+    weird.touch()
+    assert kb._board_slug_from_db_path(weird) == "unknown"
+
+
+def test_guard_fires_quarantine_signals_on_page_corruption(tmp_path, caplog, monkeypatch):
+    """Connect-time guard fires the log + hook when a DB fails integrity_check.
+
+    Uses the page-corrupt DB fixture so this exercises the fail-closed path
+    (no REINDEX repair possible). The hook must fire with the correct board
+    label and backup path.
+    """
+    db_path = tmp_path / "kanban" / "boards" / "vfe-corrupt-02-test" / "kanban.db"
+    db_path.parent.mkdir(parents=True)
+    _write_page_corrupt_db(db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    hook_calls: list[dict] = []
+
+    def fake_hook(event: str, task_id: str, **fields):
+        hook_calls.append({"event": event, "task_id": task_id, **fields})
+
+    monkeypatch.setattr(kb, "_fire_kanban_lifecycle_hook", fake_hook)
+
+    with caplog.at_level("WARNING", logger="hermes_cli.kanban_db"):
+        with pytest.raises(kb.KanbanDbCorruptError):
+            kb._guard_existing_db_is_healthy(db_path)
+
+    # Log signal: exactly one structured record with the right extras.
+    records = _read_quarantine_log_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in caplog.records]
+    r = records[0]
+    assert r.board == "vfe-corrupt-02-test"
+    assert r.db_path == str(db_path)
+    # The backup path may be non-empty (successful) or empty (backup failed);
+    # both are legitimate — the signal fires either way.
+    assert hasattr(r, "backup_path")
+    assert r.reason  # a non-empty explanation string
+
+    # Hook signal: fired exactly once, with the same fields.
+    quarantine_calls = [c for c in hook_calls if c["event"] == "kanban_db_corrupt_quarantine"]
+    assert len(quarantine_calls) == 1
+    call = quarantine_calls[0]
+    assert call["task_id"] == ""  # board-scoped, not task-scoped
+    assert call["board"] == "vfe-corrupt-02-test"
+    assert call["db_path"] == str(db_path)
+    assert call["reason"]
+
+
+def test_guard_fires_quarantine_signal_once_on_index_repair_success(
+    tmp_path, caplog, monkeypatch
+):
+    """Index-only corruption that REINDEX fixes STILL fires the signal.
+
+    Operators need to see the corruption event even when we auto-recover,
+    because the counter must reflect DB damage rate, not un-recovered damage
+    rate.
+    """
+    db_path = tmp_path / "kanban" / "boards" / "vfe-index-repair-test" / "kanban.db"
+    db_path.parent.mkdir(parents=True)
+    _build_board_db(db_path)
+    _corrupt_index(db_path, "idx_tasks_status")
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    hook_calls: list[dict] = []
+    monkeypatch.setattr(
+        kb,
+        "_fire_kanban_lifecycle_hook",
+        lambda event, task_id, **fields: hook_calls.append(
+            {"event": event, "task_id": task_id, **fields}
+        ),
+    )
+
+    with caplog.at_level("WARNING", logger="hermes_cli.kanban_db"):
+        # No exception: REINDEX repair succeeds.
+        kb._guard_existing_db_is_healthy(db_path)
+
+    records = _read_quarantine_log_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in caplog.records]
+    assert records[0].board == "vfe-index-repair-test"
+
+    quarantine_calls = [c for c in hook_calls if c["event"] == "kanban_db_corrupt_quarantine"]
+    assert len(quarantine_calls) == 1
+    assert quarantine_calls[0]["board"] == "vfe-index-repair-test"
+
+
+def test_repair_db_fires_quarantine_signal_on_page_corruption(tmp_path, monkeypatch):
+    """``repair_db`` fires the same signal on the sqlite-refused-to-open branch."""
+    db_path = tmp_path / "kanban" / "boards" / "vfe-repair-refuse-test" / "kanban.db"
+    db_path.parent.mkdir(parents=True)
+    _write_page_corrupt_db(db_path)
+
+    hook_calls: list[dict] = []
+    monkeypatch.setattr(
+        kb,
+        "_fire_kanban_lifecycle_hook",
+        lambda event, task_id, **fields: hook_calls.append(
+            {"event": event, "task_id": task_id, **fields}
+        ),
+    )
+
+    result = kb.repair_db(db_path=db_path)
+    assert result.status == "corrupt"
+
+    quarantine_calls = [c for c in hook_calls if c["event"] == "kanban_db_corrupt_quarantine"]
+    assert len(quarantine_calls) == 1
+    assert quarantine_calls[0]["board"] == "vfe-repair-refuse-test"
+
+
+def test_broken_hook_does_not_break_quarantine(tmp_path, monkeypatch):
+    """A plugin observer that raises must not stop us quarantining a corrupt DB.
+
+    The corruption path is safety-critical: an angry plugin cannot be allowed
+    to prevent the fail-closed backup + raise. Both signals are best-effort.
+    """
+    db_path = tmp_path / "kanban" / "boards" / "vfe-broken-hook-test" / "kanban.db"
+    db_path.parent.mkdir(parents=True)
+    _write_page_corrupt_db(db_path)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+
+    def angry_hook(event, task_id, **fields):
+        raise RuntimeError("plugin exploded")
+
+    monkeypatch.setattr(kb, "_fire_kanban_lifecycle_hook", angry_hook)
+
+    with pytest.raises(kb.KanbanDbCorruptError):
+        kb._guard_existing_db_is_healthy(db_path)
+
+    # And the ``.corrupt.<hash>.bak`` backup landed on disk despite the
+    # plugin blowing up — the whole point of best-effort observability.
+    backups = list(db_path.parent.glob(f"{db_path.name}.corrupt.*.bak"))
+    assert len(backups) == 1
+
+

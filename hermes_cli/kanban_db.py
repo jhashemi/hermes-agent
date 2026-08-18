@@ -310,6 +310,95 @@ def _assert_not_delegated_child_mutation() -> None:
         )
 
 
+def _board_slug_from_db_path(db_path: Path) -> str:
+    """Best-effort reverse of :func:`kanban_db_path` for observability labels.
+
+    Given a resolved kanban DB path, return the board slug it belongs to.
+    The mapping is:
+
+    * ``<root>/kanban/boards/<slug>/kanban.db`` → ``<slug>``
+    * ``<root>/kanban.db``                      → ``default``
+    * anything else (custom ``HERMES_KANBAN_DB``, tests, …) → ``unknown``
+
+    Never raises — a mislabelled quarantine metric is strictly better than
+    breaking the corruption-quarantine path over a label heuristic.
+    """
+    try:
+        p = db_path.resolve()
+    except OSError:
+        p = db_path
+    try:
+        # The <slug> is the immediate parent dir when the layout is
+        # ``kanban/boards/<slug>/kanban.db``.
+        parent = p.parent
+        if parent.name and parent.parent.name == "boards" and parent.parent.parent.name == "kanban":
+            return parent.name
+        # Back-compat: the default board lives at ``<root>/kanban.db``.
+        if p.name == "kanban.db":
+            return DEFAULT_BOARD
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _notify_corrupt_quarantine(
+    db_path: Path,
+    backup_path: Optional[Path],
+    reason: str,
+) -> None:
+    """Emit observability signals for a kanban DB corruption quarantine.
+
+    Every ``.corrupt.<hash>.bak`` event fires TWO always-on signals:
+
+    1. A structured WARNING log record on the ``hermes_cli.kanban_db``
+       logger with the extras ``{event, board, db_path, backup_path,
+       reason}``. Log-tailing observability plugins (e.g. this cluster's
+       vein-aggregator sidecar) can pick it up with zero new dependencies.
+    2. The ``kanban_db_corrupt_quarantine`` lifecycle hook, so first-party
+       observers and plugins can translate it into a Prometheus counter,
+       NATS event, alertmanager page, or whatever the deployment prefers,
+       WITHOUT adding a prometheus/NATS dep to hermes-agent core.
+
+    Both surfaces are best-effort — a broken observer must never stop us
+    from quarantining a corrupt DB. ``task_id=""`` because a corruption
+    event is board-scoped, not task-scoped; downstream consumers should
+    key on ``board`` and ``db_path``.
+    """
+    board = _board_slug_from_db_path(db_path)
+    backup_str = str(backup_path) if backup_path is not None else ""
+    # Signal 1: structured log line — no extra deps.
+    try:
+        _log.warning(
+            "kanban DB %s quarantined as corrupt (board=%s, reason=%s, "
+            "backup=%s)",
+            db_path,
+            board,
+            reason,
+            backup_str or "<backup failed>",
+            extra={
+                "event": "kanban_db_corrupt_quarantine",
+                "board": board,
+                "db_path": str(db_path),
+                "backup_path": backup_str,
+                "reason": reason,
+            },
+        )
+    except Exception:  # pragma: no cover - defensive; logging must never crash
+        pass
+    # Signal 2: lifecycle hook — plugins can subscribe.
+    try:
+        _fire_kanban_lifecycle_hook(
+            "kanban_db_corrupt_quarantine",
+            "",  # not task-scoped
+            board=board,
+            db_path=str(db_path),
+            backup_path=backup_str,
+            reason=reason,
+        )
+    except Exception:  # pragma: no cover - already best-effort inside the fn
+        pass
+
+
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
     """Fire a kanban lifecycle plugin hook, fully best-effort.
 
@@ -2246,6 +2335,13 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     # Quarantine FIRST — both the repair path and the fail-closed path
     # preserve the pre-touch bytes before anything mutates the file.
     backup = _backup_corrupt_db(resolved)
+    # Observability signal: a corrupt DB was detected. Fire this once per
+    # detection (not once per new backup file — content-address dedup means
+    # repeated identical corruption reuses one backup, but each detection is
+    # still a real event operators need to see). Even the auto-repair-success
+    # path below fires this: index corruption that REINDEX fixes is still a
+    # real corruption event and we want the counter to reflect it.
+    _notify_corrupt_quarantine(resolved, backup, reason)
     index_names = _repairable_index_names(messages)
     if index_names:
         _log.warning(
@@ -2342,17 +2438,28 @@ def repair_db(
         except sqlite3.DatabaseError as exc:
             # Same quarantine the connect-time guard takes for a file
             # sqlite refuses to open at all (e.g. malformed page 1).
+            db_error_reason = f"sqlite refused to open file: {exc}"
+            db_error_backup = _backup_corrupt_db(resolved)
+            _notify_corrupt_quarantine(resolved, db_error_backup, db_error_reason)
             return RepairResult(
                 status="corrupt",
                 db_path=resolved,
-                messages=[f"sqlite refused to open file: {exc}"],
-                backup_path=_backup_corrupt_db(resolved),
+                messages=[db_error_reason],
+                backup_path=db_error_backup,
             )
         if _integrity_messages_ok(messages):
             return RepairResult(status="ok", db_path=resolved, messages=messages)
 
         # Quarantine FIRST — identical policy to the connect-time guard.
         backup = _backup_corrupt_db(resolved)
+        # Observability signal: same policy as the connect-time guard —
+        # fire once per detection so the counter tracks every corruption
+        # event, including index-only errors that REINDEX will fix below.
+        _notify_corrupt_quarantine(
+            resolved,
+            backup,
+            f"integrity_check returned {messages[0] if messages else '<no row>'!r}",
+        )
         index_names = _repairable_index_names(messages)
         if not index_names:
             return RepairResult(
