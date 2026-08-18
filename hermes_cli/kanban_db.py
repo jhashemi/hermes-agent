@@ -99,6 +99,55 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# INCIDENT-01 — dispatch-gate model-liveness KV reader
+# =============================================================================
+#
+# Wires a shared, in-memory KV reader used by the spawn-time liveness gate
+# (see ``dispatch_gate.check_model_liveness`` and its call site in the
+# cluster-routing branch of ``dispatch_once``). Kept as a module-level
+# singleton so:
+#   - the KV survives across dispatch ticks (a model marked dead once
+#     stays dead until its TTL expires — no re-checking every tick);
+#   - a future NATS-bridged reader can be plugged in with a single-line
+#     swap here, without threading a writer through every call site;
+#   - tests can monkeypatch ``_LIVENESS_KV`` directly if they need to
+#     drive the gate deterministically.
+#
+# Fail-safe posture: the reader ALWAYS returns None on missing keys,
+# which the gate treats as "no signal → fail open". A dead reader can
+# never block real work. See ticket t_3e1634d9 for the RCA.
+
+_LIVENESS_KV: dict[str, dict] | None = None
+
+
+def _get_liveness_kv_reader():
+    """Return the shared KV reader for the dispatch-gate liveness probe.
+
+    Lazy-init on first call so import-time is unaffected. Returns a
+    zero-arg-safe callable: ``reader(key) -> dict | None``.
+    """
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+    return _kv.get
+
+
+def _get_liveness_kv_writer():
+    """Companion writer for tests and post-mortem recorders."""
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+
+    def _write(key: str, value: dict) -> None:
+        _kv[key] = value
+
+    return _write
+
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1996,6 +2045,10 @@ def _prune_corrupt_backups(
     of its mtime — ``shutil.copy2`` preserves the source file's timestamp,
     which may be older than existing backups. Best-effort: prune failures
     never mask the corruption error the caller is about to raise.
+    
+    During an active corruption storm (≥3 backups minted in <1 min), pruning
+    is frozen to preserve the forensic corpus instead of deleting exactly the
+    files operators most need for root-cause analysis.
     """
     try:
         backups = [
@@ -2005,6 +2058,22 @@ def _prune_corrupt_backups(
         ]
     except OSError:
         return
+    
+    # Detect active corruption storm: if ≥3 backups were created in the past
+    # 60 seconds, freeze retention and log a warning. This preserves the
+    # forensic corpus during cascade events instead of pruning it.
+    now = time.time()
+    recent_backups = [b for b in backups if (now - b.stat().st_mtime) < 60]
+    if len(recent_backups) >= 3:
+        _log.warning(
+            "Corruption storm detected on %s: %d backups minted in past 60s. "
+            "Freezing retention cap to preserve forensic corpus. "
+            "Operator: review and manually archive backups in %s.",
+            parent / base_name, len(recent_backups), parent,
+        )
+        # Don't prune during the storm. Return early.
+        return
+    
     budget = _CORRUPT_BACKUP_RETENTION - (1 if keep is not None else 0)
     budget = max(budget, 0)
     if len(backups) <= budget:
@@ -2071,21 +2140,80 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
             resolved,
         )
         return None
+    # Create a temporary copy first, then compute its hash. This avoids
+    # fingerprinting the live file while other processes are actively writing
+    # to it, which produces N different hashes for the same logical corrupt
+    # state and bypasses content-addressed dedup. The temp file is stable once
+    # created and won't drift during hashing.
+    temp_candidate = parent / f"{base_name}.corrupt.temp-{os.getpid()}-{time.time()}"
+    try:
+        shutil.copy2(resolved, temp_candidate)
+    except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
+        return None
+    
     digest = hashlib.sha256()
     try:
-        with resolved.open("rb") as handle:
+        with temp_candidate.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
         return None
     token = digest.hexdigest()[:16]
     candidate = parent / f"{base_name}.corrupt.{token}.bak"
+    
+    # Move the temp file to the content-addressed location if it's new,
+    # or discard it if we already have this backup.
+    try:
+        if candidate.exists() and candidate.stat().st_size > 0:
+            # Already have this backup; discard the temp.
+            temp_candidate.unlink()
+            return candidate
+        else:
+            # New backup; rename temp to final location.
+            if candidate.exists() and candidate.stat().st_size == 0:
+                candidate.unlink()
+            temp_candidate.rename(candidate)
+    except OSError:
+        try:
+            temp_candidate.unlink()
+        except OSError:
+            pass
+        try:
+            if candidate.exists() and candidate.stat().st_size == 0:
+                candidate.unlink()
+        except OSError:
+            pass
+        return None
     # Defensive: candidate must still be inside parent after construction.
     if candidate.parent != parent:
         return None
+    # Skip if a complete backup already exists (not zero-byte).
+    if candidate.exists() and candidate.stat().st_size > 0:
+        return candidate
+    # Remove zero-byte files (interrupted writes) so they can be retried.
+    if candidate.exists() and candidate.stat().st_size == 0:
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
     if not candidate.exists():
         try:
             shutil.copy2(resolved, candidate)
+            # Verify the copy was not interrupted (zero-byte edge case).
+            if not candidate.exists() or candidate.stat().st_size == 0:
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                return None
         except OSError:
             return None
         # A NEW backup landed on disk — enforce the retention cap so
@@ -9679,6 +9807,52 @@ def _default_spawn(
                 "spawning locally", target_node,
             )
         else:
+            # INCIDENT-01 (2026-08-18) — model liveness gate.
+            #
+            # Before spawning, consult the ``hrv.node_state.<node>.<provider>.<model>``
+            # KV. If a fresh entry says the resolved model is quota-dead on
+            # this node, decline the (task, node) pair and fall back to local
+            # spawn — the dispatcher can then re-route or the card will
+            # naturally re-queue elsewhere. Fail-open on any error / missing
+            # signal so a broken gate NEVER blocks real work. See
+            # ``hermes_cli/dispatch_gate.py`` for the contract and
+            # ticket t_3e1634d9 for the RCA.
+            try:
+                from hermes_cli.dispatch_gate import check_model_liveness
+                # KV reader is a module-level singleton (lazy-init inline
+                # so import-time is unaffected). In-memory until the NATS
+                # bridge lands — reads return None, gate fails open, and
+                # dispatch behavior is preserved. Wired here so the import
+                # path is exercised at dispatch time and any future NATS
+                # bridge slot-in is a single-line change.
+                _gate_reader = _get_liveness_kv_reader()
+                _resolved_provider = getattr(task, "provider_override", None) or ""
+                _resolved_model = getattr(task, "model_override", None) or ""
+                if _resolved_provider and _resolved_model:
+                    _verdict = check_model_liveness(
+                        node=target_node,
+                        provider=_resolved_provider,
+                        model=_resolved_model,
+                        kv_reader=_gate_reader,
+                    )
+                    if not _verdict.allow:
+                        logger.warning(
+                            "[dispatch] model-liveness gate rejected %s "
+                            "for task %s (node=%s, provider=%s, model=%s): %s "
+                            "— spawning locally instead",
+                            target_node, task.id, target_node,
+                            _resolved_provider, _resolved_model, _verdict.reason,
+                        )
+                        host = None   # fall through to local spawn
+            except Exception as _gate_exc:
+                # Fail-open on any gate error — the incident is worse if
+                # the gate itself blocks dispatch than if it fails silent.
+                logger.debug(
+                    "[dispatch] model-liveness gate raised %r — failing open",
+                    _gate_exc,
+                )
+
+        if host is not None:
             # Validate that the remote node is reachable (basic SSH probe).
             # If the probe fails, fall back to local spawn rather than
             # blocking the dispatch loop. The audit trail in the LLM
