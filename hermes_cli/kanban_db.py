@@ -7076,6 +7076,19 @@ class DispatchResult:
     Reasons: ``"blocker_auth"`` (quota/auth error — also auto-blocked),
     ``"recent_success"`` (completed run within guard window),
     ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    skipped_node_rejected: list[tuple[str, str, str]] = field(default_factory=list)
+    """Tasks whose claim was released because the HRV nervous-system gate
+    rejected the router-selected target node this tick. Each entry is
+    ``(task_id, node_hostname, reason)`` where ``reason`` is one of the
+    HRVNodeGate rejection codes: ``"memory_pressure"``,
+    ``"kanban_dispatcher_health"``, ``"bedrock_rate_limit_saturation"``,
+    ``"hrv_urgent_state"``, ``"min_resources_overflow"``.
+
+    Not a task failure — the task returns to ``ready`` immediately and a
+    healthy node can pick it up on the next tick. The counter
+    ``consecutive_failures`` is NOT incremented. A ``node_gate_rejected``
+    task_event is appended so the audit trail shows which probe fired
+    (see t_88eadaa8, ADR-006b Phase 2)."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
@@ -8884,6 +8897,70 @@ def _dispatch_once_locked(
                     "spawning locally", claimed.id, exc,
                 )
                 target_node = None
+        # Nervous-system gate (ADR-006b Phase 2 / t_88eadaa8): if the router
+        # selected a REMOTE node, consult the HRV probe state for that node
+        # before spawning. RED probes (high memory pressure, unhealthy
+        # kanban dispatcher, Bedrock TPM exhaustion, urgent nervous-system
+        # digest with non-P0 task, or a min_resources overflow) cause the
+        # task's claim to be released back to ``ready`` this tick so a
+        # healthier node can pick it up next tick. The gate is a safety
+        # sieve, not a hard dependency — any failure inside the gate
+        # (missing module, stale probes, exception) is fail-open by design
+        # via check_node_gate itself. Local dispatch (target_node is None)
+        # skips the gate entirely: local has no remote probe to consult.
+        gate_rejection: Optional[str] = None
+        if target_node is not None:
+            try:
+                from hermes_cli.hrv_node_gate_integration import check_node_gate
+                gate_rejection = check_node_gate(
+                    conn,
+                    claimed.id,
+                    target_node,
+                    claimed.model_override or "",
+                )
+            except Exception as exc:
+                # Fail-open: any failure loading or invoking the gate must
+                # not halt dispatch. A red probe pipeline is worse than a
+                # missing one.
+                logger.warning(
+                    "[dispatch] HRV node gate check failed for task=%s "
+                    "node=%s: %s; spawning anyway (fail-open)",
+                    claimed.id, target_node, exc,
+                )
+                gate_rejection = None
+        if gate_rejection is not None:
+            # Release the claim without counting a failure — this is not a
+            # task problem, it's a node health problem.
+            try:
+                with write_txn(conn):
+                    conn.execute(
+                        "UPDATE tasks SET status = 'ready', "
+                        "claim_lock = NULL, claim_expires = NULL, "
+                        "worker_pid = NULL "
+                        "WHERE id = ? AND status = 'running'",
+                        (claimed.id,),
+                    )
+                    _append_event(
+                        conn, claimed.id, "node_gate_rejected",
+                        {
+                            "node": target_node,
+                            "reason": gate_rejection,
+                            "task_id": claimed.id,
+                        },
+                    )
+            except Exception:
+                logger.debug(
+                    "kanban dispatch: failed to release claim after gate "
+                    "rejection for %s", claimed.id, exc_info=True,
+                )
+            result.skipped_node_rejected.append(
+                (claimed.id, target_node, gate_rejection)
+            )
+            logger.info(
+                "[dispatch] node_gate_rejected: task=%s node=%s reason=%s",
+                claimed.id, target_node, gate_rejection,
+            )
+            continue
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             # Back-compat: older spawn_fn signatures accept only
