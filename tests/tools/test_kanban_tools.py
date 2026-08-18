@@ -399,7 +399,7 @@ def test_create_happy_path(worker_env):
     from tools import kanban_tools as kt
     out = kt._handle_create({
         "title": "child task",
-        "assignee": "peer",
+        "assignee": "test-worker",  # Use a known profile instead of 'peer'
         "parents": [worker_env],
     })
     d = json.loads(out)
@@ -411,9 +411,36 @@ def test_create_happy_path(worker_env):
     try:
         child = kb.get_task(conn, d["task_id"])
         assert child.title == "child task"
-        assert child.assignee == "peer"
+        assert child.assignee == "test-worker"
     finally:
         conn.close()
+
+
+def test_create_rejects_unknown_assignee(worker_env):
+    """kanban_create should validate assignee against known profiles and
+    virtual_assignees registry, rejecting unknown assignees with a
+    structured error."""
+    from tools import kanban_tools as kt
+    
+    # Test: unknown assignee (not in known profiles, not in virtual_assignees)
+    out = kt._handle_create({
+        "title": "child with unknown assignee",
+        "assignee": "unknown-assignee-xyz-not-real",
+    })
+    d = json.loads(out)
+    assert "error" in d, f"Expected error for unknown assignee, got: {d}"
+    assert "unknown_assignee" in d["error"], (
+        f"Error should mention 'unknown_assignee', got: {d['error']}"
+    )
+    
+    # Test: known profile should succeed
+    out = kt._handle_create({
+        "title": "child with known assignee",
+        "assignee": "test-worker",  # Use the same known profile as worker_env
+    })
+    d = json.loads(out)
+    assert d["ok"] is True, f"Expected success for known assignee, got error: {d}"
+    assert d["task_id"]
 
 
 def test_link_happy_path(worker_env):
@@ -509,7 +536,7 @@ def test_worker_lifecycle_through_tools(worker_env):
     # 4. spawn a child task for follow-up
     child_out = json.loads(kt._handle_create({
         "title": "write integration test",
-        "assignee": "qa",
+        "assignee": "test-worker",  # Use a known profile
         "parents": [worker_env],
     }))
     assert child_out["ok"]
@@ -640,7 +667,7 @@ def test_worker_unblock_rejects_foreign_task_id(worker_env):
     from hermes_cli import kanban_db as kb
     conn = kb.connect()
     try:
-        other = kb.create_task(conn, title="blocked sibling", assignee="peer")
+        other = kb.create_task(conn, title="blocked sibling", assignee="test-worker")
         kb.block_task(conn, other, reason="waiting")
     finally:
         conn.close()
@@ -830,7 +857,7 @@ def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env,
     from tools import kanban_tools as kt
     out = kt._handle_create({
         "title": "no sub gated",
-        "assignee": "peer",
+        "assignee": "test-worker",
     })
     d = json.loads(out)
     assert d["ok"] is True
@@ -857,7 +884,7 @@ def test_maybe_auto_subscribe_swallows_add_notify_sub_failure(monkeypatch, worke
 
     out = kt._handle_create({
         "title": "auto-sub tolerates add_notify_sub failure",
-        "assignee": "peer",
+        "assignee": "test-worker",
     })
     d = json.loads(out)
     assert d["ok"] is True, d

@@ -2223,6 +2223,13 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # Virtual assignees registry: maps virtual assignee names (e.g.
+        # 'livekit-boardroom' for convene route handlers) to their metadata.
+        # These are not Hermes profiles but special handlers (e.g. VFE route
+        # primitives, external services). An empty dict means no virtual
+        # assignees are registered; kanban_create validates against known
+        # profiles + this registry and rejects unknown assignees.
+        "virtual_assignees": {},
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

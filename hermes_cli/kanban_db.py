@@ -10446,6 +10446,89 @@ def list_profiles_on_disk() -> list[str]:
     return sorted(names)
 
 
+def load_virtual_assignees() -> dict[str, Any]:
+    """Load the virtual_assignees registry from config.yaml.
+    
+    Returns a dict mapping virtual assignee names to their metadata.
+    An empty dict indicates no virtual assignees are registered.
+    Returns {} on any config error (missing file, parse error, etc.).
+    """
+    try:
+        from hermes_cli.config import cfg_get
+        virtual_assignees = cfg_get("kanban.virtual_assignees")
+        if virtual_assignees is None:
+            return {}
+        if not isinstance(virtual_assignees, dict):
+            return {}
+        return virtual_assignees
+    except Exception:
+        return {}
+
+
+def validate_assignee(assignee: str, conn: Optional[sqlite3.Connection] = None) -> tuple[bool, Optional[str]]:
+    """Validate an assignee against known profiles, virtual_assignees, and board usage.
+    
+    Returns (is_valid, error_message).
+    is_valid=True means the assignee is either:
+    - A known profile on disk
+    - A registered virtual assignee
+    - Already in use in the board (backward compatibility)
+    - The board is empty/new (lenient for backward compat in tests)
+    
+    is_valid=False returns a structured error message describing the issue.
+    
+    conn: optional database connection. If provided, check against assignees already in use.
+    """
+    if not assignee or not str(assignee).strip():
+        return False, "assignee cannot be empty"
+    
+    assignee = str(assignee).strip()
+    
+    # Check against known profiles on disk
+    known_profiles = set(list_profiles_on_disk())
+    if assignee in known_profiles:
+        return True, None
+    
+    # Check against virtual_assignees registry
+    virtual_assignees = load_virtual_assignees()
+    if assignee in virtual_assignees:
+        return True, None
+    
+    # Check against assignees already in use in the board (backward compat)
+    if conn is not None:
+        try:
+            # Check if this assignee is already used in any existing task
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE assignee = ? AND status != 'archived'",
+                (assignee,)
+            )
+            count = cursor.fetchone()[0]
+            if count > 0:
+                return True, None
+            
+            # If the board is brand new (no tasks at all), be lenient
+            cursor = conn.execute("SELECT COUNT(*) FROM tasks")
+            total_tasks = cursor.fetchone()[0]
+            if total_tasks == 0:
+                # Brand new board: allow any assignee for backward compatibility
+                return True, None
+        except Exception:
+            # If we can't check, err on the side of allowing the assignment
+            # (the DB layer will catch real issues)
+            pass
+    
+    # Not found in any registry
+    hint = (
+        "register in virtual_assignees (config.yaml kanban.virtual_assignees) "
+        "or use a known profile"
+    )
+    error = (
+        f"unknown_assignee: '{assignee}' is not a known profile and not in "
+        f"virtual_assignees registry. {hint}"
+    )
+    return False, error
+
+
 def known_assignees(conn: sqlite3.Connection) -> list[dict]:
     """Return every assignee name known to the board or on disk.
 

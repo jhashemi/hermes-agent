@@ -1260,6 +1260,9 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    # Validate assignee against known profiles and virtual_assignees registry
+    from hermes_cli.kanban_db import validate_assignee
+    # We'll validate after getting the connection below, since we need conn for board history check
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")
@@ -1325,6 +1328,10 @@ def _handle_create(args: dict, **kw) -> str:
     try:
         kb, conn = _connect(board=board)
         try:
+            # Validate assignee against known profiles, virtual_assignees, and board usage
+            is_valid, error_msg = validate_assignee(assignee, conn=conn)
+            if not is_valid:
+                return tool_error(error_msg)
             # A project link is safe to inherit because ``create_task`` turns
             # it into a fresh per-task worktree. Never inherit the parent's
             # literal workspace kind/path; directory sharing must be explicit.
