@@ -806,6 +806,21 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.CompletionVerificationError as vf_err:
+                # VFE-COMPLETE-01: strict verification refused the
+                # completion. The task is still in-flight (the gate
+                # runs before the write txn). Surface the failures so
+                # the worker can fix them and retry.
+                return tool_error(
+                    f"kanban_complete blocked: strict verification failed "
+                    f"({len(vf_err.failures)} check(s)):"
+                    + "".join(f"\n  - {f}" for f in vf_err.failures)
+                    + "\nYour task is still in-flight (no state change). "
+                    "Fix the failing checks (ensure artifact paths exist, "
+                    "commits are pushed to origin, services are active, "
+                    "cross-host propagation is verified) and retry "
+                    "kanban_complete with corrected metadata."
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
@@ -1767,7 +1782,18 @@ KANBAN_COMPLETE_SCHEMA = {
                     "Free-form dict of structured facts about this "
                     "attempt — {\"changed_files\": [...], \"tests_run\": 12, "
                     "\"findings\": [...]}. Surfaced to downstream "
-                    "workers alongside ``summary``."
+                    "workers alongside ``summary``. VFE-COMPLETE-01 "
+                    "extends this with optional verification fields: "
+                    "`artifacts` (list of absolute paths, verified to "
+                    "exist when strict_verification is on), "
+                    "`commit_hashes` (list of {repo, branch, hash, "
+                    "verified_on_origin}, verified against git log), "
+                    "`deployed_services` (list of {host, unit, pid, "
+                    "started_at}, verified via systemctl is-active), "
+                    "`cross_host_propagation` (list of {artifact, "
+                    "source_host, target_hosts, mechanism, verified}), "
+                    "`verification_evidence` (opaque dict of command "
+                    "outputs for audit trail)."
                 ),
             },
             "result": {

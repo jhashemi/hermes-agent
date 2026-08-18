@@ -172,9 +172,20 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any = None, session_store: An
     For all other messages: silently resolves agent in background (no skip).
     """
     try:
-        msg = event.get("message", {})
-        text = (msg.get("text") or msg.get("body") or "").strip()
-        user_id = str(event.get("user_id") or event.get("from") or "")
+        # Handle both MessageEvent dataclass (has .text) and dict (has .get())
+        if hasattr(event, "text"):
+            # MessageEvent object (current gateway API)
+            text = (event.text or "").strip()
+            source = getattr(event, "source", None)
+            user_id = str(getattr(source, "user_id", "") or getattr(source, "chat_id", "") or "")
+        elif isinstance(event, dict):
+            # Dict-style event (tests, older API)
+            msg = event.get("message", {})
+            text = (msg.get("text") or msg.get("body") or "").strip()
+            user_id = str(event.get("user_id") or event.get("from") or "")
+        else:
+            text = str(event)
+            user_id = ""
 
         if not text:
             return None

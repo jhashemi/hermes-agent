@@ -2235,6 +2235,16 @@ DEFAULT_CONFIG = {
         # worker process (if still running host-locally) is terminated
         # before the reclaim.  0 disables stale detection entirely.
         "dispatch_stale_timeout_seconds": 14400,
+        # VFE-COMPLETE-01: strict completion verification. When true,
+        # ``kanban_complete`` refuses to mark a task done if any
+        # declared artifact path does not exist, any commit hash is
+        # not found on origin, any deployed service is not active, or
+        # any cross-host propagation entry is unverified. Ships OFF
+        # (grace period): old-style completions without structured
+        # metadata get a WARNING comment instead of a refusal. Flip
+        # to true after the grace-period warning data has been
+        # reviewed. See docs/kanban_complete_protocol.md.
+        "complete_strict_verification": False,
     },
 
     # execute_code settings — controls the tool used for programmatic tool calls.

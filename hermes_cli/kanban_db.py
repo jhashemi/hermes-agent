@@ -4880,6 +4880,334 @@ class MissingWaitingForError(ValueError):
 _CASCADE_HUMAN_GATED_BLOCK_KINDS = frozenset({"capability", "needs_input"})
 
 
+class CompletionVerificationError(ValueError):
+    """Raised by ``complete_task`` when strict verification (Part 3 of
+    VFE-COMPLETE-01) finds a declared artifact, commit, service, or
+    cross-host propagation entry that does not verify.
+
+    The list of failure descriptions is on ``.failures`` for callers
+    that want structured access. Subclasses ``ValueError`` so existing
+    tool-error handlers treat it as a recoverable user error, matching
+    ``HallucinatedCardsError``.
+    """
+
+    def __init__(self, failures: list[str], completing_task_id: str):
+        self.failures = list(failures)
+        self.completing_task_id = completing_task_id
+        super().__init__(
+            f"completion blocked: strict verification failed "
+            f"({len(failures)} check(s)):" + "".join(
+                f"\n  - {f}" for f in failures
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# VFE-COMPLETE-01: completion-verification helpers
+# ---------------------------------------------------------------------------
+
+# Prose trigger words for the grace-period heuristic (Part 4). When the
+# summary mentions these AND the metadata contains no structured
+# verification fields, a WARNING comment is emitted.
+_CLAIM_TRIGGER_WORDS = (
+    "created", "committed", "deployed", "shipped", "pushed",
+)
+
+
+def _load_complete_strict_verification() -> bool:
+    """Read the ``kanban.complete_strict_verification`` config flag.
+
+    Returns ``False`` (grace period) on any error so a config-loading
+    failure can never lock workers out of completing tasks.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+        _cfg = load_config_readonly()
+        _kanban_cfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+        if isinstance(_kanban_cfg, dict):
+            return bool(_kanban_cfg.get("complete_strict_verification", False))
+    except Exception:
+        pass
+    return False
+
+
+def _verify_completion_artifacts(
+    metadata: dict,
+    *,
+    failures: list[str],
+) -> None:
+    """Part 3 check 1: every path in ``metadata.artifacts`` must exist."""
+    artifacts = metadata.get("artifacts")
+    if not isinstance(artifacts, (list, tuple)):
+        return
+    for p in artifacts:
+        s = str(p).strip() if p is not None else ""
+        if not s:
+            continue
+        if not Path(s).exists():
+            failures.append(
+                f"artifact path does not exist: {s}"
+            )
+
+
+def _verify_completion_commits(
+    metadata: dict,
+    *,
+    failures: list[str],
+) -> None:
+    """Part 3 check 2: every commit hash in ``metadata.commit_hashes``
+    must be found via ``git log <branch> --grep=<hash>`` (on origin when
+    the repo field resolves to one, else the current working copy).
+
+    Each entry: ``{repo, branch, hash, verified_on_origin}``.
+    """
+    commits = metadata.get("commit_hashes")
+    if not isinstance(commits, (list, tuple)):
+        return
+    for entry in commits:
+        if not isinstance(entry, dict):
+            failures.append(
+                f"commit_hashes entry is not a dict: {entry!r}"
+            )
+            continue
+        repo = str(entry.get("repo", "")).strip()
+        branch = str(entry.get("branch", "")).strip()
+        commit_hash = str(entry.get("hash", "")).strip()
+        if not commit_hash:
+            failures.append(
+                f"commit_hashes entry missing 'hash': {entry!r}"
+            )
+            continue
+        # Determine the git working directory to run in.
+        git_cwd = repo if repo and os.path.isdir(repo) else None
+        # Verify the commit exists. When verified_on_origin is True
+        # we check against origin/<branch>; otherwise we check the
+        # local working copy (covers test environments with no remote).
+        ref = f"origin/{branch}" if entry.get("verified_on_origin") else branch
+        if not branch and entry.get("verified_on_origin"):
+            ref = "origin"
+        # First check the commit object exists (git cat-file -e).
+        try:
+            cat_result = subprocess.run(
+                ["git", "cat-file", "-e", f"{commit_hash}^{{commit}}"],
+                capture_output=True, text=True, timeout=10,
+                cwd=git_cwd,
+            )
+            if cat_result.returncode != 0:
+                failures.append(
+                    f"commit {commit_hash} does not exist as a commit "
+                    f"object (repo={repo or 'cwd'})"
+                )
+                continue
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            failures.append(
+                f"commit {commit_hash} verification error: {exc}"
+            )
+            continue
+        # Then check it's reachable from the ref.
+        try:
+            log_result = subprocess.run(
+                ["git", "log", ref, "--format=%H"],
+                capture_output=True, text=True, timeout=15,
+                cwd=git_cwd,
+            )
+            if log_result.returncode != 0:
+                failures.append(
+                    f"commit {commit_hash} could not verify on {ref} "
+                    f"(git log failed: {log_result.stderr.strip()})"
+                )
+            elif commit_hash not in log_result.stdout.split():
+                failures.append(
+                    f"commit {commit_hash} not found on {ref}"
+                    f" (repo={repo or 'cwd'})"
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            failures.append(
+                f"commit {commit_hash} verification error on {ref}: {exc}"
+            )
+
+
+def _verify_completion_services(
+    metadata: dict,
+    *,
+    failures: list[str],
+) -> None:
+    """Part 3 check 3: every deployed service must be ``active`` via
+    ``systemctl is-active``.
+
+    Each entry: ``{host, unit, pid, started_at}``. Only the local
+    host's services can be verified with systemctl; remote-host
+    entries are verified via SSH when possible, otherwise recorded as
+    unverifiable.
+    """
+    services = metadata.get("deployed_services")
+    if not isinstance(services, (list, tuple)):
+        return
+    _local_host = os.environ.get("HOSTNAME", "") or os.uname().nodename if hasattr(os, "uname") else ""
+    for entry in services:
+        if not isinstance(entry, dict):
+            failures.append(
+                f"deployed_services entry is not a dict: {entry!r}"
+            )
+            continue
+        unit = str(entry.get("unit", "")).strip()
+        host = str(entry.get("host", "")).strip()
+        if not unit:
+            failures.append(
+                f"deployed_services entry missing 'unit': {entry!r}"
+            )
+            continue
+        if host and _local_host and host != _local_host:
+            # Remote host — attempt SSH verification.
+            try:
+                probe = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     host, f"systemctl is-active {unit}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if probe.returncode != 0 or probe.stdout.strip() != "active":
+                    failures.append(
+                        f"service {unit}@{host} is not active "
+                        f"(rc={probe.returncode}, out={probe.stdout.strip()!r})"
+                    )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                failures.append(
+                    f"service {unit}@{host} verification error: {exc}"
+                )
+            continue
+        # Local host.
+        try:
+            result = subprocess.run(
+                ["systemctl", "is-active", unit],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode != 0 or result.stdout.strip() != "active":
+                failures.append(
+                    f"service {unit} is not active "
+                    f"(rc={result.returncode}, out={result.stdout.strip()!r})"
+                )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            failures.append(
+                f"service {unit} verification error: {exc}"
+            )
+
+
+def _verify_completion_cross_host(
+    metadata: dict,
+    *,
+    failures: list[str],
+) -> None:
+    """Part 3 check 4: every cross-host propagation entry must be
+    verifiable — the artifact must exist on each target host.
+
+    Each entry: ``{artifact, source_host, target_hosts, mechanism, verified}``.
+    If ``verified`` is explicitly ``False``, the entry is a known-failure
+    and is recorded as such. Otherwise we stat the artifact on each
+    target via SSH (or locally when the target is the local host).
+    """
+    propagations = metadata.get("cross_host_propagation")
+    if not isinstance(propagations, (list, tuple)):
+        return
+    _local_host = os.environ.get("HOSTNAME", "") or os.uname().nodename if hasattr(os, "uname") else ""
+    for entry in propagations:
+        if not isinstance(entry, dict):
+            failures.append(
+                f"cross_host_propagation entry is not a dict: {entry!r}"
+            )
+            continue
+        artifact = str(entry.get("artifact", "")).strip()
+        targets = entry.get("target_hosts")
+        if not artifact:
+            failures.append(
+                f"cross_host_propagation entry missing 'artifact': {entry!r}"
+            )
+            continue
+        if entry.get("verified") is False:
+            failures.append(
+                f"cross_host_propagation {artifact} explicitly marked "
+                f"unverified"
+            )
+            continue
+        if not isinstance(targets, (list, tuple)):
+            targets = [str(targets)] if targets else []
+        for target in targets:
+            t = str(target).strip()
+            if not t:
+                continue
+            if t == _local_host:
+                if not Path(artifact).exists():
+                    failures.append(
+                        f"cross_host_propagation: {artifact} not found "
+                        f"on local host {t}"
+                    )
+                continue
+            # Remote target — SSH stat.
+            try:
+                probe = subprocess.run(
+                    ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
+                     t, f"test -e {artifact} && echo ok"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if probe.returncode != 0 or probe.stdout.strip() != "ok":
+                    failures.append(
+                        f"cross_host_propagation: {artifact} not found "
+                        f"on target host {t}"
+                    )
+            except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+                failures.append(
+                    f"cross_host_propagation: {artifact} on {t} "
+                    f"verification error: {exc}"
+                )
+
+
+def _run_completion_verification(
+    conn: sqlite3.Connection,
+    task_id: str,
+    metadata: Optional[dict],
+) -> list[str]:
+    """Run the Part 3 server-side verification pass.
+
+    Returns a list of failure descriptions. An empty list means all
+    checks passed. Only runs when ``metadata`` is a dict; a ``None``
+    metadata skips verification entirely (backward-compat for callers
+    that pass nothing).
+    """
+    failures: list[str] = []
+    if not isinstance(metadata, dict):
+        return failures
+    _verify_completion_artifacts(metadata, failures=failures)
+    _verify_completion_commits(metadata, failures=failures)
+    _verify_completion_services(metadata, failures=failures)
+    _verify_completion_cross_host(metadata, failures=failures)
+    return failures
+
+
+def _has_structured_verification(metadata: Optional[dict]) -> bool:
+    """Heuristic (Part 4): does the metadata contain any structured
+    verification field?
+    """
+    if not isinstance(metadata, dict):
+        return False
+    for key in (
+        "artifacts", "commit_hashes", "deployed_services",
+        "cross_host_propagation", "verification_evidence",
+    ):
+        val = metadata.get(key)
+        if val is not None and val != [] and val != {}:
+            return True
+    return False
+
+
+def _summary_claims_work(summary: Optional[str], result: Optional[str]) -> bool:
+    """Heuristic (Part 4): does the summary/result prose mention creating,
+    committing, deploying, shipping, or pushing?
+    """
+    scan = " ".join(filter(None, [summary, result])).lower()
+    if not scan:
+        return False
+    return any(w in scan for w in _CLAIM_TRIGGER_WORDS)
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -5018,6 +5346,41 @@ def complete_task(
     # Normalize the plain string fields.
     commit_hash_str = str(commit_hash).strip() if commit_hash else None
     test_run_id_str = str(test_run_id).strip() if test_run_id else None
+
+    # ── VFE-COMPLETE-01 Part 3: strict completion verification ─────
+    #
+    # When ``kanban.complete_strict_verification`` is enabled, run the
+    # server-side verification pass against the structured metadata
+    # (artifacts exist, commits on origin, services active, cross-host
+    # propagation verified). If ANY check fails, the completion is
+    # refused — the task stays ``running`` and an auditable event is
+    # emitted so the rejected attempt is visible on the board.
+    #
+    # When the flag is OFF (grace period), the verification is skipped
+    # and the Part 4 heuristic runs after the completion instead (see
+    # below). This means the strict gate only fires when the operator
+    # has explicitly enabled the flag post-grace-period.
+    _strict_enabled = _load_complete_strict_verification()
+    if _strict_enabled:
+        _vf_failures = _run_completion_verification(
+            conn, task_id, metadata,
+        )
+        if _vf_failures:
+            with write_txn(conn):
+                _append_event(
+                    conn, task_id,
+                    "completion_blocked_verification",
+                    {
+                        "failures": _vf_failures,
+                        "strict_verification": True,
+                        "summary_preview": (
+                            (summary or result or "").strip().splitlines()[0][:200]
+                            if (summary or result)
+                            else None
+                        ),
+                    },
+                )
+            raise CompletionVerificationError(_vf_failures, task_id)
 
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
@@ -5213,6 +5576,48 @@ def complete_task(
                     },
                     run_id=run_id,
                 )
+    # ── VFE-COMPLETE-01 Part 4: grace-period heuristic ────────────
+    #
+    # When strict verification is OFF (grace period), run a heuristic:
+    # if the summary/result prose claims work (created/committed/
+    # deployed/shipped/pushed) but the metadata contains NO structured
+    # verification fields, emit a WARNING comment on the task. Do NOT
+    # refuse — the completion proceeds, but the operator gets a visible
+    # signal that the claim is unverified. When the flag is ON, the
+    # strict gate already caught these; this heuristic is a no-op.
+    if not _strict_enabled:
+        if _summary_claims_work(summary, result) and not _has_structured_verification(metadata):
+            _warning_body = (
+                "## VFE-COMPLETE-01 grace-period WARNING\n\n"
+                "This completion claims artifacts in its summary but did "
+                "not provide structured verification (no "
+                "`artifacts`, `commit_hashes`, `deployed_services`, "
+                "`cross_host_propagation`, or `verification_evidence` "
+                "in metadata). See the RCA for the class of failure "
+                "this pattern produces. Once "
+                "`kanban.complete_strict_verification` is enabled, "
+                "such completions will be REFUSED.\n\n"
+                "To avoid this warning, pass structured metadata:\n"
+                "```python\n"
+                "kanban_complete(\n"
+                "  summary='...',\n"
+                "  metadata={\n"
+                "    'artifacts': ['/abs/path/to/file.py'],\n"
+                "    'commit_hashes': [{'repo': '/repo', 'branch': 'main', "
+                "'hash': 'abc123', 'verified_on_origin': True}],\n"
+                "    'verification_evidence': {'git_log_output': '...'}\n"
+                "  }\n"
+                ")\n"
+                "```"
+            )
+            try:
+                add_comment(
+                    conn, task_id,
+                    author="complete-protocol",
+                    body=_warning_body,
+                )
+            except Exception:
+                pass  # advisory; never block completion
     # Successful completion — wipe the consecutive-failures counter.
     # Failure history stays on the event log for audit; the counter
     # just tracks "is there a current pathology the breaker should
