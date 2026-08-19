@@ -4347,6 +4347,91 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     return bool(row) and row["kind"] == "blocked"
 
 
+# Block kinds that indicate a human must decide before the task resumes.
+# ``dependency`` and ``transient`` are auto-recovering by design (parent
+# completion / retry loops clear them) so they are deliberately excluded.
+_GOVERNANCE_BLOCK_KINDS: frozenset[str] = frozenset({"needs_input", "capability"})
+
+
+def _has_outstanding_governance_gate(
+    conn: sqlite3.Connection, task_id: str,
+) -> bool:
+    """Return True when ``task_id`` carries an unresolved governance
+    block — one that a human must clear explicitly, regardless of the
+    task's current row-level ``status``.
+
+    Two overlapping event patterns count:
+
+    * A ``"blocked"`` event with payload ``kind`` in
+      :data:`_GOVERNANCE_BLOCK_KINDS` that has no strictly-later
+      ``"unblocked"`` event. This is the mainline governance handoff
+      emitted by ``block_task(kind='needs_input'|'capability')``.
+
+    * A ``"block_loop_detected"`` event (loop-breaker fired past
+      :data:`BLOCK_RECURRENCE_LIMIT`) with no strictly-later
+      ``"unblocked"`` event. The loop-breaker routes the task to
+      ``triage`` and emits its own event kind — ``_has_sticky_block``
+      alone (which only inspects ``"blocked"`` / ``"unblocked"``) can't
+      see it, but the invariant is identical: a human must clear the
+      condition before auto-promotion resumes.
+
+    Unlike :func:`_has_sticky_block` this predicate is **status-agnostic**:
+    it fires even when a subsequent code path (a decomposer, an
+    operator SQL fix-up, a hook) has flipped the row-level ``status``
+    from ``blocked`` to ``todo`` or ``triage``. The reported bypass
+    (t_93231838, 2026-08-19) was exactly this: the parent had been
+    ``block_task(kind='needs_input')`` twice, then external state moved
+    it to ``todo``, and child completion silently promoted it to
+    ``ready`` because the sticky-block check lived only inside the
+    ``cur_status == 'blocked'`` branch of ``recompute_ready``.
+
+    :func:`unblock_task` emits an ``"unblocked"`` event, so the single
+    legitimate exit path is preserved: a deliberate operator unblock
+    supersedes both governance-block and loop-detected gates.
+    """
+    # Compute the id of the most recent "unblocked" event once and reuse it
+    # for both checks. ``id`` is monotonically increasing in ``task_events``
+    # (integer PK), so "strictly later" reduces to "greater id".
+    unblock_row = conn.execute(
+        "SELECT id FROM task_events "
+        "WHERE task_id = ? AND kind = 'unblocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    last_unblock_id = int(unblock_row["id"]) if unblock_row else 0
+
+    # (a) Most-recent governance-kind "blocked" event, if any, must be
+    # older than the most-recent unblock. We inspect the JSON payload
+    # inline via json_extract to avoid deserialising every row in Python.
+    blocked_row = conn.execute(
+        "SELECT id, json_extract(payload, '$.kind') AS bk FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if (
+        blocked_row is not None
+        and blocked_row["bk"] in _GOVERNANCE_BLOCK_KINDS
+        and int(blocked_row["id"]) > last_unblock_id
+    ):
+        return True
+
+    # (b) Any loop-detected event with no later unblock also gates
+    # promotion. The loop-breaker escalation is by construction a
+    # human-intervention path (it fires after the auto-retry budget
+    # runs out) so its ``kind`` payload doesn't need to be re-checked.
+    loop_row = conn.execute(
+        "SELECT id FROM task_events "
+        "WHERE task_id = ? AND kind = 'block_loop_detected' "
+        "ORDER BY id DESC LIMIT 1",
+        (task_id,),
+    ).fetchone()
+    if loop_row is not None and int(loop_row["id"]) > last_unblock_id:
+        return True
+
+    return False
+
+
 def _dependency_waiting_for_satisfied(
     conn: sqlite3.Connection, task_id: str,
 ) -> bool:
@@ -4479,6 +4564,19 @@ def recompute_ready(
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            # Governance-gate guard (t_93231838, 2026-08-19): a task
+            # that carries an unresolved ``needs_input`` / ``capability``
+            # block event — or a ``block_loop_detected`` escalation —
+            # must NOT be auto-promoted, even when its row-level
+            # ``status`` has since been flipped to ``todo`` by a
+            # decomposer / hook / operator SQL fix-up. This check is
+            # deliberately status-agnostic and sits above the existing
+            # per-status branches so both ``todo`` and ``blocked`` rows
+            # observe the invariant. ``unblock_task`` clears the gate
+            # by emitting an ``"unblocked"`` event newer than the
+            # governance/loop event.
+            if _has_outstanding_governance_gate(conn, task_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for human review — do not
                 # silently auto-recover.  ``unblock_task`` is the only
