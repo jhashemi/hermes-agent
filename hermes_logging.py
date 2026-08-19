@@ -589,7 +589,20 @@ class _NonFormattingQueueHandler(QueueHandler):
     """
 
     def prepare(self, record: logging.LogRecord) -> logging.LogRecord:
-        return copy.copy(record)
+        try:
+            return copy.copy(record)
+        except Exception:
+            # Interpreter finalization tears the import machinery down
+            # (sys.meta_path=None, modules purged), and copy.copy()'s
+            # __reduce_ex__ path needs it — records emitted that late
+            # (e.g. asyncio's "Task was destroyed but it is pending!"
+            # handler for leaked client tasks at GC) raised ImportError
+            # here and printed a "--- Logging error ---" block per record
+            # (hermes1, 2026-08). Falling back to the shared record is
+            # safe at that point: the process is exiting, so the
+            # cross-thread mutation race the copy guards against no
+            # longer matters.
+            return record
 
 
 def _stop_queue_listener_locked() -> None:
