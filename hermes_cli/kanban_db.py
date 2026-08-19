@@ -5250,7 +5250,8 @@ def release_stale_claims(
         with write_txn(conn):
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                "claim_expires = NULL, worker_pid = NULL "
+                "claim_expires = NULL, worker_pid = NULL, "
+                "worker_node = NULL "
                 "WHERE id = ? AND status = 'running' AND claim_lock IS ? "
                 "AND claim_expires IS NOT NULL AND claim_expires < ?",
                 (row["id"], row["claim_lock"], now),
@@ -5322,7 +5323,8 @@ def reclaim_task(
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-            "claim_expires = NULL, worker_pid = NULL "
+            "claim_expires = NULL, worker_pid = NULL, "
+            "worker_node = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
             "AND claim_lock IS ?",
             (task_id, prev_lock),
@@ -7996,6 +7998,7 @@ def enforce_max_runtime(
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, "
+                "worker_node = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND worker_pid = ? AND claim_lock IS ?",
@@ -8121,6 +8124,7 @@ def detect_stale_running(
             cur = conn.execute(
                 "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, "
+                "worker_node = NULL, "
                 "last_heartbeat_at = NULL "
                 "WHERE id = ? AND status = 'running' "
                 "  AND claim_lock IS ?",
@@ -8430,7 +8434,8 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             else:
                 cur = conn.execute(
                     "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-                    "claim_expires = NULL, worker_pid = NULL "
+                    "claim_expires = NULL, worker_pid = NULL, "
+                    "worker_node = NULL "
                     "WHERE id = ? AND status = 'running' "
                     "  AND worker_pid = ? AND claim_lock IS ?",
                     (row["id"], pid, row["claim_lock"]),
@@ -8737,6 +8742,7 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
+                    "worker_node = NULL, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status = 'running'",
                     (failures, error[:500], task_id),
@@ -8828,8 +8834,13 @@ def _set_worker_node(
     spawns leave the column NULL so legacy rows and single-host boards
     keep behaving as they did before this column existed.
 
-    Idempotent: passing ``None`` clears the column (used when the spawn
-    actually fell through to local after a remote probe failed).
+    The helper accepts ``Optional[str]`` for symmetry with tests and
+    future callers, but the production dispatch loop never invokes it
+    with ``None``. Reclaim paths clear ``worker_node`` inline in their
+    ``UPDATE ... SET`` list (see ``release_stale_claims``,
+    ``detect_stale_running``, ``detect_crashed_workers``, and the
+    spawn-failure release) rather than round-tripping through this
+    helper.
     """
     with write_txn(conn):
         conn.execute(
@@ -9450,6 +9461,16 @@ def _dispatch_once_locked(
                 # the missing attribute — they simply record None,
                 # which is treated as a local spawn (same as before
                 # this column existed).
+                #
+                # Invariant: reading a module-level attribute off
+                # ``_spawn`` is safe here because the dispatch tick lock
+                # serializes concurrent dispatch calls, so no other
+                # invocation can overwrite ``_last_actual_node`` between
+                # ``_spawn(...)`` returning and this ``getattr`` read.
+                # TODO(t_78fbccf4): promote to a proper return channel
+                # (e.g. ``SpawnResult(pid, node)``) so the placement is
+                # explicit at the call site instead of an out-of-band
+                # attribute.
                 _actual_node = getattr(_spawn, "_last_actual_node", None)
                 if _actual_node and _actual_node != _local_node_id():
                     _set_worker_node(conn, claimed.id, _actual_node)
@@ -9551,6 +9572,12 @@ def _dispatch_once_locked(
                 # Mirror the ready-dispatch path: persist worker_node
                 # if the review agent was routed to a remote node so
                 # this host's reap loops don't false-crash it.
+                #
+                # Invariant: same dispatch-tick-lock guarantee as the
+                # ready path — the module-level attribute read is safe
+                # because no concurrent tick can overwrite it between
+                # ``_spawn(...)`` returning and this ``getattr``.
+                # TODO(t_78fbccf4): promote to ``SpawnResult(pid, node)``.
                 _actual_node = getattr(_spawn, "_last_actual_node", None)
                 if _actual_node and _actual_node != _local_node_id():
                     _set_worker_node(conn, claimed.id, _actual_node)
