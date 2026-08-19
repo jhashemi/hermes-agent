@@ -35,14 +35,20 @@ class JetStreamBridge:
         self._subs: list = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._connected = False
+        self._connecting = False
 
     @property
     def connected(self) -> bool:
         return self._connected
 
     async def start(self) -> None:
-        if self._connected:
+        if self._connected or self._connecting:
+            # _connecting guard: get_or_start_bridge() can schedule several
+            # overlapping start()s before the first connect completes —
+            # without the guard each one opens its own NATS client and the
+            # extras leak (their ping/flusher tasks are never drained).
             return
+        self._connecting = True
         try:
             import nats as _nats_mod  # type: ignore
             self._nc = await _nats_mod.connect(NATS_URL, name="voice-agents-plugin")
@@ -61,9 +67,12 @@ class JetStreamBridge:
                 ))
             self._loop = asyncio.get_running_loop()
             self._connected = True
+            _register_atexit_drain()
             logger.info("[voice-agents.jet] JetStream connected — subjects=%s", SUBJECTS)
         except Exception as exc:
             logger.warning("[voice-agents.jet] JetStream unavailable: %s", exc)
+        finally:
+            self._connecting = False
 
     def publish_sync(self, subject: str, payload: dict) -> None:
         """Schedule async publish from a sync caller (the gateway hook).
@@ -110,17 +119,69 @@ class JetStreamBridge:
         logger.info("[voice-agents.jet] subscribed: %s", subject)
 
     async def close(self) -> None:
+        """Unsubscribe + drain the connection. Idempotent; clears all state."""
+        if not self._connected and self._nc is None:
+            return
         for s in self._subs:
             try:
                 await s.unsubscribe()
             except Exception:
                 pass
-        if self._nc is not None:
+        self._subs = []
+        nc, self._nc = self._nc, None
+        self._js = None
+        self._loop = None
+        self._connected = False
+        if nc is not None:
             try:
-                await self._nc.drain()
+                await nc.drain()  # drain() flushes, then closes the connection
             except Exception:
                 pass
-        self._connected = False
+
+# ---------------------------------------------------------------------------
+# Process-exit drain
+#
+# The bridge's NATS client spawns long-lived tasks (``Client._ping_interval``,
+# ``Client._flusher``, ``Subscription._wait_for_msgs``) on whatever loop
+# ``start()`` ran on. If the process exits without draining, those tasks are
+# GC'd at interpreter teardown and asyncio logs "Task was destroyed but it
+# is pending!" for each one (hermes1, 2026-08). The gateway proper exits via
+# os._exit (no finalization, no warnings), but every other hermes process
+# that loaded this plugin (CLI, kanban workers, cron) exits through normal
+# finalization — hence this atexit drain. Best-effort: at atexit time the
+# import machinery may already be partly torn down, so every failure is
+# swallowed.
+# ---------------------------------------------------------------------------
+
+_atexit_drain_registered = False
+
+
+def _drain_bridge_at_exit(_bridge: "Optional[JetStreamBridge]" = None) -> None:
+    """atexit hook: drain the singleton if its loop is still usable.
+
+    ``_bridge`` is bound as a default arg so the hook survives module-global
+    teardown ordering (defaults are captured at registration, not looked up
+    at finalization time).
+    """
+    bridge = _bridge if _bridge is not None else _jet
+    loop = bridge._loop
+    if not bridge._connected or loop is None:
+        return
+    try:
+        if not loop.is_closed() and not loop.is_running():
+            loop.run_until_complete(bridge.close())
+    except Exception:
+        pass
+
+
+def _register_atexit_drain() -> None:
+    global _atexit_drain_registered
+    if _atexit_drain_registered:
+        return
+    import atexit
+
+    atexit.register(_drain_bridge_at_exit, _jet)
+    _atexit_drain_registered = True
 
 
 # Module-level singleton — initialized on plugin load, used by hook
@@ -177,23 +238,38 @@ _room_fsm_registry: dict[str, Any] = {}
 
 
 def get_or_start_bridge() -> JetStreamBridge:
-    """Schedule start() on the running loop if connected loop is missing.
+    """Schedule start() on the running loop; defer if no loop is running.
 
-    Returns the singleton; safe to call repeatedly. If there is no running
-    asyncio loop (sync invocation), the start is deferred — callers can
-    `await _jet.start()` themselves on the gateway loop.
+    Returns the singleton; safe to call repeatedly.
+
+    Never block-starts on a borrowed, non-running loop: in non-gateway
+    processes (CLI, kanban workers, cron) the plugin loads with no running
+    loop, and a blocking ``run_until_complete(_jet.start())`` here stranded
+    the NATS client's ping/flusher tasks on a loop nothing owned — they
+    surfaced as "Task was destroyed but it is pending!" at interpreter
+    teardown (hermes1, 2026-08). Deferring via ``loop.call_soon`` preserves
+    the gateway feature (its loop is already running at plugin load, or the
+    callback fires the moment it starts) while making every other process
+    a no-op.
     """
-    if not _jet._connected:
+    if _jet._connected:
+        return _jet
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        return _jet
+    if loop.is_closed():
+        return _jet
+
+    def _kick() -> None:
+        if not _jet._connected:
+            asyncio.ensure_future(_jet.start())
+
+    if loop.is_running():
+        _kick()
+    else:
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(_jet.start())
-            else:
-                # No running loop yet — best effort start in current context
-                try:
-                    loop.run_until_complete(_jet.start())
-                except Exception:
-                    pass
+            loop.call_soon(_kick)  # fires when (if) this loop ever runs
         except RuntimeError:
             pass
     return _jet

@@ -712,21 +712,28 @@ async def _start_voice_out_subscriber(gateway: Any) -> None:
 def _schedule_subscriber(gateway: Any) -> None:
     try:
         loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.ensure_future(_start_voice_out_subscriber(gateway))
-        else:
-            # Defer: try via a thread (the gateway will create its own loop)
-            def _runner() -> None:
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    new_loop.run_until_complete(_start_voice_out_subscriber(gateway))
-                except Exception as exc:
-                    logger.debug("[voice-agents] subscriber thread error: %s", exc)
-
-            threading.Thread(target=_runner, daemon=True).start()
     except RuntimeError:
-        pass
+        return
+    if loop.is_closed():
+        return
+
+    def _launch() -> None:
+        asyncio.ensure_future(_start_voice_out_subscriber(gateway))
+
+    if loop.is_running():
+        _launch()
+    else:
+        # Defer until the loop actually runs. The old fallback spawned a
+        # daemon thread with its own event loop — that loop was never
+        # closed, and run_until_complete() returned right after the
+        # subscribe() call, so the subscription was dead the moment the
+        # thread exited AND its NATS tasks leaked ("Task was destroyed
+        # but it is pending!" at teardown, hermes1 2026-08). call_soon on
+        # the real loop preserves the feature with no orphaned loop.
+        try:
+            loop.call_soon(_launch)
+        except RuntimeError:
+            pass
 
 
 # ============================================================================
