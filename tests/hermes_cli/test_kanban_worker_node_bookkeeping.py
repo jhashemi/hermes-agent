@@ -161,7 +161,14 @@ def test_detect_crashed_reclaims_local_when_worker_node_matches(conn):
     a NULL worker_node — it goes through the pid liveness check and is
     reclaimed on dead-pid, so the column doesn't accidentally shield
     genuinely-local workers from reap when someone tags them
-    explicitly."""
+    explicitly.
+
+    Also verifies the reclaim's UPDATE clears ``worker_node`` so a
+    subsequent local respawn starts with a clean row (the mirror of the
+    remote-crash bug: if the tagging node's own reap leaves
+    ``worker_node`` intact, a different node's later local spawn sees a
+    stale placement tag and skips or mis-owns the task).
+    """
     host = kb._claimer_id().split(":", 1)[0]
     tid = kb.create_task(conn, title="tagged-local", assignee="eng")
     kb.claim_task(conn, tid, claimer=f"{host}:A")
@@ -181,6 +188,17 @@ def test_detect_crashed_reclaims_local_when_worker_node_matches(conn):
 
     crashed = kb.detect_crashed_workers(conn)
     assert tid in crashed
+    row = conn.execute(
+        "SELECT status, worker_node, claim_lock, worker_pid "
+        "FROM tasks WHERE id=?", (tid,),
+    ).fetchone()
+    assert row["worker_node"] is None, (
+        "detect_crashed_workers must clear worker_node so a subsequent "
+        "spawn on a different node doesn't inherit the stale placement "
+        "tag (mirror-of-remote-crash bug, t_a57efff4)"
+    )
+    assert row["claim_lock"] is None
+    assert row["worker_pid"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -298,3 +316,134 @@ def test_default_spawn_records_none_on_local_path(monkeypatch, conn):
         # under test, and that's set at the TOP of the function.
         pass
     assert getattr(kb._default_spawn, "_last_actual_node", "unset") is None
+
+
+# ---------------------------------------------------------------------------
+# Mirror-of-remote-crash: every reclaim path must NULL worker_node
+# ---------------------------------------------------------------------------
+#
+# Scenario (per t_a57efff4 review):
+#
+#   1. Task remote-spawned on hermes3 → row.worker_node = "hermes3"
+#   2. hermes3's LOCAL reap detects real crash, reclaims the task
+#      (nulls pid + lock)
+#   3. hermes2 claims the ready row and spawns LOCALLY (no remote
+#      routing) → _last_actual_node stays None → dispatcher never
+#      calls _set_worker_node, so row still says worker_node="hermes3"
+#   4. Row = {worker_node:"hermes3", worker_pid:<hermes2 pid>}
+#      → hermes2's reap skips it (worker_node != local), hermes3's
+#        reap mis-owns it → false-crash storm or eternal running.
+#
+# Fix: every ``UPDATE tasks SET status = 'ready'`` reclaim path adds
+# ``worker_node = NULL`` to the SET list, so step 3 sees a clean row.
+
+def _prep_reclaimable_local(
+    conn, *, worker_node: str, host: str, backdate_seconds: int = 9999
+):
+    """Set up a running task pinned to ``worker_node`` with a dead pid
+    and backdated started_at so any reap-path check that gates on age
+    fires. Returns (task_id, dead_pid)."""
+    tid = kb.create_task(conn, title="mirror-bug", assignee="eng")
+    kb.claim_task(conn, tid, claimer=f"{host}:A")
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    kb._set_worker_pid(conn, tid, dead.pid)
+    kb._set_worker_node(conn, tid, worker_node)
+    conn.execute(
+        "UPDATE tasks SET started_at = started_at - ? WHERE id=?",
+        (backdate_seconds, tid),
+    )
+    conn.execute(
+        "UPDATE task_runs SET started_at = started_at - ? WHERE task_id=?",
+        (backdate_seconds, tid),
+    )
+    conn.commit()
+    kb._record_worker_exit(dead.pid, 1 << 8)
+    return tid, dead.pid
+
+
+def test_detect_crashed_reclaim_clears_worker_node(conn):
+    """The primary local-reap path (``detect_crashed_workers``) must
+    null ``worker_node`` on reclaim so a subsequent local respawn on
+    ANY node starts with a clean placement tag."""
+    host = kb._claimer_id().split(":", 1)[0]
+    local = kb._local_node_id()
+    tid, _pid = _prep_reclaimable_local(conn, worker_node=local, host=host)
+
+    crashed = kb.detect_crashed_workers(conn)
+    assert tid in crashed
+
+    row = conn.execute(
+        "SELECT status, worker_node FROM tasks WHERE id=?", (tid,)
+    ).fetchone()
+    assert row["status"] in ("ready", "blocked", "todo")
+    assert row["worker_node"] is None
+
+
+def test_release_stale_local_branch_clears_worker_node(conn):
+    """The ``release_stale_claims`` LOCAL branch (TTL expired, worker
+    dead here) must null ``worker_node`` on reclaim.
+
+    The mirror-bug narrative: hermes3 runs release_stale_claims against
+    a task it spawned locally (worker_node = "hermes3"). Before the
+    fix, that path cleared pid/lock but not worker_node, so a later
+    local spawn on hermes2 inherited the stale ``hermes3`` tag.
+    """
+    host = kb._claimer_id().split(":", 1)[0]
+    local = kb._local_node_id()
+    tid, _pid = _prep_reclaimable_local(conn, worker_node=local, host=host)
+
+    # Force TTL expiry so release_stale_claims fires.
+    now = int(time.time())
+    conn.execute(
+        "UPDATE tasks SET claim_expires = ? WHERE id = ?",
+        (now - 60, tid),
+    )
+    conn.execute(
+        "UPDATE task_runs SET claim_expires = ? WHERE task_id = ?",
+        (now - 60, tid),
+    )
+    conn.commit()
+
+    kb.release_stale_claims(conn)
+    row = conn.execute(
+        "SELECT status, worker_node, claim_lock FROM tasks WHERE id=?", (tid,)
+    ).fetchone()
+    assert row["status"] == "ready", (
+        f"release_stale_claims local branch did not reclaim "
+        f"(status={row['status']})"
+    )
+    assert row["claim_lock"] is None
+    assert row["worker_node"] is None, (
+        "release_stale_claims local branch must null worker_node — "
+        "otherwise a subsequent local spawn on a different node inherits "
+        "the stale placement tag (t_a57efff4 mirror bug)"
+    )
+
+
+def test_spawn_failure_release_clears_worker_node(conn):
+    """The spawn-failure release path (``_record_spawn_failure`` with
+    ``release_claim=True``) must null ``worker_node`` — a task whose
+    spawn attempt failed after a prior remote assignment must not
+    carry that node tag into the next dispatch tick."""
+    host = kb._claimer_id().split(":", 1)[0]
+    tid = kb.create_task(conn, title="spawn-fail", assignee="eng")
+    kb.claim_task(conn, tid, claimer=f"{host}:A")
+    kb._set_worker_node(conn, tid, "hermes3")  # pretend prior remote route
+
+    kb._record_spawn_failure(
+        conn, tid, "boom: fake spawn failure",
+        failure_limit=999,  # well above threshold → release, don't give up
+    )
+
+    row = conn.execute(
+        "SELECT status, worker_node, claim_lock, worker_pid "
+        "FROM tasks WHERE id=?", (tid,)
+    ).fetchone()
+    assert row["status"] == "ready"
+    assert row["claim_lock"] is None
+    assert row["worker_pid"] is None
+    assert row["worker_node"] is None, (
+        "spawn-failure release must null worker_node so the next "
+        "dispatch tick doesn't inherit the stale remote-node tag"
+    )
