@@ -7686,6 +7686,18 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    deferred_memory: Optional[tuple[float, float]] = None
+    """When set, this tick was short-circuited by the memory backpressure
+    gate (FIX-B / t_ce9a36ca): host ``psutil.virtual_memory().available``
+    fell below ``kanban.memory_backpressure_gb``. The tuple is
+    ``(available_gb, threshold_gb)`` so telemetry can distinguish "just
+    under threshold" from "critically low" without re-reading psutil.
+    ``None`` (the common case) means the gate did not fire.
+    Root cause: on a 60-second tick with a busy board, forking a worker
+    while the host is near-OOM lands us in ENOMEM territory — the child
+    dies during context load with zero heartbeats. Deferring the spawn
+    loop this tick lets already-running workers finish and free RAM
+    before we make the pressure worse."""
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
@@ -9235,6 +9247,59 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+def _check_memory_backpressure(
+    threshold_gb: Optional[float],
+) -> Optional[tuple[float, float]]:
+    """Return ``(available_gb, threshold_gb)`` when host memory is below
+    the configured backpressure threshold, or ``None`` when there is
+    still headroom (or when the check is disabled / unavailable).
+
+    Fix for t_ce9a36ca (FIX-B): on a busy board a 60-second tick with
+    ``max_spawn_per_tick`` >0 can push the host into ENOMEM territory
+    when many workers are already resident (each hermes CLI worker is
+    ~200–220 MB RSS; LiveKit forkservers alone hold ~5 GB on hermes2).
+    The 15th–20th spawn fails during fork/exec or during context load,
+    which shows up as a "pid N not alive" crash with zero heartbeats
+    (152 of 208 pid-not-alive crashes in the 30-day audit).
+
+    Deferring the spawn loop this tick lets already-running workers
+    finish and free RAM before we make the pressure worse. We use
+    ``psutil.virtual_memory().available`` (not ``.free``) so buff/cache
+    that the kernel would evict on demand still counts as headroom.
+
+    Failure modes are all "let dispatch proceed":
+      * ``threshold_gb`` is ``None``, ``0``, or negative → gate disabled.
+      * psutil is not importable on this host → no gate, but log once.
+      * ``psutil.virtual_memory()`` raises → no gate, log at DEBUG so
+        it doesn't spam an otherwise-healthy host.
+
+    Ratchet-safe: this function must never itself raise, or a
+    dispatcher tick would silently drop.
+    """
+    if threshold_gb is None or threshold_gb <= 0:
+        return None
+    try:
+        import psutil  # local import: keep hot-path imports of kanban_db cheap
+    except Exception:
+        _log.debug(
+            "kanban dispatch: psutil unavailable; memory backpressure gate disabled",
+            exc_info=True,
+        )
+        return None
+    try:
+        avail_bytes = int(psutil.virtual_memory().available)
+    except Exception:
+        _log.debug(
+            "kanban dispatch: psutil.virtual_memory() failed; skipping backpressure check",
+            exc_info=True,
+        )
+        return None
+    avail_gb = avail_bytes / 1e9
+    if avail_gb < float(threshold_gb):
+        return (avail_gb, float(threshold_gb))
+    return None
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -9248,6 +9313,7 @@ def dispatch_once(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    memory_backpressure_gb: Optional[float] = None,
     node_router=None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
@@ -9264,6 +9330,12 @@ def dispatch_once(
     The lock is keyed off the board's resolved DB path, so unrelated
     boards tick in parallel. See :func:`_dispatch_tick_lock` for the
     cross-process / cross-platform mechanics.
+
+    ``memory_backpressure_gb`` (t_ce9a36ca / FIX-B): when set, defer the
+    spawn loop this tick if the host has less than that many GB of
+    available RAM (as reported by ``psutil.virtual_memory().available``).
+    Reclaim, promotion, and event bookkeeping still run — only spawning
+    is short-circuited. ``None`` or ``<=0`` disables the gate.
     """
     try:
         db_path = kanban_db_path(board=board)
@@ -9283,6 +9355,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            memory_backpressure_gb=memory_backpressure_gb,
             node_router=node_router,
         )
     with _dispatch_tick_lock(db_path) as held:
@@ -9300,6 +9373,7 @@ def dispatch_once(
             board=board,
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
+            memory_backpressure_gb=memory_backpressure_gb,
             node_router=node_router,
         )
         # Still under the dispatch lock: opportunistically truncate the WAL
@@ -9321,6 +9395,7 @@ def _dispatch_once_locked(
     board: Optional[str] = None,
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
+    memory_backpressure_gb: Optional[float] = None,
     node_router=None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
@@ -9386,6 +9461,28 @@ def _dispatch_once_locked(
         result.rate_limited.extend(_crash_rate_limited)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
+
+    # Memory backpressure gate (t_ce9a36ca / FIX-B): if the host is
+    # short on RAM, defer new spawns this tick. Reclaim / promotion
+    # already ran above so blocked / stale / crashed tasks still get
+    # cleaned up — only the fork-a-new-worker path is short-circuited.
+    # See :func:`_check_memory_backpressure` for the full rationale.
+    _mem_defer = _check_memory_backpressure(memory_backpressure_gb)
+    if _mem_defer is not None:
+        _avail_gb, _thresh_gb = _mem_defer
+        _log.warning(
+            "kanban dispatch: deferring spawns this tick — "
+            "available=%.2fGB < %.2fGB backpressure threshold "
+            "(board=%s, running=%s)",
+            _avail_gb,
+            _thresh_gb,
+            board or "<default>",
+            conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status = 'running'"
+            ).fetchone()[0],
+        )
+        result.deferred_memory = (_avail_gb, _thresh_gb)
+        return result
 
     # Count tasks already running so max_spawn enforces concurrency rather
     # than a per-tick spawn budget. See the docstring above for the full

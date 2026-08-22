@@ -2208,6 +2208,20 @@ DEFAULT_CONFIG = {
         # otherwise saturate one profile's local model / API quota /
         # browser pool while leaving other profiles idle.
         "max_in_progress_per_profile": None,
+        # Memory backpressure gate (t_ce9a36ca / FIX-B). When set to a
+        # positive float, the dispatcher skips spawning new workers for
+        # a given tick if the host has less than this many GB of
+        # available RAM (``psutil.virtual_memory().available``). Reclaim,
+        # promotion, and event bookkeeping still run — only the fork-a-
+        # new-worker path is short-circuited, so blocked / stale / crashed
+        # tasks continue to move. Deferring spawns under memory pressure
+        # prevents the fork-bomb → ENOMEM spiral where the 15th–20th
+        # worker dies during context load with zero heartbeats (surfaced
+        # as "pid N not alive" crashes; 152 of 208 pid-not-alive events
+        # in the 30-day audit before this gate). ``None`` / <=0 disables
+        # the gate — backward-compatible with pre-fix installs.
+        # Recommended: 2.0 (2 GB headroom) on 32 GB hosts, 4.0 on 64 GB.
+        "memory_backpressure_gb": None,
         # When true, the kanban dispatcher auto-runs the decomposer on
         # tasks that land in Triage (every dispatcher tick). When false,
         # decomposition is manual via `hermes kanban decompose <id>` or
