@@ -1153,6 +1153,16 @@ class GatewayKanbanWatchersMixin:
             )
             _cluster_dispatch_enabled = False
 
+        # Scope-lint: warn on active boards outside the effective cluster
+        # dispatch scope (e.g. board with active tickets not on the whitelist
+        # when cluster_dispatch=true). Emitted once at startup — routine
+        # ticks don't repeat this so the log stays legible.
+        try:
+            from gateway.cluster_dispatch import log_out_of_scope_boards_at_startup
+            log_out_of_scope_boards_at_startup()
+        except Exception as exc:
+            logger.debug("kanban dispatcher: scope-lint init failed (%s)", exc)
+
         def _get_cluster_router(slug: str):
             """Return (and cache) a per-board cluster node router."""
             if not _cluster_dispatch_enabled:
