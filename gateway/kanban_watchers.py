@@ -1132,6 +1132,42 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # Read kanban.memory_backpressure_gb — memory backpressure gate
+        # (t_ce9a36ca / FIX-B). When set, the dispatcher skips spawning
+        # for this tick when ``psutil.virtual_memory().available`` is
+        # below this many GB. Prevents the fork-bomb → ENOMEM spiral
+        # that showed up as "pid N not alive" crashes with zero heart-
+        # beats on hermes2 during the 2026-08-16/18 morning bursts.
+        # ``None`` / missing / <=0 → gate disabled (backward-compatible
+        # with pre-fix installs).
+        raw_mem_gb = kanban_cfg.get("memory_backpressure_gb", None)
+        memory_backpressure_gb = None
+        if raw_mem_gb is not None:
+            try:
+                memory_backpressure_gb = float(raw_mem_gb)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.memory_backpressure_gb=%r; "
+                    "ignoring (gate disabled)",
+                    raw_mem_gb,
+                )
+                memory_backpressure_gb = None
+            else:
+                if memory_backpressure_gb <= 0:
+                    logger.warning(
+                        "kanban dispatcher: kanban.memory_backpressure_gb=%r "
+                        "is <=0; ignoring (gate disabled)",
+                        raw_mem_gb,
+                    )
+                    memory_backpressure_gb = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: memory_backpressure_gb=%.2f "
+                        "(deferring spawns when host available RAM falls below "
+                        "this threshold)",
+                        memory_backpressure_gb,
+                    )
+
         # ── Cluster dispatch routing ───────────────────────────────────
         # Create a node router that consults the LLM cluster dispatcher
         # for cross-node task routing (hermes1/hermes2). Gated by
@@ -1284,6 +1320,7 @@ class GatewayKanbanWatchersMixin:
                     stale_timeout_seconds=stale_timeout_seconds,
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
+                    memory_backpressure_gb=memory_backpressure_gb,
                     node_router=_router,
                 )
             except sqlite3.DatabaseError as exc:
