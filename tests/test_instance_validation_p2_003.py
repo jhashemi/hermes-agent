@@ -73,8 +73,8 @@ class TestValidateHostname:
             "invalid!.com",           # Invalid character
             "invalid@.com",           # Invalid character
             "invalid .com",           # Space
-            "",                       # Empty string
-            " ",                      # Just whitespace
+            "invalid",                # Single label (not "localhost") — not a valid FQDN
+            "192.168.1.a",            # Partial IP with alpha suffix — rejected by letter-TLD rule
         ]
         for fqdn in invalid_fqdns:
             assert validate_hostname(fqdn) is False, f"Should reject invalid FQDN: {fqdn}"
@@ -157,42 +157,47 @@ class TestInstanceOrchestratorValidation:
         assert orchestrator.current_instance == "local"
 
     def test_set_current_instance_invalid_hostname_should_raise(self):
-        """Test that invalid hostname raises ValueError."""
+        """Test that invalid hostname raises ValueError at construction time (DoD #4)."""
+        # After P2-003 (t_fcc68f00), invalid hostnames are rejected at
+        # __init__ — before, they only failed at set_current_instance/
+        # execute_on_instance time. We assert construction itself blows up.
+        with pytest.raises(ValueError, match="Invalid hostname"):
+            RemoteHermesInstance(
+                name="invalid_test",
+                hostname="256.256.256.256",  # Invalid IP
+                ip="100.0.0.1",
+                http_port=8000,
+            )
+
+    def test_set_current_instance_invalid_port_should_raise(self):
+        """Test that invalid port raises ValueError at construction time (DoD #4)."""
+        with pytest.raises(ValueError, match="Invalid http_port"):
+            RemoteHermesInstance(
+                name="invalid_port_test",
+                hostname="example.com",
+                ip="100.0.0.1",
+                http_port=99999,  # Invalid port
+            )
+
+    def test_set_current_instance_call_site_guard_survives_registry_mutation(self):
+        """Regression guard: set_current_instance re-validates so hot-mutation
+        of an already-constructed instance still fails cleanly. Prevents a
+        bad actor from bypassing __init__ by patching fields post-hoc."""
         orchestrator = InstanceOrchestrator()
-        
-        # Create a temporary instance with invalid hostname
-        HERMES_INSTANCES["invalid_test"] = RemoteHermesInstance(
-            name="invalid_test",
-            hostname="256.256.256.256",  # Invalid IP
+        good = RemoteHermesInstance(
+            name="mutated_test",
+            hostname="example.com",
             ip="100.0.0.1",
             http_port=8000,
         )
-        
+        # Bypass __init__ validation by patching the attribute directly.
+        good.hostname = "256.256.256.256"
+        HERMES_INSTANCES["mutated_test"] = good
         try:
             with pytest.raises(ValueError, match="Invalid hostname"):
-                orchestrator.set_current_instance("invalid_test")
+                orchestrator.set_current_instance("mutated_test")
         finally:
-            # Cleanup
-            del HERMES_INSTANCES["invalid_test"]
-
-    def test_set_current_instance_invalid_port_should_raise(self):
-        """Test that invalid port raises ValueError."""
-        orchestrator = InstanceOrchestrator()
-        
-        # Create a temporary instance with invalid port
-        HERMES_INSTANCES["invalid_port_test"] = RemoteHermesInstance(
-            name="invalid_port_test",
-            hostname="example.com",
-            ip="100.0.0.1",
-            http_port=99999,  # Invalid port
-        )
-        
-        try:
-            with pytest.raises(ValueError, match="Invalid port"):
-                orchestrator.set_current_instance("invalid_port_test")
-        finally:
-            # Cleanup
-            del HERMES_INSTANCES["invalid_port_test"]
+            del HERMES_INSTANCES["mutated_test"]
 
     def test_set_current_instance_with_chat_id(self):
         """Test setting instance with chat_id."""
@@ -221,18 +226,21 @@ class TestInstanceOrchestratorValidation:
 
     @pytest.mark.asyncio
     async def test_execute_on_instance_invalid_hostname_raises(self):
-        """Test that invalid hostname raises ValueError."""
+        """Regression guard: execute_on_instance re-validates so registry
+        mutation post-construction still fails cleanly."""
         orchestrator = InstanceOrchestrator()
         await orchestrator.init()
-        
-        # Create a temporary instance with invalid hostname
-        HERMES_INSTANCES["invalid_exec_test"] = RemoteHermesInstance(
+
+        # Construct a valid instance, then mutate the field to bypass __init__.
+        good = RemoteHermesInstance(
             name="invalid_exec_test",
-            hostname="invalid..hostname",  # Invalid
+            hostname="example.com",
             ip="100.0.0.1",
             http_port=8000,
         )
-        
+        good.hostname = "invalid..hostname"
+        HERMES_INSTANCES["invalid_exec_test"] = good
+
         try:
             with pytest.raises(ValueError, match="Invalid hostname"):
                 await orchestrator.execute_on_instance("invalid_exec_test", "test")
@@ -242,18 +250,20 @@ class TestInstanceOrchestratorValidation:
 
     @pytest.mark.asyncio
     async def test_execute_on_instance_invalid_port_raises(self):
-        """Test that invalid port raises ValueError."""
+        """Regression guard: execute_on_instance re-validates so registry
+        mutation post-construction still fails cleanly."""
         orchestrator = InstanceOrchestrator()
         await orchestrator.init()
-        
-        # Create a temporary instance with invalid port
-        HERMES_INSTANCES["invalid_port_exec_test"] = RemoteHermesInstance(
+
+        good = RemoteHermesInstance(
             name="invalid_port_exec_test",
             hostname="example.com",
             ip="100.0.0.1",
-            http_port=0,  # Invalid
+            http_port=8000,
         )
-        
+        good.http_port = 0  # bypass __init__ validation
+        HERMES_INSTANCES["invalid_port_exec_test"] = good
+
         try:
             with pytest.raises(ValueError, match="Invalid port"):
                 await orchestrator.execute_on_instance("invalid_port_exec_test", "test")
@@ -272,6 +282,122 @@ class TestInstanceOrchestratorValidation:
             assert "not found" in result.lower()
         finally:
             await orchestrator.close()
+
+
+class TestRemoteHermesInstanceInit:
+    """DoD #4 (t_fcc68f00): validate at construction time.
+
+    Explicit coverage that RemoteHermesInstance.__init__ rejects invalid
+    IPs and ports and accepts the full valid space (IPv4, IPv6, FQDN,
+    port range).
+    """
+
+    # --- rejects invalid IPs -------------------------------------------------
+
+    @pytest.mark.parametrize("bad", [
+        "999.999.999.999",
+        "256.256.256.256",
+        "192.168.1",        # partial IP
+        "192.168.1.1.1",    # too many octets
+        "192.168.1.a",      # letter-suffixed partial IP
+        "invalid",          # bare label, not a valid FQDN either
+        "invalid..hostname",  # double dot
+        "",                 # empty string
+        " ",                # whitespace
+    ])
+    def test_init_rejects_invalid_hostname(self, bad):
+        with pytest.raises(ValueError, match="Invalid hostname|hostname"):
+            RemoteHermesInstance(
+                name="t", hostname=bad, ip="127.0.0.1", http_port=8000,
+            )
+
+    @pytest.mark.parametrize("bad", [
+        "999.999.999.999", "256.256.256.256", "192.168.1", "invalid..hostname",
+    ])
+    def test_init_rejects_invalid_ip_field(self, bad):
+        with pytest.raises(ValueError, match="Invalid ip|ip "):
+            RemoteHermesInstance(
+                name="t", hostname="example.com", ip=bad, http_port=8000,
+            )
+
+    # --- rejects invalid ports -----------------------------------------------
+
+    @pytest.mark.parametrize("bad_port", [0, -1, 70000, 65536, 99999])
+    def test_init_rejects_invalid_port(self, bad_port):
+        with pytest.raises(ValueError, match="Invalid http_port"):
+            RemoteHermesInstance(
+                name="t", hostname="example.com", ip="127.0.0.1",
+                http_port=bad_port,
+            )
+
+    def test_init_rejects_non_int_port(self):
+        # validate_port raises ValueError on non-int; __init__ propagates.
+        with pytest.raises(ValueError):
+            RemoteHermesInstance(
+                name="t", hostname="example.com", ip="127.0.0.1",
+                http_port="8000",  # type: ignore[arg-type]  # str, not int — testing runtime guard
+            )
+
+    # --- accepts valid combos ------------------------------------------------
+
+    @pytest.mark.parametrize("ip", [
+        "127.0.0.1", "192.168.1.1", "10.0.0.1", "8.8.8.8",
+        "0.0.0.0", "255.255.255.255",
+        "::1", "2001:db8::1", "fe80::1",  # IPv6
+    ])
+    def test_init_accepts_valid_ipv4_and_ipv6(self, ip):
+        inst = RemoteHermesInstance(
+            name="t", hostname=ip, ip=ip, http_port=8000,
+        )
+        assert inst.hostname == ip
+        assert inst.ip == ip
+
+    @pytest.mark.parametrize("host", [
+        "example.com", "hermes2.flounder-snake.ts.net",
+        "sub.domain.example.co", "localhost",
+    ])
+    def test_init_accepts_valid_fqdn(self, host):
+        inst = RemoteHermesInstance(
+            name="t", hostname=host, ip="127.0.0.1", http_port=8000,
+        )
+        assert inst.hostname == host
+
+    @pytest.mark.parametrize("port", [1, 22, 80, 443, 8000, 8080, 65535])
+    def test_init_accepts_valid_port_range(self, port):
+        inst = RemoteHermesInstance(
+            name="t", hostname="example.com", ip="127.0.0.1", http_port=port,
+        )
+        assert inst.http_port == port
+
+    # --- error messages are clear (DoD acceptance criterion) ----------------
+
+    def test_error_message_names_the_field_and_bad_value(self):
+        try:
+            RemoteHermesInstance(
+                name="edge_node", hostname="999.999.999.999",
+                ip="127.0.0.1", http_port=8000,
+            )
+        except ValueError as e:
+            msg = str(e)
+            assert "hostname" in msg
+            assert "edge_node" in msg
+            assert "999.999.999.999" in msg
+        else:
+            pytest.fail("expected ValueError")
+
+    def test_error_message_for_bad_port(self):
+        try:
+            RemoteHermesInstance(
+                name="edge_node", hostname="example.com",
+                ip="127.0.0.1", http_port=70000,
+            )
+        except ValueError as e:
+            msg = str(e)
+            assert "http_port" in msg
+            assert "70000" in msg
+            assert "1" in msg and "65535" in msg  # range in message
+        else:
+            pytest.fail("expected ValueError")
 
 
 class TestExistingInstancesValidation:
