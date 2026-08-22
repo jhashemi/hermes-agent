@@ -177,13 +177,13 @@ async def handle_agents_disconnect_command(
 ) -> str:
     """Handle /agents-disconnect or /disconnect command."""
     if not hasattr(gateway_runner, "_persona_manager"):
-        return "ℹ️ Not connected to any agent (using default)."
+        return format_info("Not connected to any agent (using default).")
 
     persona_mgr: PersonaManager = gateway_runner._persona_manager
     current = persona_mgr.get_persona_name()
 
     if not current:
-        return "ℹ️ Not connected to any agent (using default)."
+        return format_info("Not connected to any agent (using default).")
 
     persona_mgr.reset_persona()
     return f"✓ Disconnected from **{current}**. Switched back to default."

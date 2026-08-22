@@ -55,6 +55,43 @@ class ErrorSeverity(str, Enum):
     CRITICAL = "critical"
 
 
+class EmojiIcon(str, Enum):
+    """Standardized emoji icons for gateway chat responses (P3-003).
+
+    Use these in place of ad-hoc emoji literals so error/info/warn/success
+    output stays consistent across handlers.
+
+    Convention: ``<emoji> <description>`` — e.g. ``f"{EmojiIcon.INFO} Not
+    connected"``. Each value renders as the raw emoji so it can be
+    concatenated directly into f-strings.
+    """
+
+    ERROR = "❌"           # Generic error / operation failure
+    ACCESS_DENIED = "🚫"    # Authorization refused
+    WARNING = "⚠️"          # Non-fatal warning
+    INFO = "ℹ️"             # Informational / neutral state
+    SUCCESS = "✅"          # Operation completed successfully
+    PENDING = "⏳"          # Work in progress / not ready
+
+    def __str__(self) -> str:
+        return self.value
+
+
+def format_info(message: str) -> str:
+    """Format an informational chat reply as ``ℹ️ <message>``."""
+    return f"{EmojiIcon.INFO} {message}"
+
+
+def format_warning(message: str) -> str:
+    """Format a warning chat reply as ``⚠️ <message>``."""
+    return f"{EmojiIcon.WARNING} {message}"
+
+
+def format_success(message: str) -> str:
+    """Format a success chat reply as ``✅ <message>``."""
+    return f"{EmojiIcon.SUCCESS} {message}"
+
+
 @dataclass
 class ErrorResponse:
     """Standardized error response format.
@@ -97,7 +134,7 @@ class ErrorResponse:
         Returns:
             Formatted error message
         """
-        lines = [f"❌ Error: {self.message}"]
+        lines = [f"{EmojiIcon.ERROR} Error: {self.message}"]
         
         if self.code:
             lines.append(f"Code: {self.code}")
@@ -114,7 +151,7 @@ class ErrorResponse:
         Returns:
             Formatted error message with emojis
         """
-        emoji = "🚫" if self.code == ErrorCode.ACCESS_DENIED else "❌"
+        emoji = EmojiIcon.ACCESS_DENIED if self.code == ErrorCode.ACCESS_DENIED else EmojiIcon.ERROR
         lines = [f"{emoji} {self.message}"]
         
         if self.context.get("user_id"):

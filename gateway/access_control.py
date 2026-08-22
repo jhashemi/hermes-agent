@@ -33,8 +33,11 @@ from gateway.error_response import (
     ErrorResponse,
     ErrorCode,
     ErrorSeverity,
+    EmojiIcon,
     create_access_denied_error,
     create_validation_error,
+    format_info,
+    format_success,
 )
 
 
@@ -343,14 +346,15 @@ def require_access(command_name: str):
             manager = get_access_manager()
             if not manager.has_access(event):
                 user_id = manager.get_user_id(event)
-                return (
-                    f"🚫 Access Denied\n\n"
-                    f"User: {user_id}\n"
-                    f"Command: /{command_name}\n\n"
-                    f"You don't have permission to use this command. "
-                    f"Contact an administrator.\n\n"
-                    f"Current access: /access-status"
+                error = create_access_denied_error(
+                    user_id=user_id,
+                    command=command_name,
+                    reason=(
+                        "You don't have permission to use this command. "
+                        "Contact an administrator. Current access: /access-status"
+                    ),
                 )
+                return error.to_emoji_response()
             return await func(gateway_runner, event, *args, **kwargs)
         return wrapper
     return decorator
@@ -431,12 +435,12 @@ async def handle_access_grant_command(
 
     if newly_added:
         return (
-            f"✅ Granted access to **{user_id}**\\n\\n"
+            f"{EmojiIcon.SUCCESS} Granted access to **{user_id}**\\n\\n"
             f"They can now use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
-        return f"ℹ️ User **{user_id}** already has access."
+        return format_info(f"User **{user_id}** already has access.")
 
 
 async def handle_access_revoke_command(
@@ -507,12 +511,12 @@ async def handle_access_revoke_command(
 
     if was_removed:
         return (
-            f"✅ Revoked access from **{user_id}**\\n\\n"
+            f"{EmojiIcon.SUCCESS} Revoked access from **{user_id}**\\n\\n"
             f"They can no longer use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
-        return f"ℹ️ User **{user_id}** did not have access to revoke."
+        return format_info(f"User **{user_id}** did not have access to revoke.")
 
 
 async def handle_access_status_command(
@@ -524,7 +528,7 @@ async def handle_access_status_command(
     user_id = manager.get_user_id(event)
     has_access = manager.has_access(event)
 
-    status_icon = "✅" if has_access else "🚫"
+    status_icon = EmojiIcon.SUCCESS if has_access else EmojiIcon.ACCESS_DENIED
     permission = "Granted" if has_access else "Denied"
 
     return (
