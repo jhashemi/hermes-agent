@@ -80,6 +80,54 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Prometheus metrics (optional — silently no-op if prometheus_client missing)
+# ---------------------------------------------------------------------------
+#
+# DoD item 5: ``hermes_kanban_block_recheck_actions_total{policy=A|B|C|D}``
+# is incremented for every action taken (unblocked or escalated). We also
+# expose a per-outcome dimension so dashboards can split unblocks from
+# escalations without cross-referencing policy semantics.
+#
+# Import guarded because prometheus_client isn't a hard dep of hermes-agent
+# core — it's only pulled in by observability-enabled deployments. A missing
+# import must never brick the watchdog.
+try:
+    from prometheus_client import Counter as _PromCounter  # type: ignore
+
+    _BLOCK_RECHECK_ACTIONS = _PromCounter(
+        "hermes_kanban_block_recheck_actions_total",
+        "Actions taken by the kanban block-recheck watchdog",
+        ["policy", "action"],  # policy in {A,B,C,D,E}, action in {unblocked,escalated,skipped}
+    )
+    _BLOCK_RECHECK_SWEEPS = _PromCounter(
+        "hermes_kanban_block_recheck_sweeps_total",
+        "Kanban block-recheck sweep ticks completed",
+        ["outcome"],  # ok | error
+    )
+    _BLOCK_RECHECK_BOARD_ERRORS = _PromCounter(
+        "hermes_kanban_block_recheck_board_errors_total",
+        "Per-board errors during a block-recheck sweep",
+    )
+except Exception:  # pragma: no cover - metrics are optional
+    _BLOCK_RECHECK_ACTIONS = None
+    _BLOCK_RECHECK_SWEEPS = None
+    _BLOCK_RECHECK_BOARD_ERRORS = None
+
+
+def _observe_action(action: "RecheckAction") -> None:
+    """Bump the prometheus counter for a recorded action. No-op when missing."""
+    if _BLOCK_RECHECK_ACTIONS is None:
+        return
+    try:
+        _BLOCK_RECHECK_ACTIONS.labels(
+            policy=action.policy or "?",
+            action=action.action or "?",
+        ).inc()
+    except Exception:  # pragma: no cover
+        logger.debug("block-recheck: prometheus inc failed", exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Constants / defaults
 # ---------------------------------------------------------------------------
 
@@ -998,6 +1046,7 @@ def sweep_once(
 
         action.board = board
         result.actions.append(action)
+        _observe_action(action)
         logger.info(
             "block-recheck: %s %s (%s) policy=%s reason=%s",
             action.action, action.task_id, board or "-",
@@ -1063,7 +1112,130 @@ def sweep_all_boards(
             r = RecheckResult()
             r.errors += 1
             results[slug] = r
+            if _BLOCK_RECHECK_BOARD_ERRORS is not None:
+                try:
+                    _BLOCK_RECHECK_BOARD_ERRORS.inc()
+                except Exception:  # pragma: no cover
+                    pass
             continue
         results[slug] = result
 
+    if _BLOCK_RECHECK_SWEEPS is not None:
+        try:
+            any_errors = any(r.errors for r in results.values())
+            _BLOCK_RECHECK_SWEEPS.labels(
+                outcome="error" if any_errors else "ok"
+            ).inc()
+        except Exception:  # pragma: no cover
+            pass
+
     return results
+
+
+# ---------------------------------------------------------------------------
+# `python -m hermes_cli.kanban_block_recheck` entrypoint
+# ---------------------------------------------------------------------------
+#
+# Systemd-timer users invoke the sweep as ``python -m hermes_cli.kanban_block_recheck``.
+# Kept intentionally simple — the full-featured surface with per-board
+# targeting, JSON output, etc., lives at ``hermes kanban block-recheck-sweep``.
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run one block-recheck sweep across all boards. Returns 0 on success.
+
+    Config is read via :func:`hermes_cli.config.load_config` when available;
+    absent / bad config falls back to module defaults. This mirrors the
+    stall-watchdog CLI (`hermes_cli/kanban_stall_watchdog.py`) so the two
+    watchdogs have symmetric operator ergonomics.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m hermes_cli.kanban_block_recheck",
+        description=(
+            "Run one block-recheck sweep across every kanban board on this "
+            "host. See `hermes kanban block-recheck-sweep --help` for the "
+            "full-featured CLI wrapper with per-board targeting and JSON."
+        ),
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Report actions without applying them.",
+    )
+    parser.add_argument(
+        "--gave-up-cooldown", type=int, default=None,
+        help="Policy A cooldown seconds (default 900).",
+    )
+    parser.add_argument(
+        "--gave-up-max-cycles", type=int, default=None,
+        help="Policy A max auto-retries per task (default 5).",
+    )
+    parser.add_argument(
+        "--review-stale", type=int, default=None,
+        help="Policy D age threshold seconds (default 7200).",
+    )
+    parser.add_argument(
+        "--verbose", "-v", action="store_true",
+        help="Enable DEBUG-level logging for this run.",
+    )
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    # Load config so operator YAML tuning applies to `python -m` runs too.
+    kcfg: dict = {}
+    try:
+        from hermes_cli.config import load_config as _load_config
+        _cfg = _load_config()
+        if isinstance(_cfg, dict):
+            kcfg = _cfg.get("kanban", {}) or {}
+    except Exception:
+        pass
+
+    def _pick(cli_val: Optional[int], key: str, fallback: int) -> int:
+        if cli_val is not None:
+            return int(cli_val)
+        try:
+            return int(kcfg.get(key, fallback) or fallback)
+        except (TypeError, ValueError):
+            return fallback
+
+    cooldown = _pick(
+        args.gave_up_cooldown, "block_recheck_gave_up_cooldown_s",
+        DEFAULT_GAVE_UP_COOLDOWN_S,
+    )
+    max_cycles = _pick(
+        args.gave_up_max_cycles, "block_recheck_gave_up_max_cycles",
+        DEFAULT_GAVE_UP_MAX_CYCLES,
+    )
+    review_stale = _pick(
+        args.review_stale, "block_recheck_review_stale_s",
+        DEFAULT_REVIEW_STALE_S,
+    )
+
+    results = sweep_all_boards(
+        gave_up_cooldown_s=cooldown,
+        gave_up_max_cycles=max_cycles,
+        review_stale_s=review_stale,
+        dry_run=args.dry_run,
+    )
+
+    total_acted = sum(r.acted_count for r in results.values())
+    total_unblock = sum(r.unblocked_count for r in results.values())
+    total_esc = sum(r.escalated_count for r in results.values())
+    total_err = sum(r.errors for r in results.values())
+    prefix = "[DRY RUN] " if args.dry_run else ""
+    print(
+        f"{prefix}block-recheck sweep: applied {total_acted} actions "
+        f"({total_unblock} unblocked, {total_esc} escalated) "
+        f"across {len(results)} boards (errors={total_err})"
+    )
+    return 0 if total_err == 0 else 1
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

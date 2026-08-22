@@ -691,3 +691,154 @@ def test_extract_threshold_mb(reason, expected):
 )
 def test_parse_release_time(reason, trigger, expected):
     assert brc._parse_release_time(reason, trigger_created_at=trigger) == expected
+
+
+# ---------------------------------------------------------------------------
+# main() / CLI subcommand smoke — FIX-7B / t_d9aec252
+# ---------------------------------------------------------------------------
+#
+# These are shallow smoke tests. Deep policy coverage lives above; here we
+# only verify the two new entrypoints are wired, parse args, call the
+# sweep function, and exit 0 on the empty-board happy path.
+
+
+def test_module_main_smoke(kanban_home, capsys):
+    """`python -m hermes_cli.kanban_block_recheck --dry-run` returns 0."""
+    rc = brc.main(["--dry-run"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "block-recheck sweep" in captured.out
+    assert "[DRY RUN]" in captured.out
+
+
+def test_module_main_honours_cli_overrides(kanban_home, monkeypatch):
+    """CLI flags must beat config values."""
+    captured_kwargs: dict = {}
+
+    def _fake_sweep(**kwargs):
+        captured_kwargs.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(brc, "sweep_all_boards", _fake_sweep)
+    rc = brc.main([
+        "--dry-run",
+        "--gave-up-cooldown", "77",
+        "--gave-up-max-cycles", "9",
+        "--review-stale", "8888",
+    ])
+    assert rc == 0
+    assert captured_kwargs["gave_up_cooldown_s"] == 77
+    assert captured_kwargs["gave_up_max_cycles"] == 9
+    assert captured_kwargs["review_stale_s"] == 8888
+    assert captured_kwargs["dry_run"] is True
+
+
+def test_cli_subcommand_registered(kanban_home, capsys, monkeypatch):
+    """`hermes kanban block-recheck-sweep --all-boards --dry-run --json` works."""
+    import argparse
+    from hermes_cli import kanban as kcli
+
+    def _fake_sweep(**_kwargs):
+        # Return a synthetic non-empty result so JSON formatting is exercised.
+        result = brc.RecheckResult()
+        result.considered = 3
+        action = brc.RecheckAction(
+            task_id="t_test01",
+            policy="A",
+            action="unblocked",
+            reason="cooldown elapsed",
+            trigger_kind="gave_up",
+            trigger_event_id=42,
+            trigger_created_at=1_000_000,
+            age_s=3600,
+        )
+        result.actions.append(action)
+        return {"default": result}
+
+    monkeypatch.setattr(brc, "sweep_all_boards", _fake_sweep)
+
+    # Build the argparse namespace via the CLI's own parser so we exercise
+    # the real subcommand wiring (parser + dispatch table).
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="cmd")
+    kcli.build_parser(sub)
+    ns = parser.parse_args([
+        "kanban", "block-recheck-sweep",
+        "--all-boards", "--dry-run", "--json",
+    ])
+    rc = kcli.kanban_command(ns)
+    assert rc == 0
+    out = capsys.readouterr().out
+    payload = json.loads(out)
+    assert payload["dry_run"] is True
+    assert "default" in payload["boards"]
+    b = payload["boards"]["default"]
+    assert b["considered"] == 3
+    assert len(b["actions"]) == 1
+    assert b["actions"][0]["task_id"] == "t_test01"
+    assert b["actions"][0]["policy"] == "A"
+    assert b["actions"][0]["action"] == "unblocked"
+
+
+def test_cli_subcommand_human_output(kanban_home, capsys, monkeypatch):
+    """Human-text output includes counters + per-board detail."""
+    import argparse
+    from hermes_cli import kanban as kcli
+
+    def _fake_sweep(**_kwargs):
+        r = brc.RecheckResult()
+        r.considered = 2
+        r.actions.append(brc.RecheckAction(
+            task_id="t_esc",
+            policy="D",
+            action="escalated",
+            reason="review-required stale",
+            trigger_kind="blocked",
+            trigger_event_id=7,
+            trigger_created_at=1_000_000,
+            age_s=8000,
+        ))
+        return {"myboard": r}
+
+    monkeypatch.setattr(brc, "sweep_all_boards", _fake_sweep)
+
+    parser = argparse.ArgumentParser(prog="hermes")
+    sub = parser.add_subparsers(dest="cmd")
+    kcli.build_parser(sub)
+    ns = parser.parse_args([
+        "kanban", "block-recheck-sweep", "--all-boards",
+    ])
+    rc = kcli.kanban_command(ns)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "block-recheck-sweep" in out
+    assert "boards=1" in out
+    assert "applied=1" in out
+    assert "escalated=1" in out
+    assert "[myboard]" in out
+    assert "t_esc" in out
+    assert "policy=D" in out
+
+
+def test_prometheus_counter_increments_on_action(kanban_home):
+    """`_BLOCK_RECHECK_ACTIONS` bumps for every recorded action."""
+    if brc._BLOCK_RECHECK_ACTIONS is None:
+        pytest.skip("prometheus_client not installed")
+
+    # Read the counter's current value for our labels, do a synthetic
+    # observe, then confirm it went up by 1.
+    labels = brc._BLOCK_RECHECK_ACTIONS.labels(policy="A", action="unblocked")
+    before = labels._value.get()  # prometheus_client internal
+    action = brc.RecheckAction(
+        task_id="t_probe",
+        policy="A",
+        action="unblocked",
+        reason="test",
+        trigger_kind="gave_up",
+        trigger_event_id=1,
+        trigger_created_at=0,
+        age_s=0,
+    )
+    brc._observe_action(action)
+    after = labels._value.get()
+    assert after == before + 1

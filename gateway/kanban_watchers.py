@@ -1658,3 +1658,138 @@ class GatewayKanbanWatchersMixin:
                 await asyncio.sleep(min(1.0, interval - slept))
                 slept += 1.0
 
+
+    async def _kanban_block_recheck(self) -> None:
+        """Auto-re-evaluate ``blocked`` tickets (FIX-7B / t_d9aec252).
+
+        Runs every ``kanban.block_recheck_interval_seconds`` (default 900 =
+        15 min) against every board on disk. For each ticket in ``blocked``,
+        classifies against Policies A..D (see
+        :mod:`hermes_cli.kanban_block_recheck` docstring) and either
+        auto-unblocks, escalates for operator attention, or leaves alone.
+
+        Gated by ``kanban.dispatch_in_gateway`` (same singleton-owner
+        contract as the dispatcher & stall watchdog — only one gateway
+        per host applies auto-actions) and by ``kanban.block_recheck_enabled``
+        (default True) so operators can disable independently.
+
+        Mirrors :meth:`_kanban_stall_watchdog` in structure — same
+        pre-flight gates, same "sleep-in-slices" shutdown pattern, same
+        ``asyncio.to_thread`` off-loading of the sync sweep function.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban block-recheck: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get(
+            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
+        ).strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info(
+                "kanban block-recheck: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
+            )
+            return
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning(
+                "kanban block-recheck: cannot load config (%s); disabled", exc
+            )
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban block-recheck: disabled via kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        # Operator kill-switch — independent of the dispatcher gate so a
+        # sysadmin can freeze the blocked lane while leaving dispatch running.
+        if not kanban_cfg.get("block_recheck_enabled", True):
+            logger.info(
+                "kanban block-recheck: disabled via kanban.block_recheck_enabled=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_block_recheck as _br
+        except Exception as exc:
+            logger.warning(
+                "kanban block-recheck: import failed (%s); disabled", exc,
+            )
+            return
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(kanban_cfg.get(key, default) or default)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "kanban block-recheck: invalid %s=%r, using default %d",
+                    key, kanban_cfg.get(key), default,
+                )
+                return default
+
+        interval = float(
+            _cfg_int(
+                "block_recheck_interval_seconds", _br.DEFAULT_SWEEP_INTERVAL_S
+            )
+        )
+        cooldown_s = _cfg_int(
+            "block_recheck_gave_up_cooldown_s", _br.DEFAULT_GAVE_UP_COOLDOWN_S
+        )
+        max_cycles = _cfg_int(
+            "block_recheck_gave_up_max_cycles", _br.DEFAULT_GAVE_UP_MAX_CYCLES
+        )
+        review_stale_s = _cfg_int(
+            "block_recheck_review_stale_s", _br.DEFAULT_REVIEW_STALE_S
+        )
+
+        logger.info(
+            "kanban block-recheck: enabled — interval=%.0fs cooldown=%ds "
+            "max_cycles=%d review_stale=%ds",
+            interval, cooldown_s, max_cycles, review_stale_s,
+        )
+
+        # Stagger the first tick so we don't collide with the dispatcher's
+        # first pass or the stall-watchdog's stagger (30s) — 45s offset
+        # keeps the three loops out of phase.
+        await asyncio.sleep(45)
+
+        while self._running:
+            try:
+                results = await asyncio.to_thread(
+                    _br.sweep_all_boards,
+                    gave_up_cooldown_s=cooldown_s,
+                    gave_up_max_cycles=max_cycles,
+                    review_stale_s=review_stale_s,
+                )
+                total_acted = sum(r.acted_count for r in results.values())
+                total_unblock = sum(r.unblocked_count for r in results.values())
+                total_esc = sum(r.escalated_count for r in results.values())
+                total_err = sum(r.errors for r in results.values())
+                # DoD item 3 — one summary log line per sweep. Info level
+                # when actions applied so operators can grep journalctl;
+                # debug otherwise to avoid log spam on quiet boards.
+                if total_acted or total_err:
+                    logger.info(
+                        "block-recheck sweep: applied %d actions across %d "
+                        "boards (unblocked=%d escalated=%d errors=%d)",
+                        total_acted, len(results),
+                        total_unblock, total_esc, total_err,
+                    )
+                else:
+                    logger.debug(
+                        "block-recheck sweep: no actions (boards=%d)",
+                        len(results),
+                    )
+            except Exception:  # noqa: BLE001 - watchdog must survive all failures
+                logger.exception("kanban block-recheck: tick failed")
+
+            # Slice the sleep so shutdown is snappy — mirror the pattern
+            # used by the stall watchdog and dispatcher.
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
+

@@ -769,6 +769,47 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_stall.add_argument("--json", action="store_true",
                          help="Emit JSON report instead of human text.")
 
+    # --- block-recheck-sweep (FIX-7B / t_d9aec252) ---
+    # Runs one iteration of the block-recheck watchdog. Designed for
+    # cron / systemd-timer use on hosts that don't host the gateway
+    # (the gateway runs an equivalent loop internally every 15 min).
+    # For plain-scriptable invocation, prefer
+    # ``python -m hermes_cli.kanban_block_recheck``; this CLI subcommand
+    # adds per-board targeting and JSON output on top of that entrypoint.
+    p_brs = sub.add_parser(
+        "block-recheck-sweep",
+        help="Re-evaluate `blocked` tickets and auto-unblock / escalate "
+             "per Policy A..D (see hermes_cli.kanban_block_recheck).",
+    )
+    p_brs.add_argument(
+        "--board", default=None,
+        help="Sweep only this board slug. Omit for the current board; "
+             "combine with --all-boards for every board on disk.",
+    )
+    p_brs.add_argument(
+        "--all-boards", action="store_true",
+        help="Sweep every board on disk instead of just the current board.",
+    )
+    p_brs.add_argument(
+        "--gave-up-cooldown", type=int, default=None,
+        help="Policy A cooldown seconds before an auto-retry (default 900).",
+    )
+    p_brs.add_argument(
+        "--gave-up-max-cycles", type=int, default=None,
+        help="Policy A max auto-retries per task (default 5).",
+    )
+    p_brs.add_argument(
+        "--review-stale", type=int, default=None,
+        help="Policy D age threshold in seconds before operator escalation "
+             "(default 7200).",
+    )
+    p_brs.add_argument(
+        "--dry-run", action="store_true",
+        help="Report actions without applying them.",
+    )
+    p_brs.add_argument("--json", action="store_true",
+                       help="Emit JSON report instead of human text.")
+
     # --- watch ---
     p_watch = sub.add_parser(
         "watch",
@@ -1101,6 +1142,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "dispatch": _cmd_dispatch,
             "daemon":   _cmd_daemon,
             "stall-sweep": _cmd_stall_sweep,
+            "block-recheck-sweep": _cmd_block_recheck_sweep,
             "watch":    _cmd_watch,
             "stats":    _cmd_stats,
             "log":      _cmd_log,
@@ -2671,6 +2713,145 @@ def _cmd_stall_sweep(args: argparse.Namespace) -> int:
                 f"    - {e.task_id}: {e.prev_status} → blocked/needs_input "
                 f"(trigger={e.trigger_kind}, reason={e.trigger_reason!r}, "
                 f"age={e.age_s}s)"
+            )
+        if r.errors:
+            print(f"    ! errors: {r.errors}")
+    return 0
+
+
+def _cmd_block_recheck_sweep(args: argparse.Namespace) -> int:
+    """Run one block-recheck sweep from the CLI (FIX-7B / t_d9aec252).
+
+    Wired for cron / systemd-timer use on hosts that don't run the
+    gateway. The gateway has an in-process loop that calls the same
+    ``kanban_block_recheck.sweep_all_boards`` every 15 min so cron
+    invocations aren't needed alongside a healthy gateway — but they
+    are safe (idempotent, singleton per host is a good practice, not
+    a hard requirement — the module's ``_already_actioned`` fence is
+    per trigger event id).
+
+    Honours the same config keys as the gateway loop so YAML tuning
+    applies to both paths:
+
+    * ``kanban.block_recheck_gave_up_cooldown_s`` (default 900)
+    * ``kanban.block_recheck_gave_up_max_cycles`` (default 5)
+    * ``kanban.block_recheck_review_stale_s`` (default 7200)
+
+    Command-line flags override config for one-off runs.
+    """
+    from hermes_cli import kanban_block_recheck as _br
+
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _kcfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+    except Exception:
+        _kcfg = {}
+
+    def _coerce_int(value, default: int) -> int:
+        try:
+            return int(value or default)
+        except (TypeError, ValueError):
+            return default
+
+    cooldown = args.gave_up_cooldown if args.gave_up_cooldown is not None \
+        else _coerce_int(
+            _kcfg.get("block_recheck_gave_up_cooldown_s"),
+            _br.DEFAULT_GAVE_UP_COOLDOWN_S,
+        )
+    max_cycles = args.gave_up_max_cycles if args.gave_up_max_cycles is not None \
+        else _coerce_int(
+            _kcfg.get("block_recheck_gave_up_max_cycles"),
+            _br.DEFAULT_GAVE_UP_MAX_CYCLES,
+        )
+    review_stale = args.review_stale if args.review_stale is not None \
+        else _coerce_int(
+            _kcfg.get("block_recheck_review_stale_s"),
+            _br.DEFAULT_REVIEW_STALE_S,
+        )
+
+    # --board overrides current-board; --all-boards fans out. Follow the
+    # stall-sweep pattern: --all-boards is the explicit fan-out signal,
+    # --board is a single-board override, no flag = current-board.
+    if getattr(args, "all_boards", False):
+        results = _br.sweep_all_boards(
+            gave_up_cooldown_s=cooldown,
+            gave_up_max_cycles=max_cycles,
+            review_stale_s=review_stale,
+            dry_run=args.dry_run,
+        )
+    else:
+        board_slug = getattr(args, "board", None) or (
+            kb.get_current_board() if hasattr(kb, "get_current_board") else None
+        )
+        with kb.connect_closing(board=args.board) as conn:
+            single = _br.sweep_once(
+                conn,
+                gave_up_cooldown_s=cooldown,
+                gave_up_max_cycles=max_cycles,
+                review_stale_s=review_stale,
+                dry_run=args.dry_run,
+                board=board_slug,
+            )
+        results = {board_slug or "(current)": single}
+
+    if getattr(args, "json", False):
+        payload = {
+            "dry_run": bool(args.dry_run),
+            "gave_up_cooldown_s": cooldown,
+            "gave_up_max_cycles": max_cycles,
+            "review_stale_s": review_stale,
+            "boards": {
+                slug: {
+                    "considered": r.considered,
+                    "unblocked_count": r.unblocked_count,
+                    "escalated_count": r.escalated_count,
+                    "skipped_no_policy": r.skipped_no_policy,
+                    "skipped_already_actioned": r.skipped_already_actioned,
+                    "errors": r.errors,
+                    "actions": [
+                        {
+                            "task_id": a.task_id,
+                            "policy": a.policy,
+                            "action": a.action,
+                            "reason": a.reason,
+                            "trigger_kind": a.trigger_kind,
+                            "trigger_event_id": a.trigger_event_id,
+                            "trigger_created_at": a.trigger_created_at,
+                            "age_s": a.age_s,
+                        }
+                        for a in r.actions
+                    ],
+                }
+                for slug, r in results.items()
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    prefix = "[DRY RUN] " if args.dry_run else ""
+    total_acted = sum(r.acted_count for r in results.values())
+    total_unblock = sum(r.unblocked_count for r in results.values())
+    total_esc = sum(r.escalated_count for r in results.values())
+    total_err = sum(r.errors for r in results.values())
+    total_cons = sum(r.considered for r in results.values())
+    print(
+        f"{prefix}block-recheck-sweep: boards={len(results)} "
+        f"considered={total_cons} applied={total_acted} "
+        f"(unblocked={total_unblock} escalated={total_esc}) "
+        f"errors={total_err} "
+        f"(cooldown={cooldown}s max_cycles={max_cycles} "
+        f"review_stale={review_stale}s)"
+    )
+    for slug, r in results.items():
+        if not r.actions and not r.errors:
+            continue
+        print(f"  [{slug}]")
+        for a in r.actions:
+            print(
+                f"    - {a.task_id}: policy={a.policy} {a.action} "
+                f"(trigger={a.trigger_kind}, reason={a.reason!r}, "
+                f"age={a.age_s}s)"
             )
         if r.errors:
             print(f"    ! errors: {r.errors}")
