@@ -12,8 +12,15 @@ import tempfile
 from pathlib import Path
 import sys
 
-# Add hermes-agent to path for imports
-sys.path.insert(0, "/home/ubuntu/hermes-agent")
+# Ensure this repo (not any editable install of hermes-agent living
+# elsewhere on the filesystem) is used when the test file is invoked
+# directly.  Previously this file hardcoded "/home/ubuntu/hermes-agent"
+# which shadowed the local checkout during CI runs on developer machines
+# that keep a sibling clone under that path.  We now resolve the repo
+# root relative to this file.
+_REPO_ROOT = str(Path(__file__).resolve().parent)
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from gateway.help_config import (
     HelpConfigLoader,
@@ -56,24 +63,36 @@ class TestHelpConfigLoader:
             topic = config[topic_name]
             assert "title" in topic
             assert "description" in topic
-            assert "commands" in topic
             assert "example" in topic
-            
-            # Verify types
+            # ``commands`` was intentionally removed from help.yaml — command
+            # descriptions now come from ``hermes_cli.commands.COMMAND_REGISTRY``
+            # (see tests/gateway/test_help_topics_from_registry.py). We
+            # therefore assert its ABSENCE here as a regression guard.
+            assert "commands" not in topic, (
+                f"help.yaml topic '{topic_name}' must not carry a hardcoded "
+                f"'commands' block — descriptions live in COMMAND_REGISTRY."
+            )
+
+            # Verify types of remaining keys
             assert isinstance(topic["title"], str)
             assert isinstance(topic["description"], str)
             assert isinstance(topic["example"], str)
-            assert isinstance(topic["commands"], dict)
 
     def test_commands_are_non_empty(self):
-        """Test that each topic has commands."""
-        config = get_help_config()
-        
+        """Each topic's rendered ``commands`` (derived from COMMAND_REGISTRY)
+        must be non-empty."""
+        # After the P2 refactor, ``config[topic]["commands"]`` is no longer
+        # populated from yaml; the runtime shape lives on
+        # ``help_menu.get_help_topics()`` which merges yaml metadata with
+        # registry-derived commands.
+        from gateway.help_menu import get_help_topics
+        topics = get_help_topics()
+
         for topic_name in ["agents", "instances", "general"]:
-            topic = config[topic_name]
+            topic = topics[topic_name]
             commands = topic["commands"]
             assert len(commands) > 0, f"Topic {topic_name} has no commands"
-            
+
             # Verify command format
             for cmd_name, cmd_desc in commands.items():
                 assert isinstance(cmd_name, str)
@@ -275,13 +294,20 @@ class TestHelpContent:
         assert "hermes-list" in text.lower()
 
     def test_general_commands_present(self):
-        """Test that general commands are documented."""
-        text = format_help_topic("general")
-        
-        # Check for key general commands
-        assert "status" in text.lower()
-        assert "clear" in text.lower()
-        assert "models" in text.lower()
+        """Test that general commands are documented.
+
+        After the P2 refactor the 'general' topic is populated from
+        COMMAND_REGISTRY entries with category in {"Help", "Info"} — the
+        previous yaml-authored list included fictional entries like
+        /clear and /models that were never real gateway commands.  We
+        now assert against commands that actually exist in the registry.
+        """
+        text = format_help_topic("general").lower()
+
+        # Real gateway-available commands from the "Info" / "Help" categories
+        assert "help" in text
+        assert "whoami" in text
+        assert "version" in text
 
     def test_commands_have_descriptions(self):
         """Test that all commands have descriptions."""
@@ -310,9 +336,13 @@ class TestConfigIntegration:
         config = get_help_config()
         
         # Test topics
-        assert config["agents"]["commands"]["load-demis"]
-        assert config["instances"]["commands"]["switch-local"]
-        assert config["general"]["commands"]["help"]
+        # ``commands`` no longer lives inside config (yaml) — it is
+        # merged in at read time by ``help_menu.get_help_topics()``.
+        from gateway.help_menu import get_help_topics
+        topics = get_help_topics()
+        assert topics["agents"]["commands"]["load-demis"]
+        assert topics["instances"]["commands"]["switch-local"]
+        assert topics["general"]["commands"]["help"]
         
         # Test metadata
         assert len(config["categories"]) > 0
