@@ -7706,6 +7706,18 @@ _RECENT_WORKER_EXIT_TTL_SECONDS = 600
 _RECENT_WORKER_EXITS_MAX = 4096
 _recent_worker_exits: "dict[int, tuple[int, float]]" = {}
 
+# Popen retention registry — keyed by pid, holds the live Popen handle until
+# the child has been reaped.  Without retention, Python's GC can call
+# Popen.__del__ on the abandoned handle before reap_worker_zombies() runs,
+# consuming the child's exit status through subprocess._active without ever
+# populating _recent_worker_exits.  That causes _classify_worker_exit() to
+# fall through to ("unknown", None) for every spawned worker — the root cause
+# of the 90% "pid N not alive" crash-classifier failure (see FIX-A ticket).
+#
+# Entries are pruned by _sweep_popen_retention() once the child has exited and
+# its status has been recorded, so the dict never retains handles indefinitely.
+_popen_retention: "dict[int, subprocess.Popen]" = {}
+
 
 def _record_worker_exit(pid: int, raw_status: int) -> None:
     """Record a reaped child's exit status for later classification.
@@ -7773,12 +7785,65 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     return ("unknown", None)
 
 
+def _popen_returncode_to_raw_status(returncode: int) -> int:
+    """Convert a ``Popen.returncode`` value to a raw ``os.waitpid`` status.
+
+    ``Popen.returncode`` on POSIX:
+    * non-negative  → exit code  (WIFEXITED)
+    * negative      → -signum    (WIFSIGNALED; e.g. -9 for SIGKILL)
+
+    Raw ``os.waitpid`` encoding:
+    * WIFEXITED:   bits 15..8 = exit code, bits 7..0 = 0
+    * WIFSIGNALED: bits 7..0  = signal number (& 0x7f, non-zero)
+    """
+    if returncode < 0:
+        # Signaled: encode signal number in low bits
+        return (-returncode) & 0x7F
+    else:
+        # Normal exit: encode exit code in high bits
+        return (returncode & 0xFF) << 8
+
+
+def _sweep_popen_retention() -> None:
+    """Poll retained Popen handles and register exits into _recent_worker_exits.
+
+    Called at the start of ``reap_worker_zombies()`` to ensure that any worker
+    whose exit status would otherwise be consumed by Python's GC (via
+    ``subprocess._active`` / ``Popen.__del__``) is captured first.
+
+    Once a child has exited and its status recorded, the entry is pruned from
+    ``_popen_retention`` so handles don't leak.
+    """
+    if not _popen_retention:
+        return
+    done = []
+    for pid, proc in list(_popen_retention.items()):
+        try:
+            rc = proc.poll()
+        except Exception:
+            rc = None
+        if rc is not None:
+            # Child has exited; convert returncode → raw_status and record.
+            raw_status = _popen_returncode_to_raw_status(rc)
+            _record_worker_exit(pid, raw_status)
+            done.append(pid)
+    for pid in done:
+        _popen_retention.pop(pid, None)
+
+
 def reap_worker_zombies() -> "list[int]":
     """Reap all zombie children of this process without blocking.
 
     Returns the list of reaped PIDs. Safe to call when there are no
     children (returns []). No-op on Windows.
     """
+    # Sweep the Popen retention dict first so any exited workers whose handles
+    # haven't been GC'd yet get their exit status recorded before we call
+    # os.waitpid.  This is the key fix for the "unknown" crash classifier bug:
+    # without this sweep, Python's GC reaps the child through subprocess._active
+    # and consumes the exit status before we ever see it via os.waitpid.
+    _sweep_popen_retention()
+
     reaped: "list[int]" = []
     if os.name != "nt":
         try:
@@ -10322,6 +10387,11 @@ def _default_spawn(
     # handle is kept alive by the child's inheritance.  The parent's
     # reference goes out of scope and is GC'd, but the OS-level FD stays
     # open in the child until the child exits.
+    # Retain the Popen handle so reap_worker_zombies() can poll() it and
+    # record the exit status before Python's GC consumes it through
+    # subprocess._active.  Without this, _classify_worker_exit() sees
+    # "unknown" for every spawned worker (FIX-A: Popen-retention bug).
+    _popen_retention[proc.pid] = proc
     return proc.pid
 
 
