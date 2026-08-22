@@ -8357,6 +8357,91 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return text
         return (enriched_text or text).strip()
 
+    def _is_plain_text_approval_authority(self, source) -> bool:
+        """Decide whether *source* may resolve a blocking dangerous-command
+        approval with a bare word ("yes" / "no" / "ok").
+
+        Approval resolution is an operator privilege.  In customer-facing
+        sessions a participant's conversational one-word reply must NEVER be
+        hijacked into an approval verdict: the reply is eaten (the customer
+        sees silence in response to their message) and the pending command is
+        spuriously approved — or denied — by a non-operator.  Observed
+        2026-08-19 in the WhatsApp DM with "Protect The Culture": two
+        customer messages were consumed as ``verb=deny`` while the agent's
+        kanban-log INSERTs sat in that session's approval queue.
+
+        Authority = the platform home channel (the operator), or an admin
+        under ``allow_admin_from`` when slash-access gating is enabled.
+        WhatsApp phone/LID duality is resolved through the bridge's
+        ``lid-mapping-*`` files via ``_expand_whatsapp_auth_aliases`` —
+        expanding the *sender's* ids works with the ``_reverse`` mapping
+        files the bridge actually writes (keyed by LID, containing phone).
+
+        Backward compatibility: when no home channel is configured for the
+        platform and no admin policy is enabled, preserve legacy behavior —
+        any session participant may answer a pending approval in bare words
+        (the single-operator install the feature was built for).
+        """
+        try:
+            home = self.config.get_home_channel(source.platform)
+        except Exception:
+            home = None
+
+        if home and (home.chat_id or home.user_id):
+            authorized = False
+            if source.platform == Platform.WHATSAPP:
+                try:
+                    home_ids = {
+                        _normalize_whatsapp_identifier(home.chat_id or ""),
+                        _normalize_whatsapp_identifier(home.user_id or ""),
+                    } - {""}
+                    sender_aliases = set()
+                    for ident in (source.chat_id, source.user_id):
+                        if ident:
+                            sender_aliases |= _expand_whatsapp_auth_aliases(str(ident))
+                    authorized = bool(home_ids & sender_aliases)
+                except Exception:
+                    logger.debug(
+                        "Plain-text approval authority: whatsapp alias resolution failed",
+                        exc_info=True,
+                    )
+            else:
+                home_ids = {str(home.chat_id or ""), str(home.user_id or "")} - {""}
+                authorized = (
+                    str(source.chat_id or "") in home_ids
+                    or (bool(source.user_id) and str(source.user_id) in home_ids)
+                )
+            if authorized:
+                return True
+            # Home is configured and this sender isn't it — an enabled admin
+            # policy may still authorize them.
+            try:
+                from gateway.slash_access import policy_for_source
+                policy = policy_for_source(self.config, source)
+                if policy.enabled:
+                    return policy.is_admin(source.user_id)
+            except Exception:
+                logger.debug(
+                    "Plain-text approval authority: admin policy check failed",
+                    exc_info=True,
+                )
+            return False
+
+        # No home channel configured: an enabled admin policy decides;
+        # otherwise fall back to legacy behavior so single-operator installs
+        # keep the bare-word flow.
+        try:
+            from gateway.slash_access import policy_for_source
+            policy = policy_for_source(self.config, source)
+            if policy.enabled:
+                return policy.is_admin(source.user_id)
+        except Exception:
+            logger.debug(
+                "Plain-text approval authority: admin policy check failed",
+                exc_info=True,
+            )
+        return True
+
     async def _handle_active_session_busy_message(self, event: MessageEvent, session_key: str) -> bool:
         # --- Authorization gate (#17775) ---
         # The cold path (_handle_message) checks _is_user_authorized before
@@ -8425,7 +8510,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # we deliver it ourselves (mirroring the draining-case send above).
         try:
             from tools.approval import has_blocking_approval
-            if has_blocking_approval(session_key):
+            # Operator-only: bare-word approval resolution is gated on the
+            # home/admin identity so a customer's conversational "yes"/"no"
+            # is never eaten as an approval verdict (and a customer can
+            # never approve a dangerous command).  Non-authority senders
+            # fall through to normal busy handling — their message still
+            # reaches the agent.
+            if has_blocking_approval(session_key) and self._is_plain_text_approval_authority(event.source):
                 _raw_text = (event.text or "").strip().lower()
                 _approve_words = {"approve", "yes", "ok", "okay", "confirm", "y", "👍"}
                 _deny_words = {"deny", "no", "reject", "cancel", "n", "👎"}

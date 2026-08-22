@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextvars
+import functools
 import importlib
 import inspect
 import logging
@@ -602,7 +603,7 @@ class RelayRuntime:
                 try:
                     self.run_in_session(
                         session,
-                        self.relay.scope.pop,
+                        functools.partial(pop_relay_scope, self.relay),
                         session.handle,
                         output={},
                         metadata={
@@ -985,7 +986,7 @@ class RelaySessionCoordinator:
                         try:
                             lease.host.run_in_session(
                                 lease.session,
-                                lease.host.relay.scope.pop,
+                                functools.partial(pop_relay_scope, lease.host.relay),
                                 turn.handle,
                                 output={"outcome": outcome},
                                 metadata={
@@ -1070,7 +1071,7 @@ class RelaySessionCoordinator:
             try:
                 lease.host.run_in_session(
                     lease.session,
-                    lease.host.relay.scope.pop,
+                    functools.partial(pop_relay_scope, lease.host.relay),
                     logical_handle,
                     output={"outcome": outcome},
                     metadata={

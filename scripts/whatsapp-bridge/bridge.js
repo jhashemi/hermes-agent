@@ -720,15 +720,29 @@ async function startSocket() {
       // to arbitrary incoming messages (#8389).
       if (!msg.key.fromMe) {
         if (WHATSAPP_MODE === 'self-chat') {
-          try {
-            console.log(JSON.stringify({
-              event: 'ignored',
-              reason: 'self_chat_mode_rejects_non_self',
-              chatId,
-              senderId,
-            }));
-          } catch {}
-          continue;
+          // 2026-08-19: outreach contacts (Marc Byers, Aunik, Taylor…) reply to
+          // OUR sends — forward allowlisted senders even in self-chat mode.
+          // The #8389 stranger-drop still applies to everyone else.
+          if (matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
+            try {
+              console.log(JSON.stringify({
+                event: 'allowed',
+                reason: 'self_chat_allowlist',
+                chatId,
+                senderId,
+              }));
+            } catch {}
+          } else {
+            try {
+              console.log(JSON.stringify({
+                event: 'ignored',
+                reason: 'self_chat_mode_rejects_non_self',
+                chatId,
+                senderId,
+              }));
+            } catch {}
+            continue;
+          }
         }
         if (WHATSAPP_DM_POLICY !== 'pairing' && !matchesAllowedUser(senderId, ALLOWED_USERS, SESSION_DIR)) {
           try {
