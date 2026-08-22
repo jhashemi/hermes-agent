@@ -456,6 +456,26 @@ def _collect_completing_veto(
     try:
         from hermes_cli.lifecycle import invoke_hook
         from hermes_cli.profiles import get_active_profile_name
+        # FIX-11: agent worker subprocesses spawned by the dispatcher (or the
+        # gateway MCP tool path) may not have called ``discover_plugins()`` at
+        # startup, so the process-local PluginManager has ``_discovered=False``
+        # and zero hooks registered. That silently drops every
+        # ``kanban_task_completing`` callback — the hard-gate never fires and
+        # completions with fake / missing evidence sneak through. Forcing
+        # idempotent discovery HERE, at the exact seam that requires the
+        # pre-completion hook registry to be populated, closes that window
+        # without changing global semantics for callers that already
+        # discovered (``discover_and_load`` is a no-op when ``_discovered`` is
+        # already True). Any exception in discovery is swallowed so a broken
+        # plugin registry can never block completion (fail-open).
+        try:
+            from hermes_cli.plugins import discover_plugins as _discover_plugins
+            _discover_plugins(force=False)
+        except Exception as _disc_exc:
+            _log.debug(
+                "kanban_task_completing lazy discover_plugins failed: %s",
+                _disc_exc,
+            )
         try:
             profile_name = get_active_profile_name()
         except Exception:

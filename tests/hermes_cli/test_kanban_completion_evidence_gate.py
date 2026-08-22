@@ -383,3 +383,117 @@ def test_evidence_veto_fires_after_hallucination_gate(kanban_home, monkeypatch):
         assert veto_called["count"] == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# FIX-11 regression: lazy discover_plugins on the pre-completion seam
+# ---------------------------------------------------------------------------
+
+
+def test_completing_veto_triggers_lazy_plugin_discovery(kanban_home, monkeypatch):
+    """FIX-11 regression: agent worker subprocesses spawned by the
+    dispatcher / gateway MCP tool path never call ``discover_plugins()``
+    at startup, so the process-local ``PluginManager`` starts with
+    ``_discovered=False`` and zero hooks. Before FIX-11 the
+    ``kanban_task_completing`` seam would call ``invoke_hook(...)`` on
+    that empty registry, get ``[]`` back, and let completion sail
+    through — even when the vfe-complete-protocol plugin was installed
+    and its hard-gate hook would have vetoed.
+
+    The fix: ``_collect_completing_veto`` calls
+    ``discover_plugins(force=False)`` before ``invoke_hook``. This test
+    pins the wire-up by asserting ``discover_plugins`` is invoked
+    exactly once during ``complete_task`` and by simulating the
+    post-discovery hook registration path so the seam actually sees a
+    veto callback the way it would in production.
+    """
+    discover_calls = {"count": 0}
+    veto_calls = {"count": 0}
+
+    def _fake_discover(force=False):
+        # Simulates the real discover_plugins: after it runs, the veto
+        # callback becomes visible to invoke_hook. We track the call
+        # count so the assertion below proves the seam is calling
+        # discover_plugins (proving the FIX-11 wire-up), and we flip a
+        # flag the fake invoke_hook uses to gate the veto callback.
+        discover_calls["count"] += 1
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        # Before discover_plugins was called: return [] (mirrors an
+        # empty PluginManager). After: return the veto callback's
+        # result. Any test that lands here without discover having
+        # been called first should get no veto — which would let the
+        # completion through, failing the assertion below.
+        if hook_name != "kanban_task_completing":
+            return []
+        if discover_calls["count"] == 0:
+            return []  # would let completion silently through
+        veto_calls["count"] += 1
+        return [{"veto": True, "reason": "FIX-11 regression: hard-gate fired"}]
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.discover_plugins", _fake_discover
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook", _fake_invoke_hook
+    )
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="fix-11", assignee="alice")
+        kb.claim_task(conn, tid)
+        with pytest.raises(kb.CompletionEvidenceRejected) as excinfo:
+            kb.complete_task(
+                conn, tid,
+                summary="claims work but no evidence",
+                metadata={"commit_hash": "deadbeef"},
+            )
+        # The veto reason surfaced from our fake hook.
+        assert "FIX-11 regression" in str(excinfo.value)
+        # discover_plugins was called by the seam (FIX-11 wire-up).
+        assert discover_calls["count"] >= 1, (
+            "_collect_completing_veto did not call discover_plugins — "
+            "FIX-11 regression: the seam is back to invoking hooks against "
+            "a fresh, undiscovered PluginManager."
+        )
+        # The veto callback actually got a chance to run.
+        assert veto_calls["count"] == 1
+        # Task is unchanged (still running) because the veto fired.
+        assert kb.get_task(conn, tid).status == "running"
+    finally:
+        conn.close()
+
+
+def test_completing_veto_discover_failure_is_swallowed(kanban_home, monkeypatch):
+    """Fail-open guarantee: if ``discover_plugins`` itself raises
+    (broken plugin manifest, import error mid-scan, corrupt registry
+    file, etc.), the seam MUST NOT propagate the exception —
+    completion is core-critical work and a broken plugin registry
+    cannot block it. This test locks that contract so a future
+    refactor can't accidentally turn discovery failures into
+    completion failures.
+    """
+    def _boom(force=False):
+        raise RuntimeError("plugin registry corrupt")
+
+    def _fake_invoke_hook(hook_name, **kwargs):
+        return []  # nothing registered, no veto
+
+    monkeypatch.setattr(
+        "hermes_cli.plugins.discover_plugins", _boom
+    )
+    monkeypatch.setattr(
+        "hermes_cli.plugins.invoke_hook", _fake_invoke_hook
+    )
+
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="broken-plugins", assignee="alice")
+        kb.claim_task(conn, tid)
+        ok = kb.complete_task(
+            conn, tid, summary="core path unaffected by plugin fault"
+        )
+        assert ok is True
+        assert kb.get_task(conn, tid).status == "done"
+    finally:
+        conn.close()
