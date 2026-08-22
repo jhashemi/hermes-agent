@@ -1537,3 +1537,124 @@ class GatewayKanbanWatchersMixin:
 
         _release_singleton_lock(self._kanban_dispatcher_lock_handle)
         self._kanban_dispatcher_lock_handle = None
+
+    async def _kanban_stall_watchdog(self) -> None:
+        """Auto-escalate silently-unclaimable tickets (FIX-6 / t_5c8fce1b).
+
+        Runs every ``kanban.stall_watchdog_interval_seconds`` (default 900 =
+        15 min) against every board on disk. For each ticket in ``todo`` or
+        ``ready`` that is older than ``kanban.stall_watchdog_min_age_s``
+        (default 3600) and has a ``claim_rejected`` or ``dependency_wait``
+        event within ``kanban.stall_watchdog_recent_window_s`` (default 3600),
+        the sweep flips it to ``blocked`` / ``needs_input`` and emits a
+        ``stall_escalated`` event.
+
+        Same gate as the notifier / dispatcher: only runs when
+        ``kanban.dispatch_in_gateway`` is true (i.e. this gateway is the
+        board's dispatch owner). Piggybacking on the singleton lock held by
+        ``_kanban_dispatcher_watcher`` ensures we don't get two gateways
+        racing on the same board's escalation events. When
+        ``dispatch_in_gateway`` is disabled the loop exits and operators run
+        ``hermes kanban stall-sweep`` from a cron / systemd timer instead.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban stall watchdog: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get(
+            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
+        ).strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info(
+                "kanban stall watchdog: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
+            )
+            return
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning(
+                "kanban stall watchdog: cannot load config (%s); disabled", exc
+            )
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban stall watchdog: disabled via kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        # An operator can turn the watchdog off independently of the
+        # dispatcher — same shape as the other kanban.* toggles.
+        if not kanban_cfg.get("stall_watchdog_enabled", True):
+            logger.info(
+                "kanban stall watchdog: disabled via kanban.stall_watchdog_enabled=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_stall_watchdog as _sw
+        except Exception as exc:
+            logger.warning(
+                "kanban stall watchdog: import failed (%s); disabled", exc,
+            )
+            return
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(kanban_cfg.get(key, default) or default)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "kanban stall watchdog: invalid %s=%r, using default %d",
+                    key, kanban_cfg.get(key), default,
+                )
+                return default
+
+        interval = float(
+            _cfg_int(
+                "stall_watchdog_interval_seconds", _sw.DEFAULT_SWEEP_INTERVAL_S
+            )
+        )
+        min_age_s = _cfg_int("stall_watchdog_min_age_s", _sw.DEFAULT_MIN_AGE_S)
+        window_s = _cfg_int(
+            "stall_watchdog_recent_window_s", _sw.DEFAULT_RECENT_WINDOW_S
+        )
+
+        logger.info(
+            "kanban stall watchdog: enabled — interval=%.0fs min_age=%ds window=%ds",
+            interval, min_age_s, window_s,
+        )
+
+        # Stagger the first tick so we don't collide with the dispatcher's
+        # very first pass. Also gives the gateway time to finish adapter
+        # wiring — same courtesy as the notifier watcher.
+        await asyncio.sleep(30)
+
+        while self._running:
+            try:
+                results = await asyncio.to_thread(
+                    _sw.sweep_all_boards,
+                    min_age_s=min_age_s,
+                    recent_window_s=window_s,
+                )
+                total_esc = sum(r.escalated_count for r in results.values())
+                total_err = sum(r.errors for r in results.values())
+                if total_esc or total_err:
+                    logger.info(
+                        "kanban stall watchdog: tick — escalated=%d errors=%d boards=%d",
+                        total_esc, total_err, len(results),
+                    )
+                else:
+                    logger.debug(
+                        "kanban stall watchdog: tick — no stalls (boards=%d)",
+                        len(results),
+                    )
+            except Exception:  # noqa: BLE001 - watchdog must survive all failures
+                logger.exception("kanban stall watchdog: tick failed")
+
+            # Slice the sleep so shutdown is snappy.
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
+

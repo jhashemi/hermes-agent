@@ -11103,6 +11103,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # simply don't use kanban; this loop becomes a no-op.
         self._spawn_supervised(self._kanban_dispatcher_watcher, "kanban_dispatcher_watcher")
 
+        # Start background kanban stall watchdog — auto-escalates
+        # silently-unclaimable tickets (parents_not_done, resource_low,
+        # dependency_wait) after 1h so operators aren't left reading
+        # task_events to find 90-min stalls. FIX-6 / t_5c8fce1b.
+        # Gated by the same `kanban.dispatch_in_gateway` flag as the
+        # dispatcher — the two loops share the singleton dispatch owner
+        # semantics, so only one gateway per host escalates.
+        self._spawn_supervised(self._kanban_stall_watchdog, "kanban_stall_watchdog")
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
