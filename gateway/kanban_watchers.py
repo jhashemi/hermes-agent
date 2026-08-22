@@ -1132,6 +1132,35 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # Read kanban.memory_backpressure_gb — pre-spawn safety gate
+        # (FIX-B, t_ce9a36ca). When set, dispatch_once defers spawns
+        # this tick if host available memory drops below this threshold.
+        # Prevents fork ENOMEM / spawn-load OOM on memory-pressured hosts.
+        # None (default) disables the gate — backward-compatible.
+        raw_mem_bp = kanban_cfg.get("memory_backpressure_gb", None)
+        memory_backpressure_gb = None
+        if raw_mem_bp is not None:
+            try:
+                memory_backpressure_gb = float(raw_mem_bp)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.memory_backpressure_gb=%r; ignoring",
+                    raw_mem_bp,
+                )
+                memory_backpressure_gb = None
+            else:
+                if memory_backpressure_gb <= 0:
+                    logger.warning(
+                        "kanban dispatcher: kanban.memory_backpressure_gb=%r must be >0; ignoring",
+                        raw_mem_bp,
+                    )
+                    memory_backpressure_gb = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: memory_backpressure_gb=%.2f",
+                        memory_backpressure_gb,
+                    )
+
         # ── Cluster dispatch routing ───────────────────────────────────
         # Create a node router that consults the LLM cluster dispatcher
         # for cross-node task routing (hermes1/hermes2). Gated by
@@ -1275,6 +1304,7 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     node_router=_router,
+                    memory_backpressure_gb=memory_backpressure_gb,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):

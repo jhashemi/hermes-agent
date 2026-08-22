@@ -7692,6 +7692,16 @@ class DispatchResult:
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
+    deferred_memory: Optional[tuple[float, float]] = None
+    """When set, indicates the spawn loop was short-circuited this tick
+    because host free memory dropped below ``kanban.memory_backpressure_gb``
+    (FIX-B). Value is ``(threshold_gb, observed_available_gb)``. The
+    reclaim/promote/timed-out sweeps still ran; only new spawns were
+    deferred. Surfaces as a ``dispatch_deferred_memory`` event on the
+    first still-ready task so the dashboard can flag "not stuck, just
+    backpressured". Non-fatal: subsequent ticks retry once memory recovers.
+    See parent audit t_c3ba9176 for the crash-cluster evidence that
+    motivated this gate."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -9249,6 +9259,7 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     node_router=None,
+    memory_backpressure_gb: Optional[float] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -9284,6 +9295,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             node_router=node_router,
+            memory_backpressure_gb=memory_backpressure_gb,
         )
     with _dispatch_tick_lock(db_path) as held:
         if not held:
@@ -9301,6 +9313,7 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             node_router=node_router,
+            memory_backpressure_gb=memory_backpressure_gb,
         )
         # Still under the dispatch lock: opportunistically truncate the WAL
         # at a coarse interval so it cannot grow unbounded between restarts.
@@ -9322,6 +9335,7 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     node_router=None,
+    memory_backpressure_gb: Optional[float] = None,
 ) -> DispatchResult:
     """Run one dispatcher tick.
 
@@ -9357,6 +9371,13 @@ def _dispatch_once_locked(
     locally (the existing path). When returning a node name that differs
     from the local node, the task is spawned via SSH on that remote node.
     This is the integration point for the LLM cluster dispatcher.
+
+    ``memory_backpressure_gb`` (FIX-B, t_ce9a36ca) is a pre-spawn safety
+    gate: when set and host available memory drops below this threshold
+    (in GB), the spawn loop is skipped this tick. The
+    reclaim/promote/timed-out sweeps still run. Set to ``None`` (default)
+    to disable — recommended for hosts where memory isn't a bottleneck.
+    Wired from ``kanban.memory_backpressure_gb`` in config.yaml.
     """
     # Reap zombie children from previously spawned workers. See
     # reap_worker_zombies() for the full rationale.
@@ -9407,6 +9428,79 @@ def _dispatch_once_locked(
         "WHERE status = 'ready' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
+
+    # ── Memory backpressure gate (FIX-B, ticket t_ce9a36ca) ────────────
+    # On busy hosts (hermes2 with 15GB RAM, LiveKit forkservers holding
+    # ~5GB, swap at 100% saturation), forking a fresh hermes CLI worker
+    # (~200MB RSS + context load) can OOM the fork or the child dies
+    # during context load — showing up as "pid N not alive" with zero
+    # heartbeats. Parent audit t_c3ba9176 §3: 152 of 208 pid-not-alive
+    # crashes had zero heartbeats and clustered in 5-minute bursts on
+    # memory-pressure mornings (12 crashes in 5 min on 2026-08-16 07:40).
+    #
+    # This gate checks host available memory before entering the spawn
+    # loop and defers ALL spawns this tick when we're under threshold.
+    # The reclaim/promote/timed-out sweeps above have already run, so
+    # nothing gets stuck — ready tasks just wait for the next tick.
+    #
+    # Gate is disabled when memory_backpressure_gb is None (default).
+    # When psutil isn't importable (test stubs, exotic hosts) we log
+    # once at debug and skip the check — never fail-closed on missing
+    # deps, since the caller may still want the rest of the tick to run.
+    if (
+        memory_backpressure_gb is not None
+        and memory_backpressure_gb > 0
+        and ready_rows
+    ):
+        try:
+            import psutil as _psutil  # local: keep import cheap for tests
+            _avail_gb = _psutil.virtual_memory().available / 1e9
+        except Exception:
+            _avail_gb = None
+            _log.debug(
+                "kanban dispatch: psutil unavailable; memory backpressure "
+                "gate skipped this tick"
+            )
+        if _avail_gb is not None and _avail_gb < memory_backpressure_gb:
+            _log.warning(
+                "[dispatch] deferring spawns: avail=%.2fGB < %.2fGB "
+                "threshold (kanban.memory_backpressure_gb); %d ready "
+                "task(s) will retry next tick",
+                _avail_gb, memory_backpressure_gb, len(ready_rows),
+            )
+            result.deferred_memory = (
+                float(memory_backpressure_gb), float(_avail_gb),
+            )
+            # Emit a single event on the first ready task so dashboards
+            # can show "backpressured, not stuck". Emitting on every
+            # deferred task would spam the event log during sustained
+            # pressure. In dry_run mode we skip the write (tests that
+            # exercise the gate expect the DB untouched).
+            if not dry_run:
+                try:
+                    with write_txn(conn):
+                        _append_event(
+                            conn, ready_rows[0]["id"],
+                            "dispatch_deferred_memory",
+                            {
+                                "threshold_gb": float(memory_backpressure_gb),
+                                "available_gb": round(float(_avail_gb), 3),
+                                "deferred_count": len(ready_rows),
+                            },
+                        )
+                except Exception:
+                    # Event emission is telemetry — a failure here
+                    # (locked DB, exotic sqlite state) MUST NOT prevent
+                    # the gate from deferring the spawn.
+                    _log.debug(
+                        "kanban dispatch: failed to emit "
+                        "dispatch_deferred_memory event",
+                        exc_info=True,
+                    )
+            # Skip the entire spawn loop — but keep the reclaim/promote/
+            # timed_out work that already ran above in the result.
+            return result
+
     # Honour kanban.max_in_progress: if the board already has enough running
     # tasks, skip spawning this tick so slow workers (local LLMs,
     # resource-constrained hosts) can finish what they have before more tasks
