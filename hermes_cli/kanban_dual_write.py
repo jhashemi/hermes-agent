@@ -36,13 +36,14 @@ satisfied here (see :func:`_load_facade`).
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import inspect
 import logging
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +115,25 @@ def _load_facade() -> tuple[Optional[Any], Optional[Any]]:
 # --------------------------------------------------------------------------- #
 # DuckDB mirror connection tracking
 # --------------------------------------------------------------------------- #
+#
+# t_06bc95c3 (2026-08-22): we DO NOT cache DuckDB connections at rest. Prior
+# implementation kept a module-level ``_DUCK_CONNS`` dict that opened a
+# connection to every board's ``kanban.duckdb`` on first write and held it for
+# the process lifetime. Because DuckDB takes an exclusive OS-level file lock on
+# the database file (even a ``read_only=True`` opener from another process
+# cannot bypass this), the long-lived gateway process ended up holding
+# exclusive locks on every board's mirror — locking out the every-5-min
+# ``kanban-parity`` cron and any other process that wanted to open the mirror.
+#
+# Fix pattern (matches ADR-012 §"Concurrent multi-host writers" and
+# ADR-011 P0-3 ``DuckDBOKRStorage``):
+#     open → write → close, per mirror operation.
+#
+# Benchmarked on 2026-08-22: per-op open+write+close ≈ 86 ms vs ≈ 4 ms for a
+# cached connection. Kanban write rate on the busiest board (~8 events/min)
+# yields ≈ 700 ms of extra CPU / minute (1.2 %), well within the "best-effort
+# mirror" budget SQLite-authoritative dual-write allows.
 
-_DUCK_CONNS: dict[str, Any] = {}
 
 # Paths where opening the DuckDB mirror already failed with a benign lock
 # contention (another hermes process on the same host holds the mirror's
@@ -131,6 +149,13 @@ _DUCK_LOCK_CONTENDED: set[str] = set()
 # spam ERROR-level tracebacks into errors.log (which then feed back
 # into the ERR-DRIVE-01 auto-triage probe).
 _DUCK_LOCK_SIGNATURE = "Conflicting lock is held"
+
+# Back-compat shim: tests and health probes may still import ``_DUCK_CONNS``.
+# Kept empty and unused — module code no longer touches it — so that any
+# stale reference returns the historically-expected "no cached conns" answer.
+# Regression tests that clear the mapping between cases (``_DUCK_CONNS.clear()``)
+# continue to work with no behavior change.
+_DUCK_CONNS: dict[str, Any] = {}
 
 
 def _sqlite_path_for(conn: sqlite3.Connection) -> Optional[Path]:
@@ -151,24 +176,41 @@ def _sqlite_path_for(conn: sqlite3.Connection) -> Optional[Path]:
     return None
 
 
-def _duck_conn_for(conn: sqlite3.Connection) -> Optional[Any]:
+@contextlib.contextmanager
+def _mirror_conn_for(conn: sqlite3.Connection) -> Iterator[Optional[Any]]:
+    """Yield a DuckDB mirror connection for the duration of a single op.
+
+    Opens the DuckDB file, yields the connection, and closes it in a
+    ``finally``. The close() is what releases the OS-level file lock so
+    other processes (parity cron, another hermes worker) can open the
+    mirror. Yields ``None`` for any of:
+      * ``hermes_kanban`` not importable
+      * SQLite conn has no on-disk path (in-memory)
+      * DuckDB file is locked by a concurrent writer on this host
+        (recorded in ``_DUCK_LOCK_CONTENDED`` so we don't retry+log every op)
+      * novel exception opening the mirror (logged with traceback)
+
+    Yielding ``None`` is the "mirror silently skipped" signal — callers
+    must check for it. The SQLite primary path has already run and its
+    return value is authoritative.
+    """
     facade, adapter = _load_facade()
     if adapter is None:
-        return None
+        yield None
+        return
     p = _sqlite_path_for(conn)
     if p is None:
-        return None
+        yield None
+        return
     key = str(p.resolve())
-    duck = _DUCK_CONNS.get(key)
-    if duck is None:
-        # Short-circuit if this path already lost the file-lock race in
-        # this process. Retrying only re-produces the same IOException;
-        # the SQLite primary path is authoritative, mirror is best-effort.
-        if key in _DUCK_LOCK_CONTENDED:
-            return None
+    if key in _DUCK_LOCK_CONTENDED:
+        yield None
+        return
+
+    duck: Optional[Any] = None
+    try:
         try:
             duck = adapter.connect(adapter.duckdb_kanban_path(p))
-            _DUCK_CONNS[key] = duck
         except Exception as exc:  # pragma: no cover — mirror failure only
             msg = str(exc)
             if _DUCK_LOCK_SIGNATURE in msg:
@@ -189,7 +231,60 @@ def _duck_conn_for(conn: sqlite3.Connection) -> Optional[Any]:
                     p,
                 )
             duck = None
-    return duck
+        yield duck
+    finally:
+        if duck is not None:
+            try:
+                duck.close()
+            except Exception:  # pragma: no cover — best-effort close
+                # A failed close() would leak a file descriptor + lock,
+                # but there is no useful recovery. Log without traceback
+                # to avoid re-feeding ERR-DRIVE-01 triage on a benign path.
+                logger.warning(
+                    "kanban dual-write: DuckDB mirror close() failed for %s",
+                    p,
+                )
+
+
+# Back-compat: keep the historical name importable for callers that reach
+# into the module (tests, health probes). Adapts the context manager to
+# the old "get me a conn (or None)" shape but WITHOUT caching — the
+# caller gets a fresh conn it is responsible for closing. Prefer
+# ``_mirror_conn_for`` in new code.
+def _duck_conn_for(conn: sqlite3.Connection) -> Optional[Any]:
+    """DEPRECATED — see :func:`_mirror_conn_for`.
+
+    Kept only so external callers (regression tests, ad-hoc probes) that
+    imported the symbol don't crash. Returns a fresh connection that the
+    caller MUST close, or ``None`` on any skip / contention condition.
+    """
+    facade, adapter = _load_facade()
+    if adapter is None:
+        return None
+    p = _sqlite_path_for(conn)
+    if p is None:
+        return None
+    key = str(p.resolve())
+    if key in _DUCK_LOCK_CONTENDED:
+        return None
+    try:
+        return adapter.connect(adapter.duckdb_kanban_path(p))
+    except Exception as exc:  # pragma: no cover — mirror failure only
+        msg = str(exc)
+        if _DUCK_LOCK_SIGNATURE in msg:
+            _DUCK_LOCK_CONTENDED.add(key)
+            logger.warning(
+                "kanban dual-write: DuckDB mirror for %s locked by "
+                "another hermes process on this host; mirror disabled "
+                "for this process (SQLite primary path unaffected). %s",
+                p, msg.splitlines()[0] if msg else "",
+            )
+        else:
+            logger.exception(
+                "kanban dual-write: failed to open DuckDB mirror for %s",
+                p,
+            )
+        return None
 
 
 def _filtered_kwargs(fn: Callable, kwargs: dict) -> dict:
@@ -253,29 +348,33 @@ def _make_mirror_wrapper(
         _facade, adapter = _load_facade()
         if adapter is None:
             return result
-        duck = _duck_conn_for(conn)
-        if duck is None:
-            return result
         adapter_fn = getattr(adapter, adapter_op_name, None)
         if adapter_fn is None:
             logger.info(
                 "kanban dual-write: adapter has no %s (skip)", adapter_op_name,
             )
             return result
-        # Assemble mirror kwargs. For id-passthrough ops the SQLite return
-        # value is the freshly-minted primary key that the mirror insert
-        # must reuse to keep IDs identical across backends.
-        mirror_kwargs = dict(kwargs)
-        if id_passthrough_kw and result is not None:
-            mirror_kwargs[id_passthrough_kw] = result
-        mirror_kwargs = _filtered_kwargs(adapter_fn, mirror_kwargs)
-        try:
-            adapter_fn(duck, *args, **mirror_kwargs)
-        except Exception:  # pragma: no cover — best-effort mirror
-            logger.exception(
-                "kanban dual-write: mirror op %s failed (non-fatal)",
-                adapter_op_name,
-            )
+        # Per-op open→write→close. Do NOT hold the DuckDB file lock at
+        # rest — t_06bc95c3 (see module header): the previous cache-forever
+        # scheme starved the parity cron and any concurrent hermes process
+        # of read access to the mirror.
+        with _mirror_conn_for(conn) as duck:
+            if duck is None:
+                return result
+            # Assemble mirror kwargs. For id-passthrough ops the SQLite return
+            # value is the freshly-minted primary key that the mirror insert
+            # must reuse to keep IDs identical across backends.
+            mirror_kwargs = dict(kwargs)
+            if id_passthrough_kw and result is not None:
+                mirror_kwargs[id_passthrough_kw] = result
+            mirror_kwargs = _filtered_kwargs(adapter_fn, mirror_kwargs)
+            try:
+                adapter_fn(duck, *args, **mirror_kwargs)
+            except Exception:  # pragma: no cover — best-effort mirror
+                logger.exception(
+                    "kanban dual-write: mirror op %s failed (non-fatal)",
+                    adapter_op_name,
+                )
         return result
 
     _wrapped.__wrapped__ = original  # type: ignore[attr-defined]
@@ -322,4 +421,5 @@ __all__ = [
     "current_backend",
     "mirror_enabled",
     "install",
+    "_mirror_conn_for",
 ]
