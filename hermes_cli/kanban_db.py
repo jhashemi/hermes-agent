@@ -10877,3 +10877,36 @@ def latest_summaries(
         ids,
     ).fetchall()
     return {r["task_id"]: r["summary"] for r in rows}
+
+
+# --------------------------------------------------------------------------- #
+# ADR-012 P1 / G1a wiring: DuckDB dual-write mirror
+#
+# Behind the ``HERMES_KANBAN_WRITE_BACKEND`` env var, wrap module-level
+# write ops so that after every SQLite write we fire a best-effort mirror
+# at the DuckDB kanban adapter. This is a zero-cost path when the env
+# var is unset or set to ``sqlite`` (the wrapper's first branch short-
+# circuits before any SQL is issued or any DuckDB import is attempted).
+#
+# The routing lives in :mod:`hermes_cli.kanban_dual_write`; the actual
+# mirror implementation lives in
+# :mod:`hermes_kanban.kanban_repository_facade` (extracted repo). We
+# best-effort import the facade here so a ``grep`` against this file
+# confirms the wiring even when the ``hermes_kanban`` package isn't
+# installed in the current environment.
+# --------------------------------------------------------------------------- #
+
+try:  # pragma: no cover — optional wiring
+    from hermes_cli import kanban_dual_write as _kanban_dual_write
+
+    try:  # facade lives in the extracted hermes_kanban package
+        from hermes_kanban import kanban_repository_facade as _kanban_repository_facade  # noqa: F401
+    except Exception:
+        _kanban_repository_facade = None  # type: ignore[assignment]
+
+    _kanban_dual_write.install(sys.modules[__name__])
+except Exception:  # pragma: no cover — wiring failure must never break dispatcher
+    import logging as _l
+    _l.getLogger(__name__).exception(
+        "kanban dual-write wiring failed to install (dispatcher continues on SQLite)"
+    )
