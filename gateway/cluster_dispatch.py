@@ -463,11 +463,20 @@ def local_node_router(task_id: str, assignee: str) -> Optional[str]:
 def create_cluster_node_router(board: str) -> NodeRouter:
     """Create a NodeRouter for use by the gateway kanban watcher.
 
-    If cluster dispatch is enabled in config, returns a ClusterNodeRouter
-    backed by LLMClusterDispatcher. Otherwise returns the local-only
-    router (always None).
+    If cluster dispatch is enabled in config **and** ``board`` appears in
+    the ``kanban.cluster_dispatch_board`` whitelist, returns a
+    ``ClusterNodeRouter`` backed by ``LLMClusterDispatcher``. Otherwise
+    returns the local-only router (always None), meaning every task on
+    that board spawns on the local node.
 
-    Config key: ``kanban.cluster_dispatch`` (default: False)
+    Config keys:
+      - ``kanban.cluster_dispatch``       (bool, default: False) — master gate
+      - ``kanban.cluster_dispatch_board`` (list[str], default: []) — per-board
+        whitelist. When empty or missing, NO board is cluster-routed even if
+        ``cluster_dispatch`` is True — the whitelist is opt-in per board.
+
+    Env override:
+      - ``HERMES_CLUSTER_DISPATCH`` in {0, false, no, off} disables globally.
     """
     # Check config
     try:
@@ -487,7 +496,34 @@ def create_cluster_node_router(board: str) -> NodeRouter:
         logger.info("[ClusterNodeRouter] Cluster dispatch disabled via env")
         return local_node_router
 
-    logger.info("[ClusterNodeRouter] Cluster dispatch enabled, initializing router for board=%s", board)
+    # Per-board whitelist gate. The master switch is on, but each board must
+    # be explicitly opted in via ``kanban.cluster_dispatch_board``. This is
+    # the fix for the wiring bug where every board (default, campaignforge,
+    # etc.) was routed through the LLM router regardless of the whitelist
+    # config that already existed in config.yaml.
+    raw_whitelist = kanban_cfg.get("cluster_dispatch_board", [])
+    if not isinstance(raw_whitelist, (list, tuple)):
+        logger.warning(
+            "[ClusterNodeRouter] kanban.cluster_dispatch_board must be a list; "
+            "got %r — treating as empty (no board cluster-routed)",
+            type(raw_whitelist).__name__,
+        )
+        whitelist: set[str] = set()
+    else:
+        whitelist = {str(b) for b in raw_whitelist}
+
+    if board not in whitelist:
+        logger.info(
+            "[ClusterNodeRouter] board=%r not in cluster_dispatch_board "
+            "whitelist %r; routing locally",
+            board, sorted(whitelist),
+        )
+        return local_node_router
+
+    logger.info(
+        "[ClusterNodeRouter] Cluster dispatch enabled and board=%r whitelisted; "
+        "initializing LLM router", board,
+    )
     return ClusterNodeRouter(board=board)
 
 # ---------------------------------------------------------------------------

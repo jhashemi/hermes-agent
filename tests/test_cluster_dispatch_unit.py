@@ -11,7 +11,12 @@ from unittest import mock
 
 import pytest
 
-sys.path.insert(0, "/home/ubuntu/hermes-agent")
+# Prefer the repo containing THIS test file over any sibling clone that
+# happens to be on sys.path (e.g. /home/ubuntu/hermes-agent, the shared
+# deployment clone). This lets the tests run inside a git worktree.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 from gateway import cluster_dispatch as cd
 
@@ -385,8 +390,14 @@ class TestNodeHosts:
 # ---------------------------------------------------------------------------
 
 class TestFactory:
-    def _cfg(self, enabled):
-        return {"kanban": {"cluster_dispatch": enabled}}
+    def _cfg(self, enabled, whitelist=("b",)):
+        """Build a kanban config. The default whitelist=('b',) matches the
+        board name used across these tests so pre-existing tests keep their
+        original intent (cluster dispatch enabled → cluster router)."""
+        cfg = {"kanban": {"cluster_dispatch": enabled}}
+        if whitelist is not None:
+            cfg["kanban"]["cluster_dispatch_board"] = list(whitelist)
+        return cfg
 
     def test_disabled_returns_local_router(self, monkeypatch):
         monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
@@ -421,6 +432,114 @@ class TestFactory:
                         side_effect=RuntimeError("no config")):
             router = cd.create_cluster_node_router(board="b")
         assert router is cd.local_node_router
+
+
+# ---------------------------------------------------------------------------
+# create_cluster_node_router — board whitelist (t_595717ab)
+#
+# Regression: with cluster_dispatch=True, ONLY boards listed in
+# kanban.cluster_dispatch_board should be routed through the LLM cluster
+# router. Every other board must fall back to local spawn. The pre-fix
+# code ignored the whitelist entirely and routed every board.
+# ---------------------------------------------------------------------------
+
+class TestFactoryWhitelist:
+    """Board whitelist gate on ``kanban.cluster_dispatch_board``."""
+
+    def _cfg(self, *, enabled=True, whitelist=None):
+        cfg = {"kanban": {"cluster_dispatch": enabled}}
+        if whitelist is not None:
+            cfg["kanban"]["cluster_dispatch_board"] = list(whitelist)
+        return cfg
+
+    def test_non_whitelisted_board_returns_local(self, monkeypatch):
+        """A board NOT in the whitelist gets local_node_router even when
+        cluster_dispatch=True. This is the primary DoD assertion."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = self._cfg(whitelist=["adr-006b-phase-2", "okr-vfe-2026-q3"])
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="default")
+        assert router is cd.local_node_router
+
+    def test_whitelisted_board_returns_cluster_router(self, monkeypatch):
+        """A board IN the whitelist gets a real ClusterNodeRouter when
+        cluster_dispatch=True."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = self._cfg(whitelist=["adr-006b-phase-2", "okr-vfe-2026-q3"])
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="adr-006b-phase-2")
+        assert isinstance(router, cd.ClusterNodeRouter)
+        assert router.board == "adr-006b-phase-2"
+
+    def test_missing_whitelist_key_defaults_to_local(self, monkeypatch):
+        """If cluster_dispatch_board is missing entirely (key absent),
+        no board is cluster-routed — the whitelist is opt-in per board."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = {"kanban": {"cluster_dispatch": True}}  # no whitelist key
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="adr-006b-phase-2")
+        assert router is cd.local_node_router
+
+    def test_empty_whitelist_returns_local(self, monkeypatch):
+        """cluster_dispatch_board=[] behaves the same as missing — nothing
+        is whitelisted, nothing is cluster-routed."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = self._cfg(whitelist=[])
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="anything")
+        assert router is cd.local_node_router
+
+    def test_malformed_whitelist_treated_as_empty(self, monkeypatch):
+        """If cluster_dispatch_board is not a list (e.g. accidentally a
+        string), fall back to empty (all-local) instead of crashing."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = {
+            "kanban": {
+                "cluster_dispatch": True,
+                "cluster_dispatch_board": "adr-006b-phase-2",  # str, not list
+            },
+        }
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="adr-006b-phase-2")
+        assert router is cd.local_node_router
+
+    def test_whitelist_disabled_master_still_disables(self, monkeypatch):
+        """cluster_dispatch=False takes priority over whitelist membership."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        cfg = self._cfg(enabled=False, whitelist=["adr-006b-phase-2"])
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="adr-006b-phase-2")
+        assert router is cd.local_node_router
+
+    def test_env_override_beats_whitelist(self, monkeypatch):
+        """HERMES_CLUSTER_DISPATCH=0 forces local even for whitelisted boards."""
+        monkeypatch.setenv("HERMES_CLUSTER_DISPATCH", "0")
+        cfg = self._cfg(whitelist=["adr-006b-phase-2"])
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            router = cd.create_cluster_node_router(board="adr-006b-phase-2")
+        assert router is cd.local_node_router
+
+    def test_all_production_whitelisted_boards(self, monkeypatch):
+        """Smoke test: every board in config.yaml's real whitelist gets a
+        cluster router; every non-whitelisted board gets local. Uses the
+        current production whitelist from config.yaml as of t_595717ab."""
+        monkeypatch.delenv("HERMES_CLUSTER_DISPATCH", raising=False)
+        production_whitelist = [
+            "adr-006b-phase-2",
+            "executive-board-plugin",
+            "rsi-council-audit",
+            "okr-vfe-2026-q3",
+        ]
+        cfg = self._cfg(whitelist=production_whitelist)
+        with mock.patch("hermes_cli.config.load_config", return_value=cfg):
+            for slug in production_whitelist:
+                r = cd.create_cluster_node_router(board=slug)
+                assert isinstance(r, cd.ClusterNodeRouter), \
+                    f"whitelisted board {slug} should get ClusterNodeRouter"
+            for slug in ("default", "campaignforge", "voice-review", "random-board"):
+                r = cd.create_cluster_node_router(board=slug)
+                assert r is cd.local_node_router, \
+                    f"non-whitelisted board {slug} should get local_node_router"
 
 
 # ---------------------------------------------------------------------------
