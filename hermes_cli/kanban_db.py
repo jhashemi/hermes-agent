@@ -1648,6 +1648,13 @@ class Task:
     # ``detect_crashed_workers`` and ``release_stale_claims`` so a node
     # never runs ``_pid_alive`` against a pid owned by another host.
     worker_node: Optional[str] = None
+    # FIX-5 peer-review routing (t_b56c4ca7). When set, a worker
+    # completing this task with ``pending_peer_review=True`` transitions
+    # the task to ``status='review'`` and the dispatcher's review pass
+    # spawns THIS profile rather than the original ``assignee``. Cleared
+    # on the reviewer's terminal completion (pass → done, fail → ready).
+    # ``None`` on legacy rows and on any task that never opted in.
+    peer_review_assignee: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Task":
@@ -1745,6 +1752,11 @@ class Task:
             worker_node=(
                 row["worker_node"]
                 if "worker_node" in keys and row["worker_node"]
+                else None
+            ),
+            peer_review_assignee=(
+                row["peer_review_assignee"]
+                if "peer_review_assignee" in keys and row["peer_review_assignee"]
                 else None
             ),
         )
@@ -1947,7 +1959,19 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- reap loop plus the heartbeat-staleness backstop. Fixes the false-
     -- crash storm on cluster boards where SSH-spawned workers were
     -- reaped by the wrong host because ``_pid_alive`` couldn't see them.
-    worker_node          TEXT
+    worker_node          TEXT,
+    -- FIX-5 peer-review routing (t_b56c4ca7). When set, a worker
+    -- completing this task with ``pending_peer_review=True`` transitions
+    -- the task to ``status='review'`` (instead of ``done``) and the
+    -- dispatcher's review-column pass spawns a worker for THIS profile
+    -- rather than the original ``assignee``. Preserving ``assignee`` on
+    -- the row lets a fail-verdict cleanly bounce the task back to the
+    -- original owner via a ``review -> ready`` transition. Cleared on
+    -- terminal completion (pass verdict → done; fail verdict → ready).
+    -- NULL on legacy rows and on any task that never opted into
+    -- peer review — the pre-existing ``review`` code path (which reused
+    -- ``assignee`` as the reviewer) still works when this column is NULL.
+    peer_review_assignee TEXT
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
@@ -3439,6 +3463,21 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "worker_node", "worker_node TEXT"
         )
 
+    if "peer_review_assignee" not in cols:
+        # FIX-5 (t_b56c4ca7): peer-review routing primitive. NULL on
+        # legacy rows == the task never opted into peer review, which
+        # preserves the pre-existing kanban_complete semantics ("done"
+        # on complete). When set, a worker's
+        # ``kanban_complete(pending_peer_review=True)`` transitions the
+        # task to ``status='review'`` instead of ``done`` and the
+        # dispatcher spawns the reviewer named here rather than the
+        # original ``assignee``. Cleared on the reviewer's terminal
+        # completion (verdict='pass' → done; verdict='fail' → back to
+        # ``ready`` for the original assignee).
+        _add_column_if_missing(
+            conn, "tasks", "peer_review_assignee", "peer_review_assignee TEXT"
+        )
+
     # Indexes over additive ``tasks`` columns must be created after the
     # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
     # parses each statement in ``executescript`` against the live schema, so a
@@ -4098,6 +4137,7 @@ def create_task(
     board: Optional[str] = None,
     project_id: Optional[str] = None,
     project_source_task_id: Optional[str] = None,
+    peer_review_assignee: Optional[str] = None,
 ) -> str:
     """Create a new task and optionally link it under parent tasks.
 
@@ -4485,8 +4525,9 @@ def create_task(
                         branch_name, project_id, tenant, idempotency_key,
                         max_runtime_seconds,
                         skills, max_retries, model_override, provider_override,
-                        goal_mode, goal_max_turns, session_id, min_resources
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        goal_mode, goal_max_turns, session_id, min_resources,
+                        peer_review_assignee
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task_id,
@@ -4512,6 +4553,7 @@ def create_task(
                         int(goal_max_turns) if goal_max_turns is not None else None,
                         session_id,
                         min_resources_json,
+                        (peer_review_assignee or "").strip() or None,
                     ),
                 )
                 for pid in parents:
@@ -4536,6 +4578,9 @@ def create_task(
                         "goal_mode": bool(goal_mode) or None,
                         "model_override": model_override,
                         "provider_override": provider_override,
+                        "peer_review_assignee": (
+                            (peer_review_assignee or "").strip() or None
+                        ),
                     },
                 )
                 # FIX-8: surface the unknown-assignee decision as a typed
@@ -6766,6 +6811,235 @@ class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
 
+def _complete_task_pending_peer_review(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    reviewer: str,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+    expected_run_id: Optional[int],
+    commit_hash: Optional[str],
+    test_run_id: Optional[str],
+) -> bool:
+    """FIX-5 handoff: transition ``running|ready → review`` for peer review.
+
+    Preserves the original ``assignee`` so a fail verdict from the reviewer
+    can bounce cleanly back to the original worker. The reviewer name is
+    stashed on ``peer_review_assignee``; the dispatcher's review-column
+    pass consults that column and spawns the reviewer on the next tick.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status               = 'review',
+                       peer_review_assignee = ?,
+                       claim_lock           = NULL,
+                       claim_expires        = NULL,
+                       worker_pid           = NULL,
+                       last_heartbeat_at    = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready')
+                """,
+                (reviewer, task_id),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status               = 'review',
+                       peer_review_assignee = ?,
+                       claim_lock           = NULL,
+                       claim_expires        = NULL,
+                       worker_pid           = NULL,
+                       last_heartbeat_at    = NULL
+                 WHERE id = ?
+                   AND status IN ('running', 'ready')
+                   AND current_run_id = ?
+                """,
+                (reviewer, task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        # Close the worker's run with a dedicated outcome so the run
+        # ledger distinguishes a peer-review handoff from a plain
+        # completion. Downstream context-builders can then show "sent
+        # to review" instead of pretending the task is done.
+        run_id = _end_run(
+            conn, task_id,
+            outcome="pending_peer_review", status="review",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+        ev_summary = (summary if summary is not None else result) or ""
+        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+        payload: dict = {
+            "reviewer": reviewer,
+            "summary": ev_summary or None,
+        }
+        if commit_hash:
+            payload["commit_hash"] = str(commit_hash).strip()
+        if test_run_id:
+            payload["test_run_id"] = str(test_run_id).strip()
+        _append_event(
+            conn, task_id, "pending_peer_review",
+            payload,
+            run_id=run_id,
+        )
+    return True
+
+
+def _complete_task_review_verdict(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    verdict: str,
+    result: Optional[str],
+    summary: Optional[str],
+    metadata: Optional[dict],
+    expected_run_id: Optional[int],
+    commit_hash: Optional[str],
+    test_run_id: Optional[str],
+) -> bool:
+    """FIX-5 verdict path: 'pass' → done; 'fail' → ready for original assignee.
+
+    Reviewer's completion clears ``peer_review_assignee`` in both cases so
+    a second review pass has to be explicitly re-scoped. On fail we
+    preserve the original ``assignee`` (the row was never rewritten during
+    the review handoff) so the dispatcher respawns the worker who
+    submitted the work, not the reviewer.
+    """
+    now = int(time.time())
+    with write_txn(conn):
+        if verdict == "pass":
+            if expected_run_id is None:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status               = 'done',
+                           result               = ?,
+                           completed_at         = ?,
+                           peer_review_assignee = NULL,
+                           claim_lock           = NULL,
+                           claim_expires        = NULL,
+                           worker_pid           = NULL,
+                           block_kind           = NULL,
+                           block_recurrences    = 0
+                     WHERE id = ?
+                       AND status = 'running'
+                    """,
+                    (result, now, task_id),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE tasks
+                       SET status               = 'done',
+                           result               = ?,
+                           completed_at         = ?,
+                           peer_review_assignee = NULL,
+                           claim_lock           = NULL,
+                           claim_expires        = NULL,
+                           worker_pid           = NULL,
+                           block_kind           = NULL,
+                           block_recurrences    = 0
+                     WHERE id = ?
+                       AND status = 'running'
+                       AND current_run_id = ?
+                    """,
+                    (result, now, task_id, int(expected_run_id)),
+                )
+            if cur.rowcount != 1:
+                return False
+            run_id = _end_run(
+                conn, task_id,
+                outcome="completed", status="done",
+                summary=summary if summary is not None else result,
+                metadata=metadata,
+            )
+            ev_summary = (summary if summary is not None else result) or ""
+            ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+            payload: dict = {
+                "result_len": len(result) if result else 0,
+                "summary": ev_summary or None,
+                "review_verdict": "pass",
+            }
+            if commit_hash:
+                payload["commit_hash"] = str(commit_hash).strip()
+            if test_run_id:
+                payload["test_run_id"] = str(test_run_id).strip()
+            _append_event(
+                conn, task_id, "completed",
+                payload,
+                run_id=run_id,
+            )
+            return True
+        # verdict == 'fail' — bounce back to the original assignee.
+        if expected_run_id is None:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status               = 'ready',
+                       peer_review_assignee = NULL,
+                       claim_lock           = NULL,
+                       claim_expires        = NULL,
+                       worker_pid           = NULL,
+                       last_heartbeat_at    = NULL
+                 WHERE id = ?
+                   AND status = 'running'
+                """,
+                (task_id,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                UPDATE tasks
+                   SET status               = 'ready',
+                       peer_review_assignee = NULL,
+                       claim_lock           = NULL,
+                       claim_expires        = NULL,
+                       worker_pid           = NULL,
+                       last_heartbeat_at    = NULL
+                 WHERE id = ?
+                   AND status = 'running'
+                   AND current_run_id = ?
+                """,
+                (task_id, int(expected_run_id)),
+            )
+        if cur.rowcount != 1:
+            return False
+        # Close the reviewer's run with a distinct outcome so the run
+        # ledger records the fact that this attempt was a rejection, not
+        # a completion. The row will be respawned for the ORIGINAL
+        # assignee on the next dispatcher tick.
+        run_id = _end_run(
+            conn, task_id,
+            outcome="review_rejected", status="ready",
+            summary=summary if summary is not None else result,
+            metadata=metadata,
+        )
+        ev_summary = (summary if summary is not None else result) or ""
+        ev_summary = ev_summary.strip().splitlines()[0][:400] if ev_summary else ""
+        payload = {
+            "review_verdict": "fail",
+            "summary": ev_summary or None,
+        }
+        if commit_hash:
+            payload["commit_hash"] = str(commit_hash).strip()
+        if test_run_id:
+            payload["test_run_id"] = str(test_run_id).strip()
+        _append_event(
+            conn, task_id, "review_rejected",
+            payload,
+            run_id=run_id,
+        )
+    return True
+
+
 def complete_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -6778,6 +7052,9 @@ def complete_task(
     unblocks: Optional[Iterable[str]] = None,
     commit_hash: Optional[str] = None,
     test_run_id: Optional[str] = None,
+    pending_peer_review: bool = False,
+    peer_review_assignee: Optional[str] = None,
+    review_verdict: Optional[str] = None,
 ) -> bool:
     """Transition ``running|ready -> done`` and record ``result``.
 
@@ -6806,8 +7083,84 @@ def complete_task(
     Any suspected phantom references are recorded as a
     ``suspected_hallucinated_references`` event. This pass is advisory
     and never blocks.
+
+    Peer-review routing (FIX-5, t_b56c4ca7)
+    ---------------------------------------
+    ``pending_peer_review=True`` opts this completion into the peer-review
+    workflow: the task transitions to ``status='review'`` (NOT ``done``)
+    and its ``peer_review_assignee`` column is set so the dispatcher
+    spawns the named reviewer on the next tick. The original ``assignee``
+    is preserved on the row so a fail-verdict can bounce cleanly back.
+
+    * ``peer_review_assignee`` names the profile that should review. If
+      omitted here but already set on the row, the row's value is used.
+      If neither is set, the completion falls through to the normal
+      ``done`` path so a stray ``pending_peer_review=True`` from a task
+      that was never scoped for peer review can't strand the ticket in
+      ``review`` forever without a reviewer.
+
+    ``review_verdict`` is the reviewer's final call on a peer-reviewed
+    task. Only meaningful when the CURRENT run is a review run (i.e. the
+    row has ``peer_review_assignee`` set and status was ``review`` before
+    it was claimed to ``running``).
+
+    * ``'pass'`` → normal transition to ``done``; ``peer_review_assignee``
+      is cleared. Verdict is recorded on the ``completed`` event payload.
+    * ``'fail'`` → task goes back to ``ready`` for the ORIGINAL
+      ``assignee``; ``peer_review_assignee`` is cleared; a ``review_rejected``
+      event captures the reviewer's summary + metadata. The original
+      worker is respawned on the next dispatch tick and can iterate.
+    * Any other value raises ``ValueError`` so a typo can't silently
+      hide as a normal completion.
     """
     now = int(time.time())
+
+    # ---- FIX-5 review-verdict path ------------------------------------
+    # The reviewer's completion carries ``review_verdict``. We route the
+    # task to done (pass) or back to ready (fail) BEFORE the generic
+    # completion path so the row transition matches the verdict rather
+    # than the plain ``done``. When neither pending_peer_review nor
+    # review_verdict is set, the function behaves exactly as before.
+    if review_verdict is not None:
+        verdict = str(review_verdict).strip().lower()
+        if verdict not in {"pass", "fail"}:
+            raise ValueError(
+                f"review_verdict must be 'pass' or 'fail', got {review_verdict!r}"
+            )
+        return _complete_task_review_verdict(
+            conn, task_id,
+            verdict=verdict,
+            result=result,
+            summary=summary,
+            metadata=metadata,
+            expected_run_id=expected_run_id,
+            commit_hash=commit_hash,
+            test_run_id=test_run_id,
+        )
+    if pending_peer_review:
+        # Peer-review handoff: pull reviewer from arg or from row. If
+        # neither is present we fall through so a stray flag doesn't
+        # strand the task.
+        reviewer = (peer_review_assignee or "").strip() or None
+        if reviewer is None:
+            row = conn.execute(
+                "SELECT peer_review_assignee FROM tasks WHERE id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is not None and row["peer_review_assignee"]:
+                reviewer = str(row["peer_review_assignee"]).strip() or None
+        if reviewer:
+            return _complete_task_pending_peer_review(
+                conn, task_id,
+                reviewer=reviewer,
+                result=result,
+                summary=summary,
+                metadata=metadata,
+                expected_run_id=expected_run_id,
+                commit_hash=commit_hash,
+                test_run_id=test_run_id,
+            )
+        # Fall through to the normal done path — reviewer unresolved.
 
     # Gate: verify created_cards BEFORE the main write txn. A rejected
     # completion still needs an auditable event, so we emit it in a
@@ -11193,37 +11546,54 @@ def _dispatch_once_locked(
 
     # ---- review column dispatch ----
     # Review tasks are tasks that a worker moved to 'review' after
-    # creating a PR.  The dispatcher spawns a review agent (loading
-    # sdlc-review skill) that verifies the PR and either merges (→ done)
-    # or rejects (→ back to running for the worker to fix).
+    # creating a PR OR after completing with pending_peer_review=True
+    # (FIX-5). The dispatcher spawns a review agent — either the
+    # ``peer_review_assignee`` for a FIX-5 peer review, or (legacy path)
+    # falling back to ``assignee`` for the pre-existing sdlc-review flow.
     #
     # Same concurrency model as ready dispatch: review spawns count
     # against max_spawn alongside ready tasks, so the total number of
     # running workers stays bounded.
     review_rows = conn.execute(
-        "SELECT id, assignee FROM tasks "
+        "SELECT id, assignee, peer_review_assignee FROM tasks "
         "WHERE status = 'review' AND claim_lock IS NULL "
         "ORDER BY priority DESC, created_at ASC"
     ).fetchall()
     for row in review_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
-        if not row["assignee"]:
+        # FIX-5 (t_b56c4ca7): peer-review routing takes precedence.
+        # ``peer_review_assignee`` names the reviewer for this task; fall
+        # back to ``assignee`` for the legacy sdlc-review path (no
+        # peer_review_assignee set) so existing PR-review workflows keep
+        # working unchanged.
+        review_assignee = (row["peer_review_assignee"] or "").strip() or None
+        is_peer_review = review_assignee is not None
+        if review_assignee is None:
+            review_assignee = row["assignee"]
+        if not review_assignee:
             result.skipped_unassigned.append(row["id"])
             continue
         try:
             from hermes_cli.profiles import profile_exists
         except Exception:
             profile_exists = None  # type: ignore[assignment]
-        if profile_exists is not None and not profile_exists(row["assignee"]):
+        if profile_exists is not None and not profile_exists(review_assignee):
             result.skipped_nonspawnable.append(row["id"])
             continue
         if dry_run:
-            result.spawned.append((row["id"], row["assignee"], ""))
+            result.spawned.append((row["id"], review_assignee, ""))
             continue
         claimed = claim_review_task(conn, row["id"], ttl_seconds=ttl_seconds)
         if claimed is None:
             continue
+        # For a FIX-5 peer review, overwrite the claimed Task's in-memory
+        # assignee with the reviewer so ``_default_spawn`` invokes
+        # ``hermes -p <reviewer>`` rather than the original worker. The
+        # row itself keeps ``assignee`` unchanged so a fail-verdict can
+        # bounce cleanly back to the original owner.
+        if is_peer_review:
+            claimed.assignee = review_assignee
         try:
             resolved_branch_name = None
             if claimed.workspace_kind == "worktree":
@@ -11243,12 +11613,18 @@ def _dispatch_once_locked(
         if claimed.workspace_kind == "worktree":
             set_branch_name(conn, claimed.id, resolved_branch_name or (claimed.branch_name or "").strip() or f"wt/{claimed.id}")
         _maybe_emit_scratch_tip(conn, claimed.id, claimed.workspace_kind)
-        # Force-load the sdlc-review skill for review agents — it carries
-        # the review logic (AC verification, merge, etc.). The mandatory
-        # kanban lifecycle is already injected into every worker's system
-        # prompt via KANBAN_GUIDANCE, so this is the only extra skill the
-        # review agent needs.
-        claimed.skills = ["sdlc-review"]
+        # Force-load the sdlc-review skill for legacy PR-review agents —
+        # it carries the review logic (AC verification, merge, etc.). The
+        # mandatory kanban lifecycle is already injected into every
+        # worker's system prompt via KANBAN_GUIDANCE, so this is the only
+        # extra skill the review agent needs.
+        #
+        # FIX-5 (t_b56c4ca7): peer-review agents do NOT get sdlc-review
+        # force-loaded — they inherit whatever the profile ships with (or
+        # what the row already declares in ``skills``). Peer review is a
+        # human/expert sign-off flow, not a mechanical PR gate.
+        if not is_peer_review:
+            claimed.skills = ["sdlc-review"]
         _spawn = spawn_fn if spawn_fn is not None else _default_spawn
         try:
             import inspect

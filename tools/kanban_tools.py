@@ -709,6 +709,19 @@ def _handle_complete(args: dict, **kw) -> str:
     unblocks = args.get("unblocks")
     commit_hash = args.get("commit_hash")
     test_run_id = args.get("test_run_id")
+    # FIX-5 (t_b56c4ca7): peer-review routing primitive.
+    pending_peer_review = bool(args.get("pending_peer_review", False))
+    peer_review_assignee = args.get("peer_review_assignee")
+    if peer_review_assignee is not None:
+        peer_review_assignee = str(peer_review_assignee).strip() or None
+    review_verdict = args.get("review_verdict")
+    if review_verdict is not None:
+        review_verdict = str(review_verdict).strip().lower() or None
+        if review_verdict not in {"pass", "fail"}:
+            return tool_error(
+                f"review_verdict must be 'pass' or 'fail', got "
+                f"{args.get('review_verdict')!r}"
+            )
     
     # Validate unblocks is a list if provided
     if unblocks is not None:
@@ -739,8 +752,22 @@ def _handle_complete(args: dict, **kw) -> str:
             # calling kanban_complete before acceptance criteria are met.
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
+            #
+            # FIX-5 (t_b56c4ca7): the judge gate does NOT fire on a
+            # peer-review handoff (pending_peer_review=True) — the task is
+            # not becoming ``done``, only being routed to a reviewer, so
+            # the acceptance-criteria check is the REVIEWER's job. It also
+            # does not fire on a reviewer verdict (review_verdict set) —
+            # the reviewer's judgement IS the acceptance signal.
             task = kb.get_task(conn, tid)
-            if task and task.goal_mode and _goal_judge_available():
+            gate_active = (
+                task
+                and task.goal_mode
+                and not pending_peer_review
+                and review_verdict is None
+                and _goal_judge_available()
+            )
+            if gate_active:
                 verdict = "done"
                 reason = ""
                 try:
@@ -779,6 +806,9 @@ def _handle_complete(args: dict, **kw) -> str:
                     commit_hash=commit_hash,
                     test_run_id=test_run_id,
                     expected_run_id=_worker_run_id(tid),
+                    pending_peer_review=pending_peer_review,
+                    peer_review_assignee=peer_review_assignee,
+                    review_verdict=review_verdict,
                 )
             except kb.ArtifactPreservationError as artifact_err:
                 return tool_error(
@@ -1828,6 +1858,49 @@ KANBAN_COMPLETE_SCHEMA = {
                     "Optional: CI/test run id (e.g., GitHub Actions run URL) "
                     "that validated this completion. Provides evidence trail "
                     "for compliance / audit logs."
+                ),
+            },
+            "pending_peer_review": {
+                "type": "boolean",
+                "description": (
+                    "FIX-5 (t_b56c4ca7): opt this completion into the "
+                    "peer-review workflow instead of transitioning "
+                    "straight to done. When true, the task moves to "
+                    "``status='review'`` and the dispatcher spawns the "
+                    "profile named in ``peer_review_assignee`` (or the "
+                    "value already saved on the task row) on the next "
+                    "tick. The original ``assignee`` is preserved so a "
+                    "'fail' verdict from the reviewer bounces cleanly "
+                    "back. When false (the default) completion behaves "
+                    "exactly as before."
+                ),
+            },
+            "peer_review_assignee": {
+                "type": "string",
+                "description": (
+                    "FIX-5 (t_b56c4ca7): profile name of the reviewer for "
+                    "this task. Only meaningful when "
+                    "``pending_peer_review=true``; ignored otherwise. If "
+                    "omitted but the task row already has a "
+                    "``peer_review_assignee`` set (e.g. by a parent task "
+                    "or the CLI), that value is used. If neither is set, "
+                    "``pending_peer_review=true`` degrades to a normal "
+                    "``done`` completion so a stray flag can't strand "
+                    "the ticket in review."
+                ),
+            },
+            "review_verdict": {
+                "type": "string",
+                "enum": ["pass", "fail"],
+                "description": (
+                    "FIX-5 (t_b56c4ca7): reviewer's final call on a "
+                    "peer-reviewed task. ``'pass'`` transitions the task "
+                    "to ``done`` (clearing ``peer_review_assignee``); "
+                    "``'fail'`` bounces it back to ``ready`` for the "
+                    "ORIGINAL assignee with a ``review_rejected`` event "
+                    "carrying the reviewer's summary/metadata. Only "
+                    "meaningful when the current run is a review run "
+                    "(the row was spawned via the review-column path)."
                 ),
             },
             "board": _board_schema_prop(),
