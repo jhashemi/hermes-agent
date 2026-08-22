@@ -4432,6 +4432,82 @@ def _has_outstanding_governance_gate(
     return False
 
 
+_CRON_EVENT_PREFIX = "cron:"
+
+
+def _parse_iso_ts(value: str) -> Optional[float]:
+    """Parse an ISO-8601 timestamp (possibly with a trailing ``Z``) into a
+    unix epoch float. Returns ``None`` when unparseable.
+
+    Accepts common shapes emitted by the cron scheduler
+    (e.g. ``2026-08-23T01:55:00+00:00``) and hand-written condition
+    strings (e.g. ``2026-08-23T01:55Z``, ``2026-08-23 01:55:00``).
+    """
+    if not value or not isinstance(value, str):
+        return None
+    s = value.strip()
+    if not s:
+        return None
+    # Extract the first ISO-shaped timestamp substring so free-form
+    # ``waiting_for_condition`` predicates like
+    # ``"cron 9c906066 fires 2026-08-23T01:55Z"`` still gate correctly.
+    m = re.search(
+        r"\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?"
+        r"(?:Z|[+-]\d{2}:?\d{2})?",
+        s,
+    )
+    if m:
+        s = m.group(0)
+    # Normalize ``Z`` -> ``+00:00`` and space separator so
+    # ``datetime.fromisoformat`` accepts it on Python 3.10.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    s = s.replace(" ", "T", 1) if re.match(r"^\d{4}-\d{2}-\d{2}\s", s) else s
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _cron_fired_since(cron_id: str, since_epoch: int) -> Optional[bool]:
+    """Return ``True`` iff cron job ``cron_id`` has a ``last_run_at``
+    strictly ≥ ``since_epoch``.
+
+    Returns ``None`` when the cron job cannot be resolved (missing id,
+    cron subsystem not importable, lookup error). Callers treat ``None``
+    as "unknown — fall through so the operator can unblock manually",
+    matching the deleted-``waiting_for``-task branch's semantics.
+    """
+    if not cron_id:
+        return None
+    try:
+        # Lazy import to avoid a startup cost on installs that never
+        # touch cron, and to keep the kanban_db module usable in test
+        # rigs that stub out cron/.
+        from cron import jobs as _cron_jobs  # type: ignore
+    except Exception:
+        return None
+    try:
+        job = _cron_jobs.get_job(cron_id)
+    except Exception:
+        return None
+    if job is None:
+        return None
+    last_run_at = job.get("last_run_at")
+    if not last_run_at:
+        # Cron exists but has never fired — dependency not satisfied.
+        return False
+    fired_at = _parse_iso_ts(str(last_run_at))
+    if fired_at is None:
+        # Corrupt last_run_at — treat as "unknown" so operator can unblock.
+        return None
+    return fired_at >= float(since_epoch)
+
+
 def _dependency_waiting_for_satisfied(
     conn: sqlite3.Connection, task_id: str,
 ) -> bool:
@@ -4462,9 +4538,28 @@ def _dependency_waiting_for_satisfied(
       unblock manually via ``kanban_unblock``).
     * Otherwise, return ``True`` only when the waited-on task is
       exactly ``done`` or ``archived``.
+
+    WAVE-A6 extension — ``waiting_for_event`` / ``waiting_for_condition``:
+
+    * ``waiting_for_event`` starting with ``cron:<id>`` gates on the
+      referenced cron job's ``last_run_at`` being ≥ the event's own
+      ``created_at``. Before the fix, event/condition envelopes were
+      silently ignored: a dependency block with ``waiting_for_event=cron:X``
+      and no ``waiting_for`` fell through vacuously and was re-promoted
+      within a single dispatcher tick, spawning workers that re-verified
+      identical pre-fire state and burned inference in a loop.
+    * ``waiting_for_condition`` containing an ISO-8601 timestamp is
+      treated as a "not before" gate — held until that timestamp has
+      passed. Non-timestamp conditions are treated as "unknown" and
+      fall through (operator resolves via ``kanban_unblock``), matching
+      the deleted-``waiting_for`` branch above.
+    * When multiple ``waiting_for_*`` fields are present, ALL must be
+      satisfied (AND semantics). This mirrors what a worker means when
+      it emits a compound block: "hold until every named condition
+      clears". A single unsatisfied gate keeps the task blocked.
     """
     row = conn.execute(
-        "SELECT payload FROM task_events "
+        "SELECT payload, created_at FROM task_events "
         "WHERE task_id = ? AND kind = 'dependency_wait' "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
@@ -4479,19 +4574,70 @@ def _dependency_waiting_for_satisfied(
         payload = json.loads(row["payload"]) if row["payload"] else {}
     except Exception:
         payload = {}
-    waiting_for = payload.get("waiting_for") if isinstance(payload, dict) else None
-    if not waiting_for:
-        # Typed block with no waiting_for envelope — treat as legacy.
+    if not isinstance(payload, dict):
+        payload = {}
+    event_created_at = int(row["created_at"]) if row["created_at"] is not None else 0
+
+    waiting_for = payload.get("waiting_for")
+    waiting_for_event = payload.get("waiting_for_event")
+    waiting_for_condition = payload.get("waiting_for_condition")
+
+    # Empty envelope — pre-WAVE-A6 legacy shape.
+    if not any((waiting_for, waiting_for_event, waiting_for_condition)):
         return True
-    wf_row = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?", (str(waiting_for),),
-    ).fetchone()
-    if wf_row is None:
-        # Waited-on task no longer exists (archived away / deleted).
-        # Nothing we can gate on — let the operator resolve via
-        # ``kanban_unblock``. Return True to fall through.
-        return True
-    return wf_row["status"] in ("done", "archived")
+
+    # ------------------------------------------------------------------
+    # ``waiting_for_event=cron:<id>`` — hold until the cron fires.
+    # ------------------------------------------------------------------
+    if waiting_for_event:
+        wfe = str(waiting_for_event).strip()
+        if wfe.startswith(_CRON_EVENT_PREFIX):
+            cron_id = wfe[len(_CRON_EVENT_PREFIX):].strip()
+            fired = _cron_fired_since(cron_id, event_created_at)
+            if fired is False:
+                # Cron known + has not fired since block → not satisfied.
+                return False
+            # fired is True  → cron gate cleared, continue checking others.
+            # fired is None  → cron unresolvable, fall through so operator
+            #                  can unblock manually (same as deleted
+            #                  ``waiting_for`` semantics above).
+        # Unknown ``waiting_for_event`` schemes (non-``cron:``) are
+        # treated as unknown gates — fall through so we don't strand
+        # tasks blocked on a signal the kernel doesn't understand.
+
+    # ------------------------------------------------------------------
+    # ``waiting_for_condition`` — hold until any ISO timestamp inside
+    # the predicate string is in the past.
+    # ------------------------------------------------------------------
+    if waiting_for_condition:
+        cond_ts = _parse_iso_ts(str(waiting_for_condition))
+        if cond_ts is not None:
+            if cond_ts > time.time():
+                # Time-gated condition still in the future → not satisfied.
+                return False
+            # Timestamp in the past → this gate is cleared, continue.
+        # No timestamp inside the condition string → we cannot evaluate
+        # it. Fall through so the operator can unblock manually.
+
+    # ------------------------------------------------------------------
+    # ``waiting_for=<task_id>`` — hold until the referenced task is
+    # ``done`` / ``archived`` (existing VFE-DISPATCH-01 semantics).
+    # ------------------------------------------------------------------
+    if waiting_for:
+        wf_row = conn.execute(
+            "SELECT status FROM tasks WHERE id = ?", (str(waiting_for),),
+        ).fetchone()
+        if wf_row is None:
+            # Waited-on task no longer exists (archived away / deleted).
+            # Nothing we can gate on — let the operator resolve via
+            # ``kanban_unblock``. Return True to fall through.
+            return True
+        if wf_row["status"] not in ("done", "archived"):
+            return False
+
+    # Every declared gate we could evaluate came back cleared (or was
+    # unresolvable). Allow promotion.
+    return True
 
 
 def _last_dependency_wait_envelope(
