@@ -13,6 +13,7 @@ Add this to your FastAPI/Starlette app or Flask blueprint.
 
 from typing import Optional, Dict, Any
 import asyncio
+import hashlib
 import logging
 import hmac
 import os
@@ -288,9 +289,13 @@ def _rate_limit_key(
         if stripped:
             return f"user:{stripped}"
     if x_hermes_key:
-        # Prefix so a user literally named "<key>:<value>" cannot collide
-        # with a real key bucket. Truncate for log-safe key ids elsewhere.
-        return f"key:{x_hermes_key}"
+        # Hash the API key so an attacker cannot inflate the rate-limiter
+        # dict by sending arbitrarily long or unique keys.  SHA-256 truncated
+        # to 16 hex chars (64 bits) is collision-resistant enough for a
+        # per-bucket rate-limiter while keeping memory bounded.
+        # Prefix keeps user- and key-buckets disjoint.
+        key_hash = hashlib.sha256(x_hermes_key.encode()).hexdigest()[:16]
+        return f"key:{key_hash}"
     return "anonymous:"
 
 
