@@ -212,6 +212,30 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_claimed",
     "kanban_task_completed",
     "kanban_task_blocked",
+    # Kanban pre-completion veto hook (VFE-COMPLETE-01 hard-gate seam).
+    # Fires in the WORKER (or CLI) process INSIDE ``complete_task`` BEFORE
+    # the write txn that would flip the task to done. Unlike the observer
+    # ``kanban_task_*`` hooks above, callbacks here MAY return a dict to
+    # veto the completion:
+    #
+    #   {"veto": True, "reason": "<human-readable explanation>"}
+    #
+    # When any registered callback returns a veto dict, ``complete_task``
+    # raises ``CompletionEvidenceRejected`` before mutating task state and
+    # emits a ``completion_blocked_evidence`` audit event on the task
+    # (mirroring the existing ``completion_blocked_hallucination`` pattern).
+    # Callbacks that return ``None`` or any non-veto value are treated as
+    # abstentions. A callback that raises is logged and treated as abstain
+    # (fail-open) so a buggy policy plugin cannot wedge every completion.
+    #
+    # This is the ONLY kanban hook whose return value influences flow —
+    # all others are observer-only. Kept separate from
+    # ``kanban_task_completed`` so the observer/veto split stays legible.
+    #
+    # Kwargs: task_id: str, board: str | None, assignee: str | None,
+    #   summary: str | None, result: str | None, metadata: dict | None,
+    #   profile_name: str.
+    "kanban_task_completing",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
