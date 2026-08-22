@@ -2216,6 +2216,20 @@ def _cmd_complete(args: argparse.Namespace) -> int:
     if not ids:
         print("at least one task_id is required", file=sys.stderr)
         return 1
+    # Ensure plugin hooks are discovered before triggering completion —
+    # this CLI path skips the normal agent startup that runs discovery,
+    # so ``_collect_completing_veto`` would otherwise see zero hooks and
+    # let unverifiable completions through the ``kanban.enforce_
+    # completion_evidence`` gate (t_86644a21 RCA).  Failures here are
+    # non-fatal so a broken plugin doesn't brick the CLI.
+    try:
+        from hermes_cli import plugins as _plugins
+        _plugins.discover_plugins()
+    except Exception as _exc:
+        import logging as _logging
+        _logging.getLogger(__name__).debug(
+            "plugin discovery for kanban complete failed: %s", _exc,
+        )
     summary = getattr(args, "summary", None)
     raw_meta = getattr(args, "metadata", None)
     # Guard: structured handoff fields are per-run, so they'd be
