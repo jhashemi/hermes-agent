@@ -740,6 +740,35 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     p_daemon.add_argument("--force", action="store_true",
                           help=argparse.SUPPRESS)
 
+    # --- stall-sweep (FIX-6 / t_5c8fce1b) ---
+    # Runs one iteration of the stall-watchdog sweep. Designed to be
+    # driven by cron or a systemd timer for deployments that don't
+    # host the gateway (which runs an equivalent loop internally every
+    # 15 min).
+    p_stall = sub.add_parser(
+        "stall-sweep",
+        help="Auto-escalate silently-unclaimable tickets (todo/ready >1h "
+             "with a recent claim_rejected or dependency_wait event).",
+    )
+    p_stall.add_argument(
+        "--min-age", type=int, default=None,
+        help="Ticket must be at least this many seconds old (default 3600).",
+    )
+    p_stall.add_argument(
+        "--window", type=int, default=None,
+        help="Trigger event must be within the trailing N seconds (default 3600).",
+    )
+    p_stall.add_argument(
+        "--dry-run", action="store_true",
+        help="Show what would escalate without touching the DB.",
+    )
+    p_stall.add_argument(
+        "--all-boards", action="store_true",
+        help="Sweep every board on disk instead of just the current board.",
+    )
+    p_stall.add_argument("--json", action="store_true",
+                         help="Emit JSON report instead of human text.")
+
     # --- watch ---
     p_watch = sub.add_parser(
         "watch",
@@ -1071,6 +1100,7 @@ def kanban_command(args: argparse.Namespace) -> int:
             "tail":     _cmd_tail,
             "dispatch": _cmd_dispatch,
             "daemon":   _cmd_daemon,
+            "stall-sweep": _cmd_stall_sweep,
             "watch":    _cmd_watch,
             "stats":    _cmd_stats,
             "log":      _cmd_log,
@@ -2537,6 +2567,113 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
             f"Skipped (non-spawnable assignee — terminal lane, OK): "
             f"{', '.join(res.skipped_nonspawnable)}"
         )
+    return 0
+
+
+def _cmd_stall_sweep(args: argparse.Namespace) -> int:
+    """Run one stall-watchdog sweep from the CLI.
+
+    Wired for cron / systemd-timer use on hosts that don't run the
+    gateway (the gateway has an in-process loop that calls the same
+    ``kanban_stall_watchdog.sweep_all_boards``). The CLI honours the
+    same three config keys so YAML tuning applies to both paths:
+
+    * ``kanban.stall_watchdog_min_age_s`` (default 3600)
+    * ``kanban.stall_watchdog_recent_window_s`` (default 3600)
+
+    ``--min-age`` / ``--window`` on the command line override config
+    for one-off runs (e.g. an operator investigating a specific stall).
+    """
+    from hermes_cli import kanban_stall_watchdog as _sw
+
+    try:
+        from hermes_cli.config import load_config
+        _cfg = load_config()
+        _kcfg = _cfg.get("kanban", {}) if isinstance(_cfg, dict) else {}
+    except Exception:
+        _kcfg = {}
+
+    def _coerce_int(value, default: int) -> int:
+        try:
+            return int(value or default)
+        except (TypeError, ValueError):
+            return default
+
+    min_age = args.min_age if args.min_age is not None else _coerce_int(
+        _kcfg.get("stall_watchdog_min_age_s"), _sw.DEFAULT_MIN_AGE_S
+    )
+    window = args.window if args.window is not None else _coerce_int(
+        _kcfg.get("stall_watchdog_recent_window_s"), _sw.DEFAULT_RECENT_WINDOW_S
+    )
+
+    if getattr(args, "all_boards", False):
+        results = _sw.sweep_all_boards(
+            min_age_s=min_age,
+            recent_window_s=window,
+            dry_run=args.dry_run,
+        )
+    else:
+        with kb.connect_closing() as conn:
+            single = _sw.sweep_once(
+                conn,
+                min_age_s=min_age,
+                recent_window_s=window,
+                dry_run=args.dry_run,
+                board=kb.get_current_board() if hasattr(kb, "get_current_board") else None,
+            )
+        results = {"(current)": single}
+
+    if getattr(args, "json", False):
+        payload = {
+            "dry_run": bool(args.dry_run),
+            "min_age_s": min_age,
+            "recent_window_s": window,
+            "boards": {
+                slug: {
+                    "considered": r.considered,
+                    "escalated_count": r.escalated_count,
+                    "skipped_already_escalated": r.skipped_already_escalated,
+                    "errors": r.errors,
+                    "escalated": [
+                        {
+                            "task_id": e.task_id,
+                            "prev_status": e.prev_status,
+                            "trigger_kind": e.trigger_kind,
+                            "trigger_reason": e.trigger_reason,
+                            "trigger_event_id": e.trigger_event_id,
+                            "trigger_created_at": e.trigger_created_at,
+                            "age_s": e.age_s,
+                        }
+                        for e in r.escalated
+                    ],
+                }
+                for slug, r in results.items()
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    prefix = "[DRY RUN] " if args.dry_run else ""
+    total_esc = sum(r.escalated_count for r in results.values())
+    total_err = sum(r.errors for r in results.values())
+    total_cons = sum(r.considered for r in results.values())
+    print(
+        f"{prefix}stall-sweep: boards={len(results)} considered={total_cons} "
+        f"escalated={total_esc} errors={total_err} "
+        f"(min_age={min_age}s window={window}s)"
+    )
+    for slug, r in results.items():
+        if not r.escalated and not r.errors:
+            continue
+        print(f"  [{slug}]")
+        for e in r.escalated:
+            print(
+                f"    - {e.task_id}: {e.prev_status} → blocked/needs_input "
+                f"(trigger={e.trigger_kind}, reason={e.trigger_reason!r}, "
+                f"age={e.age_s}s)"
+            )
+        if r.errors:
+            print(f"    ! errors: {r.errors}")
     return 0
 
 
