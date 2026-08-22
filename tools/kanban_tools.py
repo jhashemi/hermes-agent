@@ -807,6 +807,24 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.CompletionEvidenceRejected as evidence_err:
+                # VFE-COMPLETE-01 pre-hook veto. Task state is NOT
+                # mutated (the veto runs before the completion write
+                # txn) and a ``completion_blocked_evidence`` audit event
+                # is already durable. Surface the reason verbatim so the
+                # worker can fix its metadata and retry. Same phrasing
+                # pattern as HallucinatedCardsError: spell out that the
+                # task is still in-flight and retry is expected.
+                source_hint = (
+                    f" (source: {evidence_err.veto_source})"
+                    if evidence_err.veto_source else ""
+                )
+                return tool_error(
+                    f"kanban_complete blocked: {evidence_err.reason}{source_hint}. "
+                    f"Your task is still in-flight (no state change). "
+                    f"Fix the completion evidence and retry kanban_complete "
+                    f"with the corrected summary/metadata."
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
