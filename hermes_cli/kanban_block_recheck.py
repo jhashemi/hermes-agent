@@ -925,6 +925,13 @@ def sweep_once(
     """
     _now = int(now if now is not None else time.time())
     result = RecheckResult()
+    # Force sqlite3.Row row factory for column-name indexing. Production
+    # connections don't set this by default; tests do. Setting here means
+    # helpers can rely on row["col"] regardless of caller convention.
+    # We do NOT restore the previous factory because sweep_once takes
+    # ownership of `conn` for the duration of the sweep — callers pass
+    # a scratch connection.
+    conn.row_factory = sqlite3.Row
     if host_resources is None:
         host_resources = _current_host_resources()
 
