@@ -258,41 +258,44 @@ class TestSetCurrentInstance:
         assert orchestrator.get_current_instance("user_1") == "local"
 
     def test_set_current_instance_validates_hostname(self, orchestrator):
-        """Should validate instance hostname during set."""
-        # Mock an invalid hostname in HERMES_INSTANCES
-        with patch.dict(
-            HERMES_INSTANCES,
-            {
-                "bad_host": RemoteHermesInstance(
-                    name="bad_host",
-                    hostname="256.256.256.256",  # Invalid IPv4
-                    ip="127.0.0.1",
-                    http_port=8000,
-                    is_local=False,
-                )
-            },
-            clear=False,
-        ):
-            with pytest.raises(ValueError, match="Invalid hostname"):
-                orchestrator.set_current_instance("bad_host")
+        """Should validate instance hostname during set.
+
+        RemoteHermesInstance.__init__ hard-validates hostname/port at
+        construction time, so we bypass it with object.__new__ to plant a
+        corrupt instance in the registry and prove set_current_instance
+        also re-validates before returning success (defense in depth).
+        """
+        bad = object.__new__(RemoteHermesInstance)
+        bad.name = "bad_host"
+        bad.hostname = "256.256.256.256"  # invalid IPv4
+        bad.ip = "127.0.0.1"
+        bad.http_port = 8000
+        bad.http_key = ""
+        bad.username = ""
+        bad.description = ""
+        bad.is_local = False
+
+        # Inject directly into the orchestrator's per-instance registry so we
+        # don't have to touch the module-level HERMES_INSTANCES.
+        orchestrator._instances["bad_host"] = bad
+        with pytest.raises(ValueError, match="Invalid hostname"):
+            orchestrator.set_current_instance("bad_host")
 
     def test_set_current_instance_validates_port(self, orchestrator):
         """Should validate instance port during set."""
-        with patch.dict(
-            HERMES_INSTANCES,
-            {
-                "bad_port": RemoteHermesInstance(
-                    name="bad_port",
-                    hostname="localhost",
-                    ip="127.0.0.1",
-                    http_port=99999,  # Invalid port
-                    is_local=False,
-                )
-            },
-            clear=False,
-        ):
-            with pytest.raises(ValueError, match="Invalid port"):
-                orchestrator.set_current_instance("bad_port")
+        bad = object.__new__(RemoteHermesInstance)
+        bad.name = "bad_port"
+        bad.hostname = "localhost"
+        bad.ip = "127.0.0.1"
+        bad.http_port = 99999  # invalid port
+        bad.http_key = ""
+        bad.username = ""
+        bad.description = ""
+        bad.is_local = False
+
+        orchestrator._instances["bad_port"] = bad
+        with pytest.raises(ValueError, match="Invalid port"):
+            orchestrator.set_current_instance("bad_port")
 
 
 # ============================================================================
@@ -358,41 +361,42 @@ class TestExecuteOnInstance:
 
     @pytest.mark.asyncio
     async def test_execute_on_instance_validates_hostname(self, orchestrator_initialized):
-        """Should validate hostname before execution."""
-        with patch.dict(
-            HERMES_INSTANCES,
-            {
-                "bad": RemoteHermesInstance(
-                    name="bad",
-                    hostname="invalid..hostname",
-                    ip="127.0.0.1",
-                    http_port=8000,
-                    is_local=False,
-                )
-            },
-            clear=False,
-        ):
-            with pytest.raises(ValueError, match="Invalid hostname"):
-                await orchestrator_initialized.execute_on_instance("bad", "test")
+        """Should validate hostname before execution.
+
+        Bypasses RemoteHermesInstance.__init__ (which hard-validates) so we
+        can plant a corrupt entry and prove execute_on_instance itself
+        re-validates before dialing out.
+        """
+        bad = object.__new__(RemoteHermesInstance)
+        bad.name = "bad"
+        bad.hostname = "invalid..hostname"
+        bad.ip = "127.0.0.1"
+        bad.http_port = 8000
+        bad.http_key = ""
+        bad.username = ""
+        bad.description = ""
+        bad.is_local = False
+
+        orchestrator_initialized._instances["bad"] = bad
+        with pytest.raises(ValueError, match="Invalid hostname"):
+            await orchestrator_initialized.execute_on_instance("bad", "test")
 
     @pytest.mark.asyncio
     async def test_execute_on_instance_validates_port(self, orchestrator_initialized):
         """Should validate port before execution."""
-        with patch.dict(
-            HERMES_INSTANCES,
-            {
-                "bad": RemoteHermesInstance(
-                    name="bad",
-                    hostname="localhost",
-                    ip="127.0.0.1",
-                    http_port=70000,  # Invalid port
-                    is_local=False,
-                )
-            },
-            clear=False,
-        ):
-            with pytest.raises(ValueError, match="Invalid port"):
-                await orchestrator_initialized.execute_on_instance("bad", "test")
+        bad = object.__new__(RemoteHermesInstance)
+        bad.name = "bad"
+        bad.hostname = "localhost"
+        bad.ip = "127.0.0.1"
+        bad.http_port = 70000  # invalid port
+        bad.http_key = ""
+        bad.username = ""
+        bad.description = ""
+        bad.is_local = False
+
+        orchestrator_initialized._instances["bad"] = bad
+        with pytest.raises(ValueError, match="Invalid port"):
+            await orchestrator_initialized.execute_on_instance("bad", "test")
 
     @pytest.mark.asyncio
     async def test_execute_on_instance_success_response(self, orchestrator_initialized):
