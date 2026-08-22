@@ -159,6 +159,88 @@ def clarify_tool(
     if callback is None:
         return tool_error("Clarify tool is not available in this execution context.")
 
+    # ─────────────────────────────────────────────────────────────────────
+    # ROUTING ENFORCER — L4 governance policy check.
+    # Blocks clarify() calls that belong to an accountable executive agent,
+    # auto-filing a kanban ticket to that agent instead. Approval-gate topics
+    # (systemctl restart, force-push, deploys) stay with the operator.
+    # Ref: OKR t_okr_hrv_immune_homeostasis KR-META
+    # ─────────────────────────────────────────────────────────────────────
+    try:
+        # Late-import so environments without executive_agents_platform on
+        # the path (Docker minimal, upstream unit tests) skip the check
+        # cleanly and preserve legacy behavior.
+        import sys as _sys, importlib as _il
+        _routing_mod = None
+        for _p in (
+            "/home/ubuntu/executive_agents_platform/src",
+            "/opt/executive_agents_platform/src",
+        ):
+            if _p not in _sys.path:
+                _sys.path.insert(0, _p)
+        try:
+            _routing_mod = _il.import_module("governance.routing_enforcer")
+        except ImportError:
+            _routing_mod = None
+
+        if _routing_mod is not None:
+            import os as _os
+            _mode = _os.environ.get("ROUTING_ENFORCER_MODE", "shadow").lower()
+            _log_only = _mode != "enforce"
+
+            # Try to obtain a kanban_create callable. We use the SQLite-direct
+            # path via kanban_home() so we don't loop through the gateway tool
+            # layer while a clarify_tool call is already in flight.
+            _kanban_fn = None
+            try:
+                from hermes_cli.kanban_db import create_task as _ct, kanban_home
+                import sqlite3 as _sqlite3
+                from pathlib import Path as _Path
+                def _kanban_fn(title, body, assignee, priority=90):
+                    db_path = _Path(kanban_home()) / "kanban" / "boards" / \
+                              "adr-006b-phase-2" / "kanban.db"
+                    if not db_path.exists():
+                        return {"task_id": ""}
+                    conn = _sqlite3.connect(str(db_path))
+                    try:
+                        r = _ct(conn, title=title, body=body,
+                                assignee=assignee, priority=priority)
+                        conn.commit()
+                        return {"task_id": r.get("id") if isinstance(r, dict) else r}
+                    finally:
+                        conn.close()
+            except Exception:
+                _kanban_fn = None
+
+            _r = _routing_mod.enforce(
+                question=question,
+                choices=choices,
+                context={"tool": "clarify_tool", "mode": _mode},
+                kanban_create_fn=_kanban_fn,
+                log_only=_log_only,
+            )
+            if _r.verdict.should_veto:
+                return json.dumps({
+                    "question": question,
+                    "choices_offered": choices,
+                    "user_response": "",
+                    "vetoed_by_routing_enforcer": True,
+                    "verdict": {
+                        "tier": _r.verdict.tier,
+                        "owner": _r.verdict.owner,
+                        "matched_pattern": _r.verdict.matched_pattern,
+                        "recommendation": _r.verdict.recommendation,
+                    },
+                    "auto_filed_task_id": _r.auto_filed_task_id,
+                }, ensure_ascii=False)
+    except Exception as _e:
+        # Enforcer failure MUST NOT block clarify() — fail-open, log-only.
+        import logging as _logging
+        _logging.getLogger("clarify_tool").warning(
+            "routing_enforcer check failed (fail-open): %s: %s",
+            type(_e).__name__, _e,
+        )
+
     try:
         raw_response = _invoke_callback(callback, question, choices, multi_select)
     except Exception as exc:
