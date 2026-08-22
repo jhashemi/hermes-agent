@@ -3505,23 +3505,51 @@ def create_task(
         task_id = _new_task_id()
         try:
             with write_txn(conn):
+                # FIX-4 (t_477e2f4d): break circular parent-locks on
+                # REVIEW/VERIFY tickets. A review ticket that names its
+                # subject as a parent cannot gate its subject — the
+                # dispatcher will record `claim_rejected: parents_not_done`
+                # forever if the subject is blocked. Detect the pattern
+                # heuristically (title keyword + parent id in title/body)
+                # and auto-unlink any blocked parents that match, so the
+                # review can be claimed and the reviewer can unblock the
+                # subject as a peer.
+                auto_unlinked_parents: list[str] = []
+                if parents:
+                    missing = _find_missing_parents(conn, parents)
+                    if missing:
+                        raise ValueError(
+                            f"unknown parent task(s): {', '.join(missing)}"
+                        )
+                    placeholders = ",".join("?" * len(parents))
+                    parent_status_rows = conn.execute(
+                        f"SELECT id, status FROM tasks WHERE id IN ({placeholders})",
+                        parents,
+                    ).fetchall()
+                    parent_status = {
+                        r["id"]: r["status"] for r in parent_status_rows
+                    }
+                    kept_parents: list[str] = []
+                    for pid in parents:
+                        if (
+                            parent_status.get(pid) == "blocked"
+                            and _looks_like_review_of(title, body, pid)
+                        ):
+                            auto_unlinked_parents.append(pid)
+                        else:
+                            kept_parents.append(pid)
+                    parents = tuple(kept_parents)
+
                 # Determine task status from parent status, unless the caller
                 # parks it directly in blocked for human-ops review or in
                 # triage for a specifier.
                 if initial_status == "blocked":
                     task_status = "blocked"
-                    if parents:
-                        missing = _find_missing_parents(conn, parents)
-                        if missing:
-                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                 elif triage:
                     task_status = "triage"
                 else:
                     task_status = "ready"
                     if parents:
-                        missing = _find_missing_parents(conn, parents)
-                        if missing:
-                            raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
                         # If any parent is not yet done, we're todo.
                         rows = conn.execute(
                             "SELECT status FROM tasks WHERE id IN "
@@ -3530,12 +3558,6 @@ def create_task(
                         ).fetchall()
                         if any(r["status"] != "done" for r in rows):
                             task_status = "todo"
-                # Even in triage mode we still need to validate parent ids
-                # so the eventual link rows don't dangle.
-                if triage and parents:
-                    missing = _find_missing_parents(conn, parents)
-                    if missing:
-                        raise ValueError(f"unknown parent task(s): {', '.join(missing)}")
 
                 # Project-linked worktree: a fresh worktree dir under the repo
                 # plus a deterministic branch (project slug + task id). Together
@@ -3630,6 +3652,44 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                # Surface the FIX-4 auto-unlink so operators can audit which
+                # parent links the kernel severed and why. One event carries
+                # the list (structured for tooling); one comment carries a
+                # human-readable note (durable in the task thread).
+                if auto_unlinked_parents:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "review_of_blocked_parent",
+                        {
+                            "auto_unlinked_parents": list(auto_unlinked_parents),
+                            "reason": (
+                                "REVIEW/VERIFY ticket cannot gate a blocked "
+                                "subject — parent link auto-severed so the "
+                                "reviewer can claim and unblock the subject."
+                            ),
+                        },
+                    )
+                    parent_list = ", ".join(auto_unlinked_parents)
+                    conn.execute(
+                        "INSERT INTO task_comments (task_id, author, body, created_at) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            task_id,
+                            "kernel",
+                            (
+                                "Auto-unlinked blocked parent(s) "
+                                f"{parent_list}: this ticket reads as a "
+                                "REVIEW/VERIFY of the subject, so gating it "
+                                "on the subject's completion would deadlock "
+                                "the review. Treat the former parent(s) as "
+                                "sibling(s) — the reviewer can post a "
+                                "comment and unblock the subject once the "
+                                "review is done. (FIX-4, t_477e2f4d.)"
+                            ),
+                            now,
+                        ),
+                    )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
@@ -3638,6 +3698,44 @@ def create_task(
             # Retry with a fresh id.
             continue
     raise RuntimeError("unreachable")
+
+
+_REVIEW_TITLE_RE = re.compile(
+    r"(?:^|[\s\W])(review|verify|verification|audit|qa|peer[- ]?review)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_review_of(
+    title: Optional[str],
+    body: Optional[str],
+    parent_id: str,
+) -> bool:
+    """Heuristic: does this new ticket read as a REVIEW / VERIFY of ``parent_id``?
+
+    A ticket is treated as a review of its parent when BOTH:
+
+    1. The title contains a review-flavoured keyword (``REVIEW``, ``VERIFY``,
+       ``VERIFICATION``, ``AUDIT``, ``QA``, ``PEER-REVIEW``); AND
+    2. The parent's task id appears somewhere in the title OR body.
+
+    Both conditions are needed to keep the false-positive rate low: many
+    tickets legitimately depend on a blocked parent by id without being
+    reviews of it, and many titles say "review" as a generic verb without
+    naming a subject. Together, keyword + explicit id reference is a strong
+    signal that the child cannot make progress until the parent is either
+    done or explicitly unlinked — see FIX-4 (t_477e2f4d) for the RCA.
+    """
+    if not parent_id:
+        return False
+    title_str = (title or "").strip()
+    body_str = (body or "").strip()
+    if not title_str and not body_str:
+        return False
+    if not _REVIEW_TITLE_RE.search(title_str):
+        return False
+    haystack = f"{title_str}\n{body_str}"
+    return parent_id in haystack
 
 
 def _find_missing_parents(conn: sqlite3.Connection, parents: Iterable[str]) -> list[str]:
