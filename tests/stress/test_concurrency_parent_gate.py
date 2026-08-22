@@ -37,6 +37,10 @@ def run() -> int:
     home = tempfile.mkdtemp(prefix="hermes_parent_gate_stress_")
     os.environ["HERMES_HOME"] = home
     os.environ["HOME"] = home
+    # Isolate kanban DB — kanban_home() ignores HERMES_HOME by design
+    # (see completion-theater RCA 2026-08-22).
+    os.environ["HERMES_KANBAN_HOME"] = home
+    os.environ["HERMES_KANBAN_DB"] = f"{home}/kanban.db"
 
     from hermes_cli import kanban_db as kb
 

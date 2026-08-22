@@ -48,6 +48,12 @@ def scenario(name):
             home = tempfile.mkdtemp(prefix=f"hermes_atyp_{name}_")
             os.environ["HERMES_HOME"] = home
             os.environ["HOME"] = home
+            # Isolate kanban DB too. kanban_home() ignores HERMES_HOME by
+            # design (see kanban_db.kanban_home()), so without this the
+            # tests write to the operator's live production board. See
+            # completion-theater RCA 2026-08-22.
+            os.environ["HERMES_KANBAN_HOME"] = home
+            os.environ["HERMES_KANBAN_DB"] = str(Path(home) / "kanban.db")
             for m in list(sys.modules.keys()):
                 if m.startswith(("hermes_cli", "plugins", "gateway")):
                     del sys.modules[m]

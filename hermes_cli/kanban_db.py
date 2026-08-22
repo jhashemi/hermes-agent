@@ -716,10 +716,50 @@ def kanban_home() -> Path:
     module docstring). Resolving the kanban paths through the active
     profile's ``HERMES_HOME`` would silently fork the board per profile,
     which breaks the dispatcher / worker handoff.
+
+    Test-isolation trap detector
+    ----------------------------
+    A common bug pattern (see completion-theater RCA 2026-08-22): a
+    stress-test harness sets ``HERMES_HOME=<tmpdir>`` for isolation but
+    forgets ``HERMES_KANBAN_HOME``. Because this function ignores
+    ``HERMES_HOME`` for the kanban root by design, the test then leaks
+    fixture cards into the operator's live production board.
+
+    When ``HERMES_HOME`` points at a tmpdir (path contains ``/tmp/`` or
+    starts with the tempdir prefix ``hermes-`` / ``hermes_``) BUT
+    ``HERMES_KANBAN_HOME`` is unset, log a WARNING that the caller very
+    likely wants to set ``HERMES_KANBAN_HOME`` too. We warn instead of
+    raise because Docker / production callers legitimately set
+    ``HERMES_HOME`` to a mounted path without an explicit kanban root.
     """
     override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     if override:
         return Path(override).expanduser()
+    # Test-isolation trap detector: warn if HERMES_HOME looks like a tempdir
+    # but HERMES_KANBAN_HOME is unset. Ships as a WARNING because Docker /
+    # unusual deployments can legitimately hit this code path.
+    _hh = os.environ.get("HERMES_HOME", "").strip()
+    if _hh:
+        _lower = _hh.lower()
+        _looks_temp = (
+            _lower.startswith("/tmp/")
+            or "/tmp/hermes" in _lower
+            or "/hermes_atyp_" in _lower
+            or "/hermes_bench_" in _lower
+            or "/hermes-test-home-" in _lower
+            or "/tempfile" in _lower
+        )
+        if _looks_temp:
+            import warnings as _warnings
+            _warnings.warn(
+                f"kanban_home(): HERMES_HOME={_hh!r} looks like a tempdir but "
+                f"HERMES_KANBAN_HOME is unset. Kanban writes will land in the "
+                f"REAL board root, not your isolated tempdir. If this is a "
+                f"test, set HERMES_KANBAN_HOME=$HERMES_HOME. See "
+                f"completion-theater RCA 2026-08-22.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
     from hermes_constants import get_default_hermes_root
     return get_default_hermes_root()
 

@@ -41,6 +41,10 @@ WT = str(Path(__file__).resolve().parents[2])
 def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
     os.environ["HERMES_HOME"] = hermes_home
     os.environ["HOME"] = hermes_home
+    # Isolate kanban DB — kanban_home() ignores HERMES_HOME by design
+    # (see completion-theater RCA 2026-08-22).
+    os.environ["HERMES_KANBAN_HOME"] = hermes_home
+    os.environ["HERMES_KANBAN_DB"] = f"{hermes_home}/kanban.db"
     sys.path.insert(0, WT)
     from hermes_cli import kanban_db as kb
 

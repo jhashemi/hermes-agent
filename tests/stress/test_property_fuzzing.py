@@ -236,6 +236,10 @@ def main():
         home = tempfile.mkdtemp(prefix=f"hermes_fuzz_{seq_idx}_")
         os.environ["HERMES_HOME"] = home
         os.environ["HOME"] = home
+        # Isolate kanban DB — kanban_home() ignores HERMES_HOME by design
+        # (see completion-theater RCA 2026-08-22).
+        os.environ["HERMES_KANBAN_HOME"] = home
+        os.environ["HERMES_KANBAN_DB"] = f"{home}/kanban.db"
         sys.path.insert(0, WT)
 
         # Fresh module state per sequence to avoid cached init paths.
