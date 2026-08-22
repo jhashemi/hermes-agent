@@ -595,8 +595,16 @@ def compute_out_of_scope_boards(
         slug = meta.get("slug") if isinstance(meta, dict) else None
         if not slug:
             continue
+        # Compute the DB path from the board slug directly rather than via
+        # ``kanban_db_path(slug)`` — that function honours HERMES_KANBAN_DB,
+        # which the dispatcher pins to a single board's DB for its workers,
+        # so calling it here from a worker would return the SAME path for
+        # every slug. Use the disk layout directly.
         try:
-            db_path = _kb.kanban_db_path(slug)
+            if slug == getattr(_kb, "DEFAULT_BOARD", "default"):
+                db_path = _kb.kanban_home() / "kanban.db"
+            else:
+                db_path = _kb.boards_root() / slug / "kanban.db"
         except Exception:
             continue
         if not db_path.exists():
