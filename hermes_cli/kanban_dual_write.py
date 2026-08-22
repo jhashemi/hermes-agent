@@ -5,9 +5,14 @@ the outer ``hermes_cli.kanban_db`` dispatcher module without changing
 call sites. Selection is driven by the ``HERMES_KANBAN_WRITE_BACKEND``
 environment variable:
 
-* ``sqlite`` (default, or unset) — zero behaviour change. This module's
-  ``install()`` is a no-op: no imports of the DuckDB stack are attempted,
-  no adapter connections are opened, no SQL is issued anywhere.
+* ``sqlite`` (default, or unset) — no observable behavior change vs. the
+  un-installed dispatcher. ``install()`` still wraps the module-level
+  write ops (so ``create_task`` / ``add_comment`` / etc. change function
+  identity), but each wrapper short-circuits at its ``mirror_enabled()``
+  gate: no adapter connection is opened, no SQL is issued against
+  DuckDB, and — because the tail of ``hermes_cli.kanban_db`` gates the
+  facade import on the same backend check — the DuckDB stack is not
+  imported at all in this mode.
 * ``dual`` — SQLite remains authority. After every successful SQLite
   write, a best-effort mirror write is fired at the DuckDB adapter.
   Mirror failures are logged and swallowed. The dispatcher's return
@@ -248,9 +253,13 @@ def install(module: Any) -> dict:
 
     Safe to call multiple times: functions already wrapped by this shim
     are left alone. In ``sqlite`` mode the wrappers are STILL installed
-    but each wrapper's first branch (``mirror_enabled()``) short-circuits
-    to zero extra work — this keeps behaviour byte-identical to today
-    while making the routing observable via one-line log at DEBUG.
+    (so ``create_task``, ``add_comment``, etc. have different function
+    identity than the un-installed module) but each wrapper's first
+    branch (``mirror_enabled()``) short-circuits to zero extra work —
+    write operations are intercepted but immediately delegated to the
+    SQLite backend without side effects, giving no observable behavior
+    change in sqlite mode while making the routing observable via
+    one-line log at DEBUG.
 
     Returns a dict ``{op_name: 'wrapped' | 'skipped' | 'missing'}`` for
     observability / testing.
