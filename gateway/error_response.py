@@ -17,6 +17,42 @@ from typing import Optional, Dict, Any
 from enum import Enum
 
 
+class EmojiIcon(str, Enum):
+    """Standardized emoji icons for user-facing responses.
+
+    All handler responses that carry an emoji prefix (error, warning, info,
+    success, access-denied, pending) MUST route through this enum instead of
+    embedding a raw glyph in a string literal. This keeps the glyph set
+    consistent across handlers and makes it trivial to swap or grep for.
+    """
+
+    ERROR = "\u274c"              # ❌
+    ACCESS_DENIED = "\U0001f6ab"  # 🚫
+    WARNING = "\u26a0\ufe0f"      # ⚠️
+    INFO = "\u2139\ufe0f"         # ℹ️
+    SUCCESS = "\u2705"            # ✅
+    PENDING = "\u23f3"            # ⏳
+
+    def __str__(self) -> str:
+        # Render the raw emoji when interpolated (avoids the enum-member repr).
+        return self.value
+
+
+def format_info(message: str) -> str:
+    """Format an info-level user-facing message with the standard prefix."""
+    return f"{EmojiIcon.INFO} {message}"
+
+
+def format_warning(message: str) -> str:
+    """Format a warning-level user-facing message with the standard prefix."""
+    return f"{EmojiIcon.WARNING} {message}"
+
+
+def format_success(message: str) -> str:
+    """Format a success user-facing message with the standard prefix."""
+    return f"{EmojiIcon.SUCCESS} {message}"
+
+
 class ErrorCode(str, Enum):
     """Standardized error codes for gateway responses."""
     
@@ -97,7 +133,7 @@ class ErrorResponse:
         Returns:
             Formatted error message
         """
-        lines = [f"❌ Error: {self.message}"]
+        lines = [f"{EmojiIcon.ERROR} Error: {self.message}"]
         
         if self.code:
             lines.append(f"Code: {self.code}")
@@ -114,7 +150,11 @@ class ErrorResponse:
         Returns:
             Formatted error message with emojis
         """
-        emoji = "🚫" if self.code == ErrorCode.ACCESS_DENIED else "❌"
+        emoji = (
+            EmojiIcon.ACCESS_DENIED
+            if self.code == ErrorCode.ACCESS_DENIED
+            else EmojiIcon.ERROR
+        )
         lines = [f"{emoji} {self.message}"]
         
         if self.context.get("user_id"):
