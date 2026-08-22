@@ -2745,6 +2745,72 @@ def run_doctor(args):
     except Exception:
         pass
 
+    # ─────────────────────────────────────────────────────────────────
+    # Kanban Board Scope — surface boards with active tickets outside
+    # the effective dispatch scope (config drift signal).
+    # ─────────────────────────────────────────────────────────────────
+    _section("Kanban Board Scope")
+    try:
+        from gateway.cluster_dispatch import compute_out_of_scope_boards
+        entries = compute_out_of_scope_boards()
+        warn_entries = [e for e in entries if e.get("severity") == "warn"]
+        info_entries = [e for e in entries if e.get("severity") == "info"]
+        if not entries:
+            check_ok("All boards with active tickets are inside dispatch scope")
+        else:
+            if warn_entries:
+                summary = ", ".join(
+                    f"{e['slug']} ({e['active_count']})" for e in warn_entries
+                )
+                check_warn(
+                    f"{len(warn_entries)} board(s) have active tickets outside "
+                    f"dispatch scope",
+                    f"[{summary}]",
+                )
+                for e in warn_entries:
+                    for hint in e.get("fix_hints", []):
+                        print(f"      {color('→', Colors.YELLOW)} {hint}")
+                issues.append(
+                    "kanban: "
+                    + str(len(warn_entries))
+                    + " board(s) have ready tickets outside dispatch scope: ["
+                    + summary + "] — see 'hermes doctor' output above for fix hints"
+                )
+            if info_entries:
+                summary = ", ".join(
+                    f"{e['slug']} ({e['active_count']})" for e in info_entries
+                )
+                check_info(
+                    f"{len(info_entries)} board(s) omitted from cluster_dispatch_board "
+                    f"whitelist (cluster_dispatch is disabled — informational only): "
+                    f"[{summary}]"
+                )
+        # Feature-flagged strict mode: non-zero exit when out-of-scope warns
+        # exist. Default false — preserves current CLI exit behaviour.
+        try:
+            from hermes_cli.config import load_config as _load_cfg_strict
+            _cfg_strict = _load_cfg_strict() or {}
+        except Exception:
+            _cfg_strict = {}
+        strict = False
+        if isinstance(_cfg_strict, dict):
+            _hermes_cfg = _cfg_strict.get("hermes") if isinstance(_cfg_strict.get("hermes"), dict) else {}
+            _d = _hermes_cfg.get("doctor") if isinstance(_hermes_cfg.get("doctor"), dict) else {}
+            strict = bool(_d.get("strict_kanban_scope", False))
+            if not strict:
+                _doctor_cfg = _cfg_strict.get("doctor") if isinstance(_cfg_strict.get("doctor"), dict) else {}
+                strict = bool(_doctor_cfg.get("strict_kanban_scope", False))
+        if strict and warn_entries:
+            print()
+            print(color(
+                "  ✗ hermes.doctor.strict_kanban_scope=true and out-of-scope "
+                "boards have ready tickets. Exiting non-zero.",
+                Colors.RED,
+            ))
+            sys.exit(1)
+    except Exception as e:
+        check_warn(f"kanban board scope check failed: {e}")
+
     print()
     remaining_issues = issues + manual_issues
     if should_fix and fixed_count > 0:
