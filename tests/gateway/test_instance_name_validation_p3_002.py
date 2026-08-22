@@ -187,6 +187,7 @@ class TestSwitchInstanceCommandValidation:
             # Mock instance orchestrator
             with patch('gateway.agent_commands.InstanceOrchestrator') as mock_orch_class:
                 mock_orch = MagicMock()
+                mock_orch._get_registry = MagicMock(return_value={"local": MagicMock()})
                 mock_orch.set_current_instance = MagicMock(return_value=True)
                 mock_orch.get_instance = MagicMock(return_value=MagicMock(
                     name="local",
@@ -303,6 +304,7 @@ class TestSwitchInstanceCommandValidation:
             # Mock instance orchestrator
             with patch('gateway.agent_commands.InstanceOrchestrator') as mock_orch_class:
                 mock_orch = MagicMock()
+                mock_orch._get_registry = MagicMock(return_value={"prod-us-west": MagicMock()})
                 mock_orch.set_current_instance = MagicMock(return_value=True)
                 mock_orch.get_instance = MagicMock(return_value=MagicMock(
                     name="prod-us-west",
