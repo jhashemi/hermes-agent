@@ -489,3 +489,181 @@ def create_cluster_node_router(board: str) -> NodeRouter:
 
     logger.info("[ClusterNodeRouter] Cluster dispatch enabled, initializing router for board=%s", board)
     return ClusterNodeRouter(board=board)
+
+# ---------------------------------------------------------------------------
+# Scope lint: detect boards with active work outside effective dispatch scope
+# ---------------------------------------------------------------------------
+#
+# Two operator failure modes we want to surface:
+#
+# 1. ``cluster_dispatch=True`` but a board with active tickets is NOT in
+#    ``cluster_dispatch_board``. Cluster routing will fall back to local for
+#    those boards even though the operator opted into cluster dispatch. This
+#    is a legit config-drift signal: the operator added a new board and
+#    forgot to whitelist it.
+#
+# 2. ``cluster_dispatch=False`` (local-only) AND ``cluster_dispatch_board``
+#    whitelist exists but omits boards with active tickets. Not currently a
+#    functional issue (local dispatch touches every board), but it is
+#    informational: flipping ``cluster_dispatch=True`` would leave those
+#    boards routed locally by accident. Reported as INFO, not WARN.
+#
+# The dispatcher iterates every board via ``list_boards`` regardless of
+# whitelist, so no board is ever fully "unreached" today. If that changes
+# (a future ``kanban.dispatch_scope`` knob restricting board enumeration),
+# extend this helper to reflect the new semantics — the doctor check and
+# gateway warn read from a single source of truth.
+
+
+def _active_ticket_count(db_path) -> int:
+    """Return count of tasks in states that need dispatcher attention.
+
+    Uses a direct sqlite3 read (no ORM, no kanban_db import churn) so this
+    helper is safe to call from doctor before the CLI is fully wired.
+    Returns 0 on any error — a missing/corrupt DB should never break the
+    doctor pass; other checks already surface those.
+    """
+    import sqlite3
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM tasks "
+                "WHERE status IN ('todo', 'ready', 'running')"
+            ).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+    except Exception:
+        return 0
+
+
+def compute_out_of_scope_boards(
+    cfg: dict | None = None,
+) -> list[dict]:
+    """Enumerate boards with active tickets that fall outside effective dispatch scope.
+
+    Returns a list of dicts sorted by (severity_desc, slug_asc). Each entry::
+
+        {
+            "slug": "campaignforge-phase5",
+            "active_count": 9,
+            "severity": "warn" | "info",
+            "reason": "cluster_dispatch=true but board not in cluster_dispatch_board whitelist",
+            "fix_hints": ["Add 'campaignforge-phase5' to kanban.cluster_dispatch_board", ...],
+        }
+
+    ``cfg`` is the loaded config dict. When None, loads via
+    ``hermes_cli.config.load_config``. On config-load failure returns [].
+
+    Behaviour:
+    * ``cluster_dispatch=False``: reports boards with active tickets that
+      have a non-empty whitelist that OMITS them, as ``severity='info'``.
+      No warn — the local dispatcher still processes every board.
+    * ``cluster_dispatch=True``: reports boards with active tickets NOT on
+      the whitelist as ``severity='warn'`` — the LLM cluster router falls
+      back to local for those boards, which is likely operator drift.
+    """
+    if cfg is None:
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+        except Exception:
+            return []
+    if not isinstance(cfg, dict):
+        return []
+
+    kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg.get("kanban"), dict) else {}
+    cluster_enabled = bool(kanban_cfg.get("cluster_dispatch", False))
+    raw_whitelist = kanban_cfg.get("cluster_dispatch_board")
+    if isinstance(raw_whitelist, (list, tuple)):
+        whitelist = {str(x).strip() for x in raw_whitelist if str(x).strip()}
+    else:
+        whitelist = set()
+
+    try:
+        from hermes_cli import kanban_db as _kb
+    except Exception:
+        return []
+    try:
+        boards = _kb.list_boards(include_archived=False)
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    for meta in boards:
+        slug = meta.get("slug") if isinstance(meta, dict) else None
+        if not slug:
+            continue
+        try:
+            db_path = _kb.kanban_db_path(slug)
+        except Exception:
+            continue
+        if not db_path.exists():
+            continue
+        active = _active_ticket_count(db_path)
+        if active <= 0:
+            continue
+
+        in_whitelist = slug in whitelist
+
+        if cluster_enabled:
+            if whitelist and not in_whitelist:
+                out.append({
+                    "slug": slug,
+                    "active_count": active,
+                    "severity": "warn",
+                    "reason": (
+                        "cluster_dispatch=true but board not in "
+                        "kanban.cluster_dispatch_board whitelist — LLM cluster "
+                        "routing falls back to local for this board"
+                    ),
+                    "fix_hints": [
+                        f"add '{slug}' to kanban.cluster_dispatch_board in config.yaml",
+                        f"or remove active tickets from this board if it is retired",
+                    ],
+                })
+        else:
+            if whitelist and not in_whitelist:
+                out.append({
+                    "slug": slug,
+                    "active_count": active,
+                    "severity": "info",
+                    "reason": (
+                        "cluster_dispatch=false; whitelist exists but omits "
+                        "this board — enabling cluster_dispatch would route "
+                        "this board locally by fallback"
+                    ),
+                    "fix_hints": [
+                        f"add '{slug}' to kanban.cluster_dispatch_board (pre-emptive)",
+                        "or leave as-is if this board should stay local",
+                    ],
+                })
+
+    _sev_order = {"warn": 0, "info": 1}
+    out.sort(key=lambda e: (_sev_order.get(e.get("severity", "info"), 9), e["slug"]))
+    return out
+
+
+def log_out_of_scope_boards_at_startup() -> None:
+    """Emit gateway startup log lines for each out-of-scope board.
+
+    Called by ``_kanban_dispatcher_watcher`` after config load. Wrapped in a
+    broad try/except so a corrupt board DB never blocks the dispatcher.
+    """
+    try:
+        entries = compute_out_of_scope_boards()
+    except Exception as exc:
+        logger.debug("kanban dispatcher: scope lint failed (%s); skipping", exc)
+        return
+    for e in entries:
+        level = logging.WARNING if e.get("severity") == "warn" else logging.INFO
+        logger.log(
+            level,
+            "kanban dispatcher: board %s has %d active ticket(s) outside "
+            "cluster dispatch scope — %s; fix: %s",
+            e["slug"],
+            e["active_count"],
+            e["reason"],
+            "; ".join(e.get("fix_hints", [])),
+        )
