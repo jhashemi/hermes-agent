@@ -28,6 +28,18 @@ import llm_cluster_dispatcher as lcd
 # Fixtures / builders
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolated_breaker(tmp_path):
+    """Isolate the circuit breaker from the live production state file.
+
+    lcd._get_breaker() otherwise loads ~/.hermes/state/llm_dispatcher_breaker.json
+    — if production currently has the circuit OPEN, every llm_route test
+    short-circuits and fails. Each test gets a fresh CLOSED breaker in tmp.
+    """
+    lcd._BREAKER = lcd.CircuitBreaker(state_file=tmp_path / "breaker.json")
+    yield
+    lcd._BREAKER = None
+
 def make_telemetry(node_id="hermes1", cpu_count=16, load_1min=0.5,
                    mem_avail_gb=22.0, disk_free_pct=57.0, active_workers=0,
                    max_workers=16, heartbeat_age_s=0.0, status="healthy"):
