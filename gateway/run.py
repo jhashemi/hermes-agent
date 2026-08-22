@@ -11112,6 +11112,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # semantics, so only one gateway per host escalates.
         self._spawn_supervised(self._kanban_stall_watchdog, "kanban_stall_watchdog")
 
+        # Start background kanban block-recheck watchdog — auto-re-evaluates
+        # tickets stuck in `blocked` (crashed workers post-gave_up, cleared
+        # resource preconditions, expired time-gates, review-stale) and
+        # applies Policy A/B/C/D actions. FIX-7B / t_d9aec252. Gated by the
+        # same `kanban.dispatch_in_gateway` flag as the dispatcher plus its
+        # own `kanban.block_recheck_enabled` operator switch (default true).
+        self._spawn_supervised(self._kanban_block_recheck, "kanban_block_recheck")
+
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
             logger.info(
