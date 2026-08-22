@@ -3994,6 +3994,83 @@ def validate_assignee(assignee: Optional[str]) -> Optional[dict]:
     }
 
 
+# FIX-8: Assignee values that are always accepted even when they don't map to
+# an on-disk profile directory. ``default`` is the built-in root profile alias
+# handled by ``profile_exists`` already, but we list it here so this set is
+# the single source of truth for "known-good non-profile assignees" — future
+# routing-tier aliases (control-plane lanes like ``orion-cc``) can be added
+# here as they are approved without changing the validation code.
+KNOWN_ASSIGNEE_ALIASES: frozenset[str] = frozenset({"default"})
+
+
+def _list_known_profiles() -> list[str]:
+    """Return the list of on-disk profile names for the ``assignee_unknown``
+    event payload. Best-effort: any failure returns an empty list so a broken
+    profile store never blocks task creation. Deferred import to avoid the
+    circular ``hermes_cli.profiles`` → ``hermes_cli.kanban_db`` cycle at
+    module load time.
+    """
+    try:
+        from hermes_cli import profiles as _profiles_mod
+
+        names = list(_profiles_mod.list_profiles())
+        # ``list_profiles()`` may return ``Profile`` dataclasses or bare strings
+        # depending on the installed version — normalise to strings.
+        out: list[str] = []
+        for n in names:
+            if isinstance(n, str):
+                out.append(n)
+            else:
+                nm = getattr(n, "name", None)
+                if isinstance(nm, str):
+                    out.append(nm)
+        return sorted(set(out))
+    except Exception:
+        return []
+
+
+def _assignee_is_known(assignee: str) -> bool:
+    """Return True when ``assignee`` maps to a real profile or a known alias.
+
+    Deferred import isolates ``hermes_cli.profiles`` so tests can monkeypatch
+    it. When the profiles module fails to import (e.g. a broken install), we
+    err on the side of accepting the value — a validation regression in the
+    profile store should never break every ``create_task`` call.
+    """
+    if not assignee:
+        return True  # None / empty is handled elsewhere as "unassigned"
+    if assignee in KNOWN_ASSIGNEE_ALIASES:
+        return True
+    try:
+        from hermes_cli.profiles import profile_exists as _pe
+
+        return bool(_pe(assignee))
+    except Exception:
+        return True
+
+
+def _kanban_enforce_known_assignee() -> bool:
+    """Read the ``kanban.enforce_known_assignee`` feature flag from config.
+
+    Default False (soft-warn only): an unknown assignee logs a warning and
+    emits an ``assignee_unknown`` typed event, but the task lands with its
+    normally-computed status. Flipping to True enables hard-remediation:
+    unknown-assignee tasks are additionally force-routed to ``blocked``.
+    """
+    try:
+        from hermes_cli.config import load_config
+
+        kanban_cfg = (load_config().get("kanban") or {})
+    except Exception:
+        return False
+    val = kanban_cfg.get("enforce_known_assignee")
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
@@ -4055,6 +4132,18 @@ def create_task(
     in its own projects.db, a matching canonical project-linked task in this
     board can supply the repo and branch convention. Its literal worktree is
     never reused; the new task still gets its own task-id-keyed path.
+
+    FIX-8 (assignee validation): when ``assignee`` is set but doesn't map to
+    an on-disk Hermes profile OR a ``KNOWN_ASSIGNEE_ALIASES`` entry, an
+    ``assignee_unknown`` task event is ALWAYS emitted with payload
+    ``{proposed, known_profiles, reason, enforce_flag}`` so dashboards and
+    the block-recheck watchdog can surface the routing gap without silently
+    dropping the write. The dispatcher's ``skipped_nonspawnable`` bucket
+    previously ate these tasks in complete silence — this event closes that
+    hole. The ``kanban.enforce_known_assignee`` config flag (default False)
+    gates hard-remediation: when set to True, the task is additionally
+    force-routed to ``blocked`` regardless of the caller's requested
+    ``initial_status``.
     """
     model_override = (model_override or "").strip() or None
     provider_override = (provider_override or "").strip() or None
@@ -4091,6 +4180,39 @@ def create_task(
         raise ValueError(
             f"initial_status must be one of {sorted(VALID_INITIAL_STATUSES)}"
         )
+
+    # FIX-8: validate assignee against the profile registry. When ``assignee``
+    # is set but doesn't map to an on-disk profile OR a known alias, the task
+    # would otherwise land ``ready`` and be silently filtered out by the
+    # dispatcher (see ``skipped_nonspawnable`` in ``dispatch_once``). We
+    # ALWAYS emit an ``assignee_unknown`` typed event so dashboards / the
+    # block-recheck watchdog / operator surfaces see the routing gap.
+    #
+    # The ``kanban.enforce_known_assignee`` config flag gates the harder
+    # remediation: when True (opt-in), the task is force-routed to ``blocked``
+    # regardless of the caller's requested ``initial_status``. Default False
+    # is soft-warn only — the event fires but the task lands normally so
+    # existing test fixtures that use synthetic assignees (``alice``, ``bob``)
+    # keep working without opting into the flag. The 1-week soft-warn window
+    # documented in the FIX-8 ticket is the migration path to flipping this
+    # flag on globally.
+    _assignee_unknown = False
+    _assignee_known_profiles: list[str] = []
+    _enforce_known_assignee = False
+    if assignee and not _assignee_is_known(assignee):
+        _assignee_unknown = True
+        _assignee_known_profiles = _list_known_profiles()
+        _enforce_known_assignee = _kanban_enforce_known_assignee()
+        logger.warning(
+            "kanban_create: unknown assignee %r (not in known profiles/aliases). "
+            "assignee_unknown event will be emitted. enforce_known_assignee=%s",
+            assignee, _enforce_known_assignee,
+        )
+        if _enforce_known_assignee:
+            # Hard-enforce path: route the task into ``blocked`` regardless of
+            # the caller's requested ``initial_status``. This is the safe
+            # default once we've verified callers can't accidentally trip it.
+            initial_status = "blocked"
     if workspace_kind not in VALID_WORKSPACE_KINDS:
         raise ValueError(
             f"workspace_kind must be one of {sorted(VALID_WORKSPACE_KINDS)}, "
@@ -4416,6 +4538,25 @@ def create_task(
                         "provider_override": provider_override,
                     },
                 )
+                # FIX-8: surface the unknown-assignee decision as a typed
+                # event alongside ``created`` so dashboards, the block-recheck
+                # watchdog, and the assignee-audit surface can consume it
+                # without re-parsing the created payload.
+                if _assignee_unknown:
+                    _append_event(
+                        conn,
+                        task_id,
+                        "assignee_unknown",
+                        {
+                            "proposed": assignee,
+                            "known_profiles": _assignee_known_profiles,
+                            "reason": (
+                                f"unknown_assignee: {assignee}. "
+                                "Reassign to a valid profile."
+                            ),
+                            "enforce_flag": _enforce_known_assignee,
+                        },
+                    )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
         except sqlite3.IntegrityError:
@@ -10403,6 +10544,73 @@ def has_spawnable_review(conn: sqlite3.Connection) -> bool:
     return False
 
 
+# FIX-9 (t_7fa94b1b): rate-limit window for ``dispatch_skipped`` events.
+# The dispatcher runs on a ~60s tick. Without a rate limit each tick that
+# still can't spawn a ticket would append a fresh event, and a single
+# unspawnable ticket sitting in ``ready`` for a day would grow the events
+# table by ~1440 rows. Rate-limiting to at most one event per 15 minutes
+# per ticket keeps event volume proportional to state changes, not to
+# tick frequency, while still giving the stall-watchdog enough signal
+# to fire (its trigger window is also 15m — this alignment is
+# intentional).
+DISPATCH_SKIPPED_RATE_LIMIT_S = 900  # 15 minutes
+
+
+def _emit_dispatch_skipped(
+    conn: sqlite3.Connection,
+    task_id: str,
+    reason: str,
+    *,
+    assignee: Optional[str] = None,
+    sweep_run_iso: Optional[str] = None,
+    extra: Optional[dict] = None,
+    now: Optional[int] = None,
+    rate_limit_s: int = DISPATCH_SKIPPED_RATE_LIMIT_S,
+) -> bool:
+    """Append a rate-limited ``dispatch_skipped`` event for ``task_id``.
+
+    ``reason`` is a short machine-readable code — currently one of
+    ``unassigned`` (no assignee and no ``kanban.default_assignee``),
+    ``assign_failed`` (default-assignee UPDATE raised), ``unknown_profile``
+    (assignee is not a real Hermes profile — matches the
+    ``skipped_nonspawnable`` bucket), or ``per_profile_capped``
+    (assignee is already at ``kanban.max_in_progress_per_profile``).
+
+    Rate limit: if the same ticket already has a ``dispatch_skipped``
+    event newer than ``now - rate_limit_s``, do NOT emit — return False
+    so the caller can accumulate the miss into telemetry without
+    flooding the event log.  Return True when an event was written.
+
+    Caller MUST already be inside a ``write_txn`` — this appends via
+    ``_append_event`` which requires the ambient transaction.
+    """
+    _now = int(now if now is not None else time.time())
+    cutoff = _now - int(rate_limit_s)
+    row = conn.execute(
+        "SELECT 1 FROM task_events "
+        "WHERE task_id = ? AND kind = 'dispatch_skipped' "
+        "  AND created_at >= ? LIMIT 1",
+        (task_id, cutoff),
+    ).fetchone()
+    if row is not None:
+        return False
+    payload: dict = {"reason": reason}
+    if assignee is not None:
+        payload["assignee"] = assignee
+    if sweep_run_iso is not None:
+        payload["sweep_run"] = sweep_run_iso
+    if extra:
+        # Caller-supplied context (e.g. running_count for
+        # per_profile_capped). Keep payloads bounded — dispatcher runs
+        # forever, event rows are durable.
+        for k, v in extra.items():
+            if k in payload:
+                continue
+            payload[k] = v
+    _append_event(conn, task_id, "dispatch_skipped", payload)
+    return True
+
+
 def dispatch_once(
     conn: sqlite3.Connection,
     *,
@@ -10626,6 +10834,11 @@ def _dispatch_once_locked(
             # bucket it as nonspawnable if the profile genuinely isn't
             # there, with the existing diagnostic.
             _default_assignee_resolved = True
+    # FIX-9 (t_7fa94b1b): shared iso timestamp for every ``dispatch_skipped``
+    # event emitted in this tick, so aggregating dashboards can group
+    # per-sweep skips deterministically.
+    from datetime import datetime as _dt, timezone as _tz
+    _sweep_run_iso = _dt.now(_tz.utc).isoformat()
     for row in ready_rows:
         if max_spawn is not None and running_count + spawned >= max_spawn:
             break
@@ -10667,11 +10880,44 @@ def _dispatch_once_locked(
                             _default_assignee, row["id"], exc_info=True,
                         )
                         result.skipped_unassigned.append(row["id"])
+                        # FIX-9 (t_7fa94b1b): emit visibility event so the
+                        # stall-watchdog and dashboards can see this silent
+                        # skip. Wrapped in its own try so an emit failure
+                        # doesn't abort the whole dispatch tick.
+                        try:
+                            with write_txn(conn):
+                                _emit_dispatch_skipped(
+                                    conn, row["id"], "assign_failed",
+                                    assignee=_default_assignee,
+                                    sweep_run_iso=_sweep_run_iso,
+                                )
+                        except Exception:
+                            _log.debug(
+                                "kanban dispatch: dispatch_skipped emit failed "
+                                "for %s (assign_failed)", row["id"], exc_info=True,
+                            )
                         continue
                 row_assignee = _default_assignee
                 result.auto_assigned_default.append(row["id"])
             else:
                 result.skipped_unassigned.append(row["id"])
+                # FIX-9 (t_7fa94b1b): no assignee and no
+                # ``kanban.default_assignee`` configured — ticket sits in
+                # ready forever without a signal. Emit (rate-limited) so
+                # the stall-watchdog (FIX-6) can auto-escalate after 1h.
+                if not dry_run:
+                    try:
+                        with write_txn(conn):
+                            _emit_dispatch_skipped(
+                                conn, row["id"], "unassigned",
+                                assignee=None,
+                                sweep_run_iso=_sweep_run_iso,
+                            )
+                    except Exception:
+                        _log.debug(
+                            "kanban dispatch: dispatch_skipped emit failed "
+                            "for %s (unassigned)", row["id"], exc_info=True,
+                        )
                 continue
         # Skip ready tasks whose assignee is not a real Hermes profile.
         # `_default_spawn` invokes ``hermes -p <assignee>`` which fails
@@ -10695,6 +10941,25 @@ def _dispatch_once_locked(
             # multi-lane setups where the ready queue is steadily full
             # of human-pulled work.
             result.skipped_nonspawnable.append(row["id"])
+            # FIX-9 (t_7fa94b1b): emit ``dispatch_skipped`` so the
+            # stall-watchdog (FIX-6) has a trigger event for these
+            # otherwise-silent skips. Rate-limited (15m) so control-plane
+            # lanes that are ALWAYS unspawnable don't flood the events
+            # table — the stall-watchdog's recent-event window is also
+            # 15m so alignment is intentional.
+            if not dry_run:
+                try:
+                    with write_txn(conn):
+                        _emit_dispatch_skipped(
+                            conn, row["id"], "unknown_profile",
+                            assignee=row_assignee,
+                            sweep_run_iso=_sweep_run_iso,
+                        )
+                except Exception:
+                    _log.debug(
+                        "kanban dispatch: dispatch_skipped emit failed "
+                        "for %s (unknown_profile)", row["id"], exc_info=True,
+                    )
             continue
         # Per-profile concurrency cap (#21582): even if there's global
         # headroom, refuse to spawn for an assignee that's already at
@@ -10708,6 +10973,30 @@ def _dispatch_once_locked(
                 result.skipped_per_profile_capped.append(
                     (row["id"], row_assignee, current)
                 )
+                # FIX-9 (t_7fa94b1b): capped tickets sit in ready until
+                # a peer completes — without a signal the stall-watchdog
+                # can't distinguish "waiting on cap" from "genuinely
+                # stuck". Emit a dispatch_skipped so a persistent cap
+                # (peer is deadlocked, cap misconfigured to 0, etc.)
+                # eventually surfaces via FIX-6 auto-escalation.
+                if not dry_run:
+                    try:
+                        with write_txn(conn):
+                            _emit_dispatch_skipped(
+                                conn, row["id"], "per_profile_capped",
+                                assignee=row_assignee,
+                                sweep_run_iso=_sweep_run_iso,
+                                extra={
+                                    "running_count": current,
+                                    "cap": _per_profile_cap,
+                                },
+                            )
+                    except Exception:
+                        _log.debug(
+                            "kanban dispatch: dispatch_skipped emit failed "
+                            "for %s (per_profile_capped)", row["id"],
+                            exc_info=True,
+                        )
                 continue
         # Respawn guard: refuse to re-spawn when useful work is already
         # in-flight/recent, or when the last failure is a deterministic
