@@ -1124,6 +1124,24 @@ Isolation model:
   same task (default: 2), the dispatcher auto-blocks it to prevent spin
   loops.
 
+Assignee validation (FIX-8):
+- Tasks created with an assignee that doesn't map to an on-disk profile
+  or a `KNOWN_ASSIGNEE_ALIASES` entry (currently just `default`) emit a
+  typed `assignee_unknown` task event alongside the standard `created`
+  event, with payload `{proposed, known_profiles, reason, enforce_flag}`.
+  This closes the silent-drop hole where a mistyped assignee would land
+  a task in `ready` and then the dispatcher would filter it into the
+  `skipped_nonspawnable` bucket forever with no operator signal.
+- `kanban.enforce_known_assignee: false` (default) is soft-warn mode:
+  the event fires and a `logger.warning` is emitted, but the task lands
+  with its normally-computed status. This preserves existing test
+  fixtures that use synthetic assignees (`alice`, `bob`, `orion-cc`).
+- `kanban.enforce_known_assignee: true` flips on hard-remediation: the
+  task is additionally force-routed to `blocked` regardless of the
+  caller's requested `initial_status`. Flip this after a soft-warn
+  observation window has cleared out accidental mis-assignments in the
+  fleet.
+
 Full user-facing docs: `website/docs/user-guide/features/kanban.md`.
 
 ---
