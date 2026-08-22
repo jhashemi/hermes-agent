@@ -117,6 +117,21 @@ def _load_facade() -> tuple[Optional[Any], Optional[Any]]:
 
 _DUCK_CONNS: dict[str, Any] = {}
 
+# Paths where opening the DuckDB mirror already failed with a benign lock
+# contention (another hermes process on the same host holds the mirror's
+# exclusive DuckDB file lock). Once we've logged this once for a given
+# path, we short-circuit further connect attempts on the same process:
+# retrying only replays the same IOException. Recorded lazily below.
+_DUCK_LOCK_CONTENDED: set[str] = set()
+
+# Signature substring used to identify DuckDB single-writer file-lock
+# contention. Matches ERR-DRIVE-01 signature class "IO Error: Could not
+# set lock on file ... Conflicting lock is held". This is a chronic
+# multi-process condition on shared hosts; it is not a bug and must not
+# spam ERROR-level tracebacks into errors.log (which then feed back
+# into the ERR-DRIVE-01 auto-triage probe).
+_DUCK_LOCK_SIGNATURE = "Conflicting lock is held"
+
 
 def _sqlite_path_for(conn: sqlite3.Connection) -> Optional[Path]:
     """Recover the on-disk SQLite path from a live connection.
@@ -146,13 +161,33 @@ def _duck_conn_for(conn: sqlite3.Connection) -> Optional[Any]:
     key = str(p.resolve())
     duck = _DUCK_CONNS.get(key)
     if duck is None:
+        # Short-circuit if this path already lost the file-lock race in
+        # this process. Retrying only re-produces the same IOException;
+        # the SQLite primary path is authoritative, mirror is best-effort.
+        if key in _DUCK_LOCK_CONTENDED:
+            return None
         try:
             duck = adapter.connect(adapter.duckdb_kanban_path(p))
             _DUCK_CONNS[key] = duck
-        except Exception:  # pragma: no cover — mirror failure only
-            logger.exception(
-                "kanban dual-write: failed to open DuckDB mirror for %s", p,
-            )
+        except Exception as exc:  # pragma: no cover — mirror failure only
+            msg = str(exc)
+            if _DUCK_LOCK_SIGNATURE in msg:
+                # Benign multi-process contention (ERR-DRIVE-01 known
+                # signature). Log once per (process, path) at WARNING
+                # without a traceback and remember so we don't retry.
+                _DUCK_LOCK_CONTENDED.add(key)
+                logger.warning(
+                    "kanban dual-write: DuckDB mirror for %s locked by "
+                    "another hermes process on this host; mirror disabled "
+                    "for this process (SQLite primary path unaffected). %s",
+                    p, msg.splitlines()[0] if msg else "",
+                )
+            else:
+                # Genuinely novel mirror failure — keep full traceback.
+                logger.exception(
+                    "kanban dual-write: failed to open DuckDB mirror for %s",
+                    p,
+                )
             duck = None
     return duck
 
