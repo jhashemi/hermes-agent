@@ -76,7 +76,12 @@ logger = logging.getLogger(__name__)
 # ``dependency_wait`` is emitted by ``block_task(kind='dependency')``
 # when a worker or the parent-gate machinery routes a ticket back to
 # ``todo`` while waiting on peers.
-_TRIGGER_KINDS = ("claim_rejected", "dependency_wait")
+# ``dispatch_skipped`` (FIX-9, t_7fa94b1b) is emitted by
+# ``dispatch_once`` for silent-skip cases that never even reach the
+# claim step — unknown_profile, unassigned, per_profile_capped,
+# assign_failed. Without this trigger the ticket sits in ``ready``
+# forever with zero visible signal.
+_TRIGGER_KINDS = ("claim_rejected", "dependency_wait", "dispatch_skipped")
 
 # Statuses we're willing to auto-escalate. running/blocked/triage/done
 # are all off-limits — a running task has a live worker (blocking it
@@ -220,14 +225,14 @@ def _already_escalated(
 
 def _extract_reason(event_payload_json: Optional[str]) -> str:
     """Pull a short reason string out of a ``claim_rejected`` /
-    ``dependency_wait`` payload for the human-facing comment.
+    ``dependency_wait`` / ``dispatch_skipped`` payload for the
+    human-facing comment.
 
-    ``claim_rejected`` payloads always carry ``{"reason": "..."}``
-    (see ``dispatch_once`` in kanban_db.py). ``dependency_wait``
-    payloads carry ``{"reason": "...", "kind": "dependency", ...}``.
-    Fall back to ``"unknown"`` if payload is missing or unparseable —
-    the sweep is best-effort; a missing reason string must not block
-    escalation.
+    All three payload shapes carry ``{"reason": "...", ...}`` (see
+    ``dispatch_once`` and ``_emit_dispatch_skipped`` in kanban_db.py,
+    and ``block_task`` for ``dependency_wait``). Fall back to
+    ``"unknown"`` if payload is missing or unparseable — the sweep is
+    best-effort; a missing reason string must not block escalation.
     """
     if not event_payload_json:
         return "unknown"
