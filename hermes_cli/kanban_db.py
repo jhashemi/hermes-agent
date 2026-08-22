@@ -424,6 +424,78 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
+def _collect_completing_veto(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    summary: Optional[str],
+    result: Optional[str],
+    metadata: Optional[dict],
+) -> tuple[Optional[str], Optional[str]]:
+    """Fire the ``kanban_task_completing`` pre-hook and collect any veto.
+
+    Returns
+    -------
+    (reason, source) : tuple[Optional[str], Optional[str]]
+        ``(None, None)`` when no callback vetoed (green-light path).
+        ``(reason, source)`` when at least one callback returned
+        ``{"veto": True, "reason": "..."}``. When multiple callbacks veto,
+        their reasons are joined with '; ' and ``source`` is a comma-joined
+        list of the reporting callback labels.
+
+    Semantics:
+
+    * A callback returning a non-dict, a dict without ``veto: True``, or
+      ``None`` is an abstention. Only a dict with truthy ``veto`` counts.
+    * The ``invoke_hook`` machinery already swallows exceptions per
+      callback (fail-open) — a raising callback cannot block completions.
+    * When lifecycle dispatch is itself unreachable (import error,
+      registry missing), we fail open with ``(None, None)`` so the
+      completion path stays resilient to plugin infrastructure faults.
+    """
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+        from hermes_cli.profiles import get_active_profile_name
+        try:
+            profile_name = get_active_profile_name()
+        except Exception:
+            profile_name = "default"
+        task = get_task(conn, task_id)
+        results = invoke_hook(
+            "kanban_task_completing",
+            task_id=task_id,
+            board=get_current_board(),
+            assignee=task.assignee if task else None,
+            profile_name=profile_name,
+            summary=summary,
+            result=result,
+            metadata=metadata,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban_task_completing dispatch failed: %s", exc)
+        return None, None
+
+    reasons: list[str] = []
+    sources: list[str] = []
+    for entry in results or []:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("veto"):
+            continue
+        reason = str(entry.get("reason", "")).strip()
+        if not reason:
+            reason = "completion vetoed (no reason provided)"
+        source = str(entry.get("source", "")).strip() or None
+        reasons.append(reason)
+        if source:
+            sources.append(source)
+    if not reasons:
+        return None, None
+    combined_reason = "; ".join(reasons)
+    combined_source = ",".join(sources) if sources else None
+    return combined_reason, combined_source
+
+
 # A running task's claim is valid for 15 minutes by default; after that the
 # next dispatcher tick reclaims it. Workers that outlive this window should
 # call ``heartbeat_claim(task_id)`` periodically. In practice most kanban
@@ -5629,6 +5701,45 @@ class HallucinatedCardsError(ValueError):
         )
 
 
+class CompletionEvidenceRejected(ValueError):
+    """Raised by ``complete_task`` when a ``kanban_task_completing``
+    pre-hook callback vetoes the completion (VFE-COMPLETE-01 hard-gate).
+
+    ``.reason`` carries the human-readable reason(s) from the vetoing
+    plugin(s). ``.veto_source`` is a short label identifying which
+    callback(s) refused. Kept as a ``ValueError`` subclass so the
+    existing tool-error handlers treat it as a recoverable user error
+    (worker retries with corrected metadata) rather than a runtime crash.
+
+    Semantics:
+
+    * Task state is NOT mutated when this is raised — the veto runs
+      BEFORE the completion write txn.
+    * An audit event ``completion_blocked_evidence`` is emitted on the
+      task in its own dedicated txn (same pattern as
+      ``completion_blocked_hallucination``) so the rejected attempt is
+      durable and inspectable via ``kanban_show`` events.
+    * A callback that RAISES is treated as fail-open (logged, ignored) —
+      only a well-formed veto dict rejects a completion. This protects
+      the completion path from buggy policy plugins.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        completing_task_id: str,
+        *,
+        veto_source: Optional[str] = None,
+    ):
+        self.reason = str(reason).strip() or "completion vetoed (no reason provided)"
+        self.completing_task_id = completing_task_id
+        self.veto_source = veto_source
+        source_suffix = f" [{veto_source}]" if veto_source else ""
+        super().__init__(
+            f"completion blocked: {self.reason}{source_suffix}"
+        )
+
+
 class ArtifactPreservationError(RuntimeError):
     """Raised when a declared scratch deliverable cannot be preserved."""
 
@@ -5702,6 +5813,38 @@ def complete_task(
             raise HallucinatedCardsError(phantom_cards, task_id)
     else:
         verified_cards = []
+
+    # Gate: VFE-COMPLETE-01 pre-completion veto hook. Fires BEFORE any
+    # write to the task row. Plugins registered on
+    # ``kanban_task_completing`` may return {"veto": True, "reason": ...}
+    # to reject the completion — commonly used to enforce that structured
+    # verification metadata (artifacts, commit_hashes, deployed_services,
+    # cross_host_propagation) is present and passes checks. Callbacks
+    # that raise are treated as fail-open (see ``invoke_hook`` swallow).
+    # See ``CompletionEvidenceRejected`` for full contract.
+    veto_reason, veto_source = _collect_completing_veto(
+        conn, task_id,
+        summary=summary, result=result, metadata=metadata,
+    )
+    if veto_reason is not None:
+        preview = (summary or result or "").strip().splitlines()
+        preview = preview[0][:200] if preview else None
+        with write_txn(conn):
+            _append_event(
+                conn, task_id, "completion_blocked_evidence",
+                {
+                    "reason": veto_reason,
+                    "veto_source": veto_source,
+                    "summary_preview": preview,
+                    "metadata_keys": (
+                        sorted(metadata.keys())
+                        if isinstance(metadata, dict) else None
+                    ),
+                },
+            )
+        raise CompletionEvidenceRejected(
+            veto_reason, task_id, veto_source=veto_source,
+        )
 
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
