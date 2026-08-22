@@ -1953,6 +1953,27 @@ class PluginManager:
         persisted to session DB.
         """
         kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        # Optional defense-in-depth: if the caller reached us before
+        # ``discover_and_load`` has run in this process (e.g. a fresh CLI
+        # subprocess that skipped the normal startup path but is now
+        # dispatching a kanban tool), trigger discovery lazily so
+        # registered plugins can still respond.  Opt-in via env var
+        # because eager mid-invoke discovery mutates registrations in
+        # ways that break tests which drive the manager directly with
+        # a hand-crafted registry.  Set
+        # ``HERMES_ENABLE_LAZY_HOOK_DISCOVERY=1`` to enable in production
+        # workers that skip the CLI's normal startup path.
+        if (
+            not self._discovered
+            and env_var_enabled("HERMES_ENABLE_LAZY_HOOK_DISCOVERY")
+        ):
+            try:
+                self.discover_and_load(force=False)
+            except Exception as exc:
+                logger.debug(
+                    "lazy discovery on invoke_hook(%s) failed: %s",
+                    hook_name, exc,
+                )
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:
