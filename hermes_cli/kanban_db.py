@@ -341,6 +341,59 @@ def _board_slug_from_db_path(db_path: Path) -> str:
     return "unknown"
 
 
+# ---------------------------------------------------------------------------
+# Prometheus counter for corruption quarantine events — VFE-KANBAN-CORRUPTION-02
+# (t_e43d89e8). Registers on the default ``prometheus_client`` REGISTRY, the
+# same one ``hermes_kanban_block_recheck_*_total`` uses in
+# :mod:`hermes_cli.kanban_block_recheck`. Any process that renders that
+# registry (a plugin like ``kanban-rule-distiller``'s ``:9097/metrics``, a
+# gateway sidecar, or an ops-owned ``start_http_server(...)``) will now
+# expose ``hermes_kanban_db_corrupt_quarantine_total{board=...}`` for free.
+#
+# Import guarded because ``prometheus_client`` is NOT a hard dep of
+# hermes-agent core — deployments without it (all CI runs, most laptop
+# installs) must still see quarantine events via the structured log record
+# and the lifecycle hook. A missing import must never brick the quarantine
+# path itself.
+try:
+    from prometheus_client import Counter as _PromCounter  # type: ignore
+
+    _KANBAN_DB_CORRUPT_QUARANTINE_TOTAL = _PromCounter(
+        "hermes_kanban_db_corrupt_quarantine_total",
+        (
+            "Total kanban DB quarantine events "
+            "(each ``.corrupt.<hash>.bak`` rename by "
+            "``_guard_existing_db_is_healthy`` / ``repair_db``). "
+            "Board label carries the board slug the corrupt DB belonged to."
+        ),
+        ["board"],
+    )
+except Exception:  # pragma: no cover - metrics are optional
+    _KANBAN_DB_CORRUPT_QUARANTINE_TOTAL = None
+
+
+def _observe_corrupt_quarantine(board: str) -> None:
+    """Bump the corruption-quarantine counter for ``board``. No-op when missing.
+
+    Isolated in its own function so every failure mode — missing
+    ``prometheus_client``, transient registry failure, a broken relabelling
+    on an operator's fork — swallows silently. A missing metric must never
+    interfere with the actual quarantine of a corrupt DB.
+    """
+    if _KANBAN_DB_CORRUPT_QUARANTINE_TOTAL is None:
+        return
+    try:
+        _KANBAN_DB_CORRUPT_QUARANTINE_TOTAL.labels(board=board or "unknown").inc()
+    except Exception:  # pragma: no cover - metrics must never break quarantine
+        # Defensive; a broken metrics observer must not block the caller.
+        try:
+            _log.debug(
+                "kanban_db_corrupt_quarantine_total inc failed", exc_info=True
+            )
+        except Exception:
+            pass
+
+
 def _notify_corrupt_quarantine(
     db_path: Path,
     backup_path: Optional[Path],
@@ -348,7 +401,7 @@ def _notify_corrupt_quarantine(
 ) -> None:
     """Emit observability signals for a kanban DB corruption quarantine.
 
-    Every ``.corrupt.<hash>.bak`` event fires TWO always-on signals:
+    Every ``.corrupt.<hash>.bak`` event fires THREE always-on signals:
 
     1. A structured WARNING log record on the ``hermes_cli.kanban_db``
        logger with the extras ``{event, board, db_path, backup_path,
@@ -358,9 +411,15 @@ def _notify_corrupt_quarantine(
        observers and plugins can translate it into a Prometheus counter,
        NATS event, alertmanager page, or whatever the deployment prefers,
        WITHOUT adding a prometheus/NATS dep to hermes-agent core.
+    3. The ``hermes_kanban_db_corrupt_quarantine_total{board=...}``
+       Prometheus counter on the default registry (silently no-op if
+       ``prometheus_client`` is not installed). This is the metric the
+       gateway ``/metrics`` scrape picks up so future recurrences of the
+       corruption cascade RCA'd in ``t_45b3ee37`` alarm without needing a
+       human to tail journalctl for the WARNING log lines.
 
-    Both surfaces are best-effort — a broken observer must never stop us
-    from quarantining a corrupt DB. ``task_id=""`` because a corruption
+    All three surfaces are best-effort — a broken observer must never stop
+    us from quarantining a corrupt DB. ``task_id=""`` because a corruption
     event is board-scoped, not task-scoped; downstream consumers should
     key on ``board`` and ``db_path``.
     """
@@ -397,6 +456,15 @@ def _notify_corrupt_quarantine(
         )
     except Exception:  # pragma: no cover - already best-effort inside the fn
         pass
+    # Signal 3: Prometheus counter on the default registry. Fires exactly
+    # once per quarantine event because ``_notify_corrupt_quarantine`` is the
+    # single funnel every ``.corrupt.<hash>.bak`` rename site
+    # (``_guard_existing_db_is_healthy`` at 2523, ``repair_db`` at 2628 and
+    # 2643) reaches. ``_observe_corrupt_quarantine`` itself is fully
+    # exception-swallowing — missing ``prometheus_client``, a broken
+    # relabelling, transient registry failure all no-op silently so the
+    # metric never blocks the actual quarantine.
+    _observe_corrupt_quarantine(board)
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
