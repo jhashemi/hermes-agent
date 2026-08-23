@@ -1,0 +1,70 @@
+# Kanban DB corrupt-quarantine paging alert (VFE-KANBAN-CORRUPTION-02, t_09bf9d6c).
+#
+# Metric: hermes_kanban_db_corrupt_quarantine_total{board="..."}
+# Source: hermes_cli/kanban_db.py (_notify_corrupt_quarantine funnel)
+# Exporter: ops/prometheus/kanban_db_quarantine_exporter.py  :9485/metrics
+#
+# This alert fires the moment any board accumulates ≥1 new quarantine event in
+# a 15-minute window.  Root cause is the SQLite 3.45.1 WAL-reset bug; while the
+# interim cycle-breaker (see runbook below) is in place it suppresses recurrence
+# under normal load, but the counter firing means something slipped through.
+#
+# Deployment
+# ----------
+# Copy (or symlink) this file to /etc/prometheus/rules/ — the live prometheus.yml
+# already has `rule_files: ["/etc/prometheus/rules/*.yml"]`. Then reload:
+#
+#   sudo systemctl reload prometheus.service
+#   # or: curl -X POST http://localhost:9090/-/reload
+#
+# Validate before deploy:
+#   promtool check rules ops/prometheus/rules/kanban_db_quarantine_alerts.yml
+#
+# Rollback: rm /etc/prometheus/rules/kanban_db_quarantine_alerts.yml + reload.
+
+groups:
+  - name: kanban_db_quarantine
+    interval: 60s
+    rules:
+      - alert: HermesKanbanDbCorruptQuarantine
+        # Fires whenever a new quarantine event lands on any board within a 15m
+        # window.  `increase()` is used (not `rate() > 0`) so a single counter
+        # increment — which would produce a tiny fractional rate — still fires.
+        expr: increase(hermes_kanban_db_corrupt_quarantine_total[15m]) > 0
+        # No `for:` clause — fire immediately.  A quarantine event is already a
+        # post-hoc signal (the DB rename has happened); there is no value in
+        # waiting to confirm the alert is "sustained".
+        labels:
+          severity: page
+          component: kanban-db
+          ticket: t_09bf9d6c
+        annotations:
+          summary: >-
+            Kanban DB quarantine event on board {{ $labels.board }}
+            ({{ $value | printf "%.0f" }} in last 15m)
+          description: |
+            hermes_kanban_db_corrupt_quarantine_total for board="{{ $labels.board }}"
+            increased by {{ $value | printf "%.0f" }} in the last 15 minutes.
+
+            Root cause: SQLite 3.45.1 WAL-reset bug (see t_45b3ee37 for full RCA).
+            The corrupt DB has been renamed to a .corrupt.<hash>.bak file — the
+            kanban dispatcher will reinitialise on next access.
+
+            --- RUNBOOK ---
+
+            1. Interim cycle-breaker (idempotent, safe to run immediately):
+               python3 /home/ubuntu/.hermes/scripts/kanban_wal_reset_break_cycle.py
+
+            2. Verify repair on the affected board:
+               sqlite3 ~/.hermes/kanban/boards/{{ $labels.board }}/kanban.db \
+                 "PRAGMA integrity_check; PRAGMA journal_mode;"
+
+            3. Check for additional .corrupt.*.bak artefacts:
+               ls -la ~/.hermes/kanban/boards/{{ $labels.board }}/
+
+            4. Full RCA and systemic fix tracking: ticket t_45b3ee37
+
+            5. If recurrence persists, the SQLite runtime upgrade (ADR-014) is the
+               permanent fix. Verify current SQLite version:
+               python3 -c "import sqlite3; print(sqlite3.sqlite_version)"
+               Target ≥ 3.51.3 (see ADR-014 at docs/adr/ADR-014-sqlite-runtime-upgrade-path.md).
