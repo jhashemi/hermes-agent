@@ -874,6 +874,20 @@ def _handle_block(args: dict, **kw) -> str:
         waiting_for_event = str(waiting_for_event).strip() if waiting_for_event else None
     if waiting_for_condition:
         waiting_for_condition = str(waiting_for_condition).strip() if waiting_for_condition else None
+    # ``unblocks`` — optional list of child ids to atomically promote
+    # to ready as part of this block. Filter to strings, strip, dedupe.
+    unblocks_raw = args.get("unblocks")
+    unblocks: list[str] = []
+    if isinstance(unblocks_raw, list):
+        _seen: set[str] = set()
+        for _x in unblocks_raw:
+            if not isinstance(_x, str):
+                continue
+            _s = _x.strip()
+            if not _s or _s in _seen:
+                continue
+            _seen.add(_s)
+            unblocks.append(_s)
     
     try:
         kb, conn = _connect(board=board)
@@ -915,6 +929,7 @@ def _handle_block(args: dict, **kw) -> str:
                 waiting_for_commit=waiting_for_commit,
                 waiting_for_event=waiting_for_event,
                 waiting_for_condition=waiting_for_condition,
+                unblocks=unblocks or None,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1866,6 +1881,25 @@ KANBAN_BLOCK_SCHEMA = {
                 "description": (
                     "Optional: human-readable predicate describing what "
                     "condition must be met for unblocking (for L3 rechecker audit)."
+                ),
+            },
+            "unblocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional: child task ids to atomically promote to "
+                    "'ready' as part of this block. Use this when your "
+                    "block IS a handoff to a review child (i.e. "
+                    "``waiting_for`` names that child) — the review "
+                    "child inherits your parent-gate, so naming it "
+                    "here guarantees it lands in the dispatcher's "
+                    "queue instead of stalling in 'todo'. Each id "
+                    "must already be linked as a child of this task; "
+                    "ids that fail preconditions (wrong parent, not "
+                    "in todo/blocked, own governance gate, sticky "
+                    "block, unresolved dependency) are recorded in "
+                    "the block event and skipped without failing the "
+                    "block itself."
                 ),
             },
             "board": _board_schema_prop(),

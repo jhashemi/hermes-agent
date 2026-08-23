@@ -4628,6 +4628,115 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
 _GOVERNANCE_BLOCK_KINDS: frozenset[str] = frozenset({"needs_input", "capability"})
 
 
+def _parent_blocked_waiting_for_child(
+    conn: sqlite3.Connection, parent_id: str, child_id: str,
+) -> bool:
+    """Return True when ``parent_id`` is governance-blocked and the block
+    event names ``child_id`` in its ``waiting_for`` payload.
+
+    Fixes the review-child deadlock (task ``t_40375cc9`` RCA): a review-
+    required parent that emits ``kanban_block(kind='needs_input',
+    waiting_for=<review_child_id>)`` is waiting for the child to run.
+    But the parent still gates the child's promotion because the child
+    was created with ``parents=[parent_id]``. Without this exception the
+    review child sits in ``todo`` forever, invisible to the dispatcher
+    (which only scans ``status='ready'``), and to ``kanban list``
+    (which categorises by status, not by graph state).
+
+    Scoping — three intersected predicates so the exception applies to
+    exactly the intended pattern and no other:
+
+    * ``parent.status == 'blocked'``. A parent still ``ready`` /
+      ``running`` gates normally (it has not asked the child to
+      unblock it); a parent already ``done`` / ``archived`` never
+      gated to begin with.
+
+    * The most recent ``blocked`` event on the parent has payload
+      ``kind`` in :data:`_GOVERNANCE_BLOCK_KINDS`. Dependency blocks
+      (``kind='dependency'``) explicitly wait on OTHER tasks — they
+      must never claim to "wait on" a child of the same graph edge, or
+      cycles emerge. Loop-detected escalations (routed to ``triage``)
+      are also excluded: those need human triage, not silent child
+      unblocking.
+
+    * The block event's ``waiting_for`` payload equals ``child_id``
+      exactly. A block that names some OTHER task in ``waiting_for``
+      (or omits ``waiting_for``) still gates this child normally.
+
+    All three conditions are checked in one JSON-shaped query for
+    cheapness. Returns ``False`` on any lookup miss so the caller
+    falls back to the normal "parent must be done" gate — the
+    conservative direction.
+    """
+    if not parent_id or not child_id:
+        return False
+    # The parent must be sitting in ``blocked`` right now. A row that
+    # has been flipped back to ``todo`` / ``running`` / ``done`` no
+    # longer has any legitimate "waiting on child" contract.
+    row = conn.execute(
+        "SELECT status FROM tasks WHERE id = ?",
+        (parent_id,),
+    ).fetchone()
+    if row is None or row["status"] != "blocked":
+        return False
+    # Compute the most recent unblock id so we only consider a block
+    # event that is CURRENTLY in force. Symmetric with
+    # ``_has_outstanding_governance_gate``.
+    unblock_row = conn.execute(
+        "SELECT id FROM task_events "
+        "WHERE task_id = ? AND kind = 'unblocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (parent_id,),
+    ).fetchone()
+    last_unblock_id = int(unblock_row["id"]) if unblock_row else 0
+    blocked_row = conn.execute(
+        "SELECT id, "
+        "  json_extract(payload, '$.kind') AS bk, "
+        "  json_extract(payload, '$.waiting_for') AS wf "
+        "FROM task_events "
+        "WHERE task_id = ? AND kind = 'blocked' "
+        "ORDER BY id DESC LIMIT 1",
+        (parent_id,),
+    ).fetchone()
+    if blocked_row is None:
+        return False
+    if int(blocked_row["id"]) <= last_unblock_id:
+        return False
+    if blocked_row["bk"] not in _GOVERNANCE_BLOCK_KINDS:
+        return False
+    wf = blocked_row["wf"]
+    if not wf or str(wf).strip() != str(child_id).strip():
+        return False
+    return True
+
+
+def _effective_parent_status(
+    conn: sqlite3.Connection, parent_id: str, parent_status: str, child_id: str,
+) -> str:
+    """Return the parent status that the child-gate should observe.
+
+    When the parent is governance-blocked and the block names this
+    exact ``child_id`` in ``waiting_for``, the parent is *waiting on*
+    the child — the graph edge is functionally reversed for this
+    single blocked interval. Return ``'done'`` so the standard
+    "all parents in ('done','archived')" gate stops holding the
+    child hostage. Otherwise return the real status.
+
+    This helper exists so both the row-scanning path in
+    ``recompute_ready`` (which already has ``p.status`` in hand) and
+    the SQL-first path in ``claim_task`` / ``unblock_task`` (which
+    reject on any undone parent) can share one definition of "which
+    parents actually gate this child".
+    """
+    if parent_status in ("done", "archived"):
+        return parent_status
+    if parent_status == "blocked" and _parent_blocked_waiting_for_child(
+        conn, parent_id, child_id,
+    ):
+        return "done"
+    return parent_status
+
+
 def _has_outstanding_governance_gate(
     conn: sqlite3.Connection, task_id: str,
 ) -> bool:
@@ -5023,12 +5132,20 @@ def recompute_ready(
             ):
                 continue
             parents = conn.execute(
-                "SELECT t.status FROM tasks t "
+                "SELECT t.id AS parent_id, t.status FROM tasks t "
                 "JOIN task_links l ON l.parent_id = t.id "
                 "WHERE l.child_id = ?",
                 (task_id,),
             ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            # Apply the "parent is blocked waiting on THIS child" exception
+            # so review-child promotion doesn't deadlock. See
+            # ``_effective_parent_status`` for the full contract.
+            if all(
+                _effective_parent_status(
+                    conn, p["parent_id"], p["status"], task_id,
+                ) in ("done", "archived")
+                for p in parents
+            ):
                 if cur_status == "blocked":
                     # Don't auto-recover tasks that have hit the
                     # circuit-breaker failure limit.  Without this
@@ -5090,11 +5207,20 @@ def claim_task(
         # actually finish. See RCA at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
         undone = conn.execute(
-            "SELECT 1 FROM task_links l "
+            "SELECT l.parent_id, p.status FROM task_links l "
             "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') LIMIT 1",
+            "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived')",
             (task_id,),
-        ).fetchone()
+        ).fetchall()
+        # Filter out parents that are governance-blocked waiting on THIS
+        # child (review-child pattern) — those don't gate. See
+        # ``_effective_parent_status``.
+        undone = [
+            row for row in undone
+            if _effective_parent_status(
+                conn, row["parent_id"], row["status"], task_id,
+            ) not in ("done", "archived")
+        ]
         if undone:
             conn.execute(
                 "UPDATE tasks SET status = 'todo' "
@@ -6640,31 +6766,29 @@ def block_task(
     waiting_for_commit: Optional[str] = None,
     waiting_for_event: Optional[str] = None,
     waiting_for_condition: Optional[str] = None,
+    unblocks: Optional[Iterable[str]] = None,
     expected_run_id: Optional[int] = None,
 ) -> bool:
-    """Transition ``running``/``ready`` → ``blocked`` (or route elsewhere).
+    """Transition ``running``/``ready`` -> ``blocked`` (or route elsewhere).
 
     ``kind`` (one of :data:`VALID_BLOCK_KINDS`, or ``None`` for a legacy
-    un-typed block) drives routing instead of every block landing in one
-    undifferentiated ``blocked`` bucket:
+    un-typed block) drives routing.
 
-    * ``dependency`` — the task is only waiting on another task. It does NOT
-      sit in ``blocked`` (where a cron would keep "unblocking" it); it goes to
-      ``todo`` so the existing parent-gating / ``recompute_ready`` machinery
-      promotes it automatically once its parents finish. No human, no cron, no
-      retry storm. This is Dale's "Type 2 — dependency blocked".
-
-    * ``needs_input`` / ``capability`` / ``None`` — "truly blocked" (Dale's
-      "Type 1"). Lands in ``blocked`` for a human. BUT: each time such a task
-      is re-blocked for the SAME kind after having been unblocked, the
-      unblock-loop counter (``block_recurrences``) increments. When it reaches
-      :data:`BLOCK_RECURRENCE_LIMIT`, the task is routed to ``triage`` instead
-      of ``blocked`` — breaking the cron-unblock ↔ worker-re-block loop and
-      forcing a human-in-the-loop triage decision.
-
-    * ``transient`` — treated like a generic block for routing, but a worker
-      can use it to signal "this might clear on its own"; it still participates
-      in the loop breaker so a forever-flaky task eventually escalates.
+    ``unblocks`` (optional) — a list of child task ids to atomically
+    promote to ``ready`` inside the same transaction. Use when the
+    block IS a handoff to a review child (``waiting_for`` names that
+    child): naming the child in ``unblocks`` guarantees it lands in
+    ``ready`` even if its ``recompute_ready`` gate has not fired yet.
+    Preconditions per id: (1) a ``task_links`` row exists with
+    ``parent_id = task_id`` and this id as child; (2) the child is
+    currently in ``todo`` or ``blocked``; (3) the child has no other
+    outstanding gate (sticky block, governance gate, dependency
+    waiting_for still unsatisfied). Ids that violate any precondition
+    are recorded in the ``blocked`` event payload under
+    ``unblocks_skipped`` with a reason but do NOT fail the block
+    itself. Successfully-flipped ids appear under ``unblocks_applied``
+    and each gets a paired ``promoted`` event (kind matches
+    :func:`recompute_ready`).
 
     Returns True on any successful transition (to ``blocked``, ``todo``, or
     ``triage``), False when the task wasn't in a blockable state.
@@ -6673,6 +6797,18 @@ def block_task(
         raise ValueError(
             f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None"
         )
+    # Normalise ``unblocks`` before the txn so the body can trust the list.
+    unblocks_norm: list[str] = []
+    if unblocks:
+        _seen: set[str] = set()
+        for _raw in unblocks:
+            if not isinstance(_raw, str):
+                continue
+            _s = _raw.strip()
+            if not _s or _s in _seen:
+                continue
+            _seen.add(_s)
+            unblocks_norm.append(_s)
     recurrences = 0
     with write_txn(conn):
         cur_row = conn.execute(
@@ -6864,6 +7000,100 @@ def block_task(
                 blocked_payload,
                 run_id=run_id,
             )
+        # Apply ``unblocks`` inside the SAME transaction as the block
+        # itself. The block is already committed to task_events (above);
+        # any child we promote here is atomically visible with the
+        # blocked-parent state to any other reader. Ids that fail
+        # preconditions are recorded but do not roll back the block.
+        if unblocks_norm:
+            unblocks_applied: list[str] = []
+            unblocks_skipped: list[dict[str, str]] = []
+            for _child in unblocks_norm:
+                # Precondition 1: must be a real child of this task.
+                link = conn.execute(
+                    "SELECT 1 FROM task_links "
+                    "WHERE parent_id = ? AND child_id = ? LIMIT 1",
+                    (task_id, _child),
+                ).fetchone()
+                if link is None:
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "not_a_child"}
+                    )
+                    continue
+                # Precondition 2: child must currently be in todo/blocked.
+                crow = conn.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (_child,),
+                ).fetchone()
+                if crow is None:
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "not_found"}
+                    )
+                    continue
+                cstatus = crow["status"]
+                if cstatus not in ("todo", "blocked"):
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": f"status_{cstatus}"}
+                    )
+                    continue
+                # Precondition 3: no unrelated gate. The child may STILL
+                # be gated by its own sticky-block, governance gate, or
+                # an unsatisfied dependency waiting_for. Symmetric with
+                # ``recompute_ready``. This block's own act of naming
+                # the child in ``unblocks`` is not a licence to bypass
+                # those independent gates.
+                if _has_outstanding_governance_gate(conn, _child):
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "governance_gate"}
+                    )
+                    continue
+                if cstatus == "blocked" and _has_sticky_block(conn, _child):
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "sticky_block"}
+                    )
+                    continue
+                # If the child itself is a dependency-blocked task with
+                # its own unsatisfied waiting_for, respect it.
+                crow_meta = conn.execute(
+                    "SELECT block_kind FROM tasks WHERE id = ?",
+                    (_child,),
+                ).fetchone()
+                cbk = (
+                    crow_meta["block_kind"]
+                    if crow_meta and "block_kind" in crow_meta.keys()
+                    else None
+                )
+                if (
+                    cstatus == "todo"
+                    and cbk == "dependency"
+                    and not _dependency_waiting_for_satisfied(conn, _child)
+                ):
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "dependency_waiting_for"}
+                    )
+                    continue
+                # Promote. Use the same status-narrowed UPDATE that
+                # ``recompute_ready`` uses so a concurrent writer that
+                # already flipped the row loses the race cleanly.
+                cur = conn.execute(
+                    "UPDATE tasks SET status = 'ready' "
+                    "WHERE id = ? AND status IN ('todo', 'blocked')",
+                    (_child,),
+                )
+                if cur.rowcount != 1:
+                    unblocks_skipped.append(
+                        {"id": _child, "reason": "race_lost"}
+                    )
+                    continue
+                _append_event(conn, _child, "promoted", {"by": task_id})
+                unblocks_applied.append(_child)
+            _append_event(
+                conn, task_id, "unblocks_applied",
+                {
+                    "applied": unblocks_applied,
+                    "skipped": unblocks_skipped,
+                },
+                run_id=run_id,
+            )
         _blocked_task = get_task(conn, task_id)
     _fire_kanban_lifecycle_hook(
         "kanban_task_blocked",
@@ -6982,11 +7212,20 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # until recompute_ready picks it up. RCA: Bug 2 at
         # kanban/boards/cookai/workspaces/t_a6acd07d/root-cause.md.
         undone_parents = conn.execute(
-            "SELECT 1 FROM task_links l "
+            "SELECT l.parent_id, p.status FROM task_links l "
             "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE l.child_id = ? AND p.status != 'done' LIMIT 1",
+            "WHERE l.child_id = ? AND p.status != 'done'",
             (task_id,),
-        ).fetchone()
+        ).fetchall()
+        # Review-child exception: a parent governance-blocked with
+        # waiting_for = this child does not gate promotion. See
+        # ``_effective_parent_status``.
+        undone_parents = [
+            row for row in undone_parents
+            if _effective_parent_status(
+                conn, row["parent_id"], row["status"], task_id,
+            ) not in ("done", "archived")
+        ]
         new_status = "todo" if undone_parents else "ready"
         # NOTE: deliberately does NOT touch ``block_recurrences`` or
         # ``block_kind``. Resetting the recurrence counter on unblock is exactly
@@ -7895,6 +8134,21 @@ class DispatchResult:
     DB writes this tick — the lock holder is making progress on the same
     board. This is the steady-state signal that a single-writer guard is
     actively preventing two dispatchers from racing on ``kanban.db``."""
+    skipped_parent_deadlock: list[tuple[str, str]] = field(default_factory=list)
+    """Task ids visible to no queue (``todo``, not ``ready``) because at
+    least one parent is governance-blocked WITHOUT the review-child
+    exception (``waiting_for`` doesn't name this child). Each entry is
+    ``(child_id, blocked_parent_id)``.
+
+    Operationally the child is invisible to the dispatcher (which only
+    scans ``status='ready'``) and to ``kanban list`` categorisation.
+    This bucket exists so ``dispatch --dry-run`` and telemetry can
+    surface the deadlock instead of the child silently vanishing from
+    the board — the operator can then either mark the parent's block
+    as ``waiting_for=<child_id>`` (activates the review-child exception
+    and promotes the child) or unblock the parent by hand. Populated
+    only in dry-run to keep the hot-path scan bounded; live dispatch
+    ticks skip the extra query."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -9965,6 +10219,30 @@ def _dispatch_once_locked(
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
+    # Dry-run only: enumerate parent-deadlocked children so the operator
+    # can see WHY the queue looks empty when review children are gated
+    # behind blocked parents. Skipped on live ticks to keep the hot path
+    # cheap — the same information is recoverable from the DB by hand.
+    # See ``DispatchResult.skipped_parent_deadlock`` for the contract.
+    if dry_run:
+        deadlock_rows = conn.execute(
+            "SELECT c.id AS child_id, p.id AS parent_id "
+            "FROM tasks c "
+            "JOIN task_links l ON l.child_id = c.id "
+            "JOIN tasks p ON p.id = l.parent_id "
+            "WHERE c.status = 'todo' AND p.status = 'blocked'"
+        ).fetchall()
+        for row in deadlock_rows:
+            child_id = row["child_id"]
+            parent_id = row["parent_id"]
+            # Skip the review-child case (parent waiting on this child):
+            # that pattern is now auto-promoted by recompute_ready + the
+            # ``_effective_parent_status`` helper. Only genuine
+            # deadlocks (blocked parent NOT waiting on this child) end
+            # up in the bucket.
+            if _parent_blocked_waiting_for_child(conn, parent_id, child_id):
+                continue
+            result.skipped_parent_deadlock.append((child_id, parent_id))
     return result
 
 
