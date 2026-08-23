@@ -1293,6 +1293,28 @@ def _handle_create(args: dict, **kw) -> str:
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
         )
+    # Assignee validation (okr_audit acct_fail_e9b3a1532629, VFE-ROUTE-01
+    # Front A1). Refuse tickets whose assignee is neither a Hermes profile
+    # on disk nor a registered virtual assignee — otherwise the dispatcher
+    # falls back to a regular CLI worker under an implicit profile, produces
+    # prose, exits rc=0 without calling ``kanban_complete``/``kanban_block``,
+    # and the ticket loops forever burning inference budget. The registry
+    # file at ``<kanban_home>/virtual_assignees.yaml`` lists names that DO
+    # have external handlers (e.g. ``livekit-boardroom``); missing/empty is
+    # treated as an empty allowlist. This tool-layer check only makes the
+    # failure loud — actual route-through dispatch is Front A2.
+    try:
+        from hermes_cli import kanban_db as _kb_validate
+        _assignee_err = _kb_validate.validate_assignee(str(assignee))
+    except Exception:
+        _assignee_err = None
+    if _assignee_err:
+        return tool_error(
+            f"unknown assignee {assignee!r}: {_assignee_err.get('hint', '')}",
+            error_code="unknown_assignee",
+            assignee=str(assignee),
+            hint=_assignee_err.get("hint"),
+        )
     body = args.get("body")
     parents = args.get("parents") or []
     tenant = args.get("tenant") or os.environ.get("HERMES_TENANT")

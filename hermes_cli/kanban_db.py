@@ -3364,6 +3364,157 @@ def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
     return normalize_profile_name(assignee)
 
 
+# ---------------------------------------------------------------------------
+# Virtual-assignee registry
+# ---------------------------------------------------------------------------
+#
+# Some Kanban tickets are addressed to *virtual* assignees that are not a
+# Hermes profile on disk. Example: the ``livekit-boardroom`` convene primitive
+# (VFE-ROUTE-01) is answered by a long-running boardroom-driver service, not a
+# spawned CLI worker. When such a ticket landed without a registration the
+# dispatcher used to fall back to a regular CLI worker under an implicit
+# profile — which produced prose, never called ``kanban_complete``, and burned
+# inference budget on retries. See okr_audit ``acct_fail_e9b3a1532629``.
+#
+# The registry file lists every virtual assignee that has an external handler.
+# ``kanban_create`` refuses to create a task whose assignee is neither a known
+# profile on disk nor a registered virtual assignee.
+#
+# Resolution order for the registry file (first match wins):
+#   1. ``HERMES_KANBAN_VIRTUAL_ASSIGNEES`` env var (explicit override).
+#   2. ``<kanban_home>/virtual_assignees.yaml``
+#   3. ``<kanban_home>/virtual_assignees.json``
+# A missing file is treated as an empty registry (no virtual assignees).
+# The scope is deliberately narrow — this task only makes the failure loud;
+# actual route-through dispatch to the handler lives in a separate ticket
+# (Front A2 / VFE-ROUTE-02).
+# ---------------------------------------------------------------------------
+
+def _virtual_assignees_paths() -> list[Path]:
+    """Return candidate paths for the virtual-assignees registry, in priority order."""
+    override = os.environ.get("HERMES_KANBAN_VIRTUAL_ASSIGNEES", "").strip()
+    paths: list[Path] = []
+    if override:
+        paths.append(Path(override))
+    try:
+        home = kanban_home()
+    except Exception:
+        home = None
+    if home is not None:
+        paths.append(home / "virtual_assignees.yaml")
+        paths.append(home / "virtual_assignees.json")
+    return paths
+
+
+def load_virtual_assignees() -> dict[str, dict]:
+    """Load the virtual-assignee registry as ``{name: handler_metadata}``.
+
+    Returns an empty dict when no registry file is found or the file is
+    malformed. Never raises — a broken registry must not break task creation
+    for real profiles.
+
+    The file format is a mapping from virtual assignee name to a dict of
+    handler metadata (e.g. ``{"handler": "route", "url": "http://..."}``).
+    JSON and YAML are both accepted; YAML is preferred when PyYAML is
+    installed but JSON works with the stdlib alone.
+    """
+    for path in _virtual_assignees_paths():
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if path.suffix.lower() in (".yaml", ".yml"):
+            try:
+                import yaml  # type: ignore
+                data = yaml.safe_load(text) or {}
+            except ImportError:
+                # PyYAML not installed — YAML that also happens to be valid
+                # JSON will still parse; anything else is treated as empty.
+                try:
+                    data = json.loads(text)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+            except Exception:
+                continue
+        else:
+            try:
+                data = json.loads(text)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if not isinstance(data, dict):
+            continue
+        result: dict[str, dict] = {}
+        for name, meta in data.items():
+            if not isinstance(name, str) or not name:
+                continue
+            if isinstance(meta, dict):
+                result[name] = meta
+            else:
+                # Bare list entry (``- livekit-boardroom``) or a scalar
+                # value — record the name with empty metadata.
+                result[name] = {}
+        return result
+    return {}
+
+
+def is_known_assignee(name: str) -> bool:
+    """Return True when ``name`` is a real profile on disk OR a registered virtual assignee.
+
+    Gate used by ``validate_assignee`` (and indirectly by the ``kanban_create``
+    tool) to distinguish nameable, dispatch-able assignees from typos and
+    unwired route primitives.
+    """
+    if not name:
+        return False
+    try:
+        from hermes_cli.profiles import profile_exists
+    except Exception:  # pragma: no cover — extreme edge, keeps validator alive
+        profile_exists = None  # type: ignore[assignment]
+    if profile_exists is not None and profile_exists(name):
+        return True
+    if name in load_virtual_assignees():
+        return True
+    return False
+
+
+def validate_assignee(assignee: Optional[str]) -> Optional[dict]:
+    """Validate ``assignee`` against known profiles + virtual-assignee registry.
+
+    Returns ``None`` when the assignee is valid (a known profile on disk or
+    a registered virtual assignee).  Returns a structured error dict of the
+    shape::
+
+        {"error": "unknown_assignee",
+         "assignee": <value>,
+         "hint": "register in virtual_assignees or use a known profile"}
+
+    when the assignee is unknown.  Callers that want a hard failure should
+    convert the dict into an exception; the ``kanban_create`` tool surfaces
+    the dict verbatim to the agent so the failure is visible instead of
+    silently spawning a mis-profiled CLI worker (okr_audit
+    ``acct_fail_e9b3a1532629``).
+
+    An ``assignee`` of ``None`` or empty string returns ``None`` — the
+    upstream ``kanban_create`` tool already refuses missing assignees with a
+    dedicated error and this helper stays orthogonal to that check.
+    """
+    if not assignee:
+        return None
+    canonical = _canonical_assignee(assignee)
+    if canonical and is_known_assignee(canonical):
+        return None
+    return {
+        "error": "unknown_assignee",
+        "assignee": assignee,
+        "hint": (
+            "register in virtual_assignees or use a known profile "
+            "(see `hermes kanban assignees` for what is on disk)"
+        ),
+    }
+
+
 def create_task(
     conn: sqlite3.Connection,
     *,
