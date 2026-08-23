@@ -756,7 +756,18 @@ def _stage_candidate_venv(
             "sync",
             "--extra",
             "all",
-            "--locked",
+            # --frozen, not --locked: the repair path must install exactly the
+            # versions recorded in uv.lock. --locked additionally asserts the
+            # lock is up to date with pyproject.toml, which uv >= 0.12 refuses
+            # to do when the lockfile records a global exclude-newer policy
+            # (removed in uv 0.12.x) — so every freshly bootstrapped uv failed
+            # candidate sync with "The lockfile at `uv.lock` needs to be
+            # updated, but `--locked` was provided" and the repair aborted
+            # before cutover. --frozen has the semantics the repair wants:
+            # reproduce the recorded environment, no staleness assertion.
+            # (Found by the VFE-KANBAN-CORRUPTION-02 repair canary,
+            # t_f9d37efd; validated end-to-end: 3.45.1 → 3.53.1.)
+            "--frozen",
             "--python",
             str(_venv_python(candidate)),
             "--no-config",
