@@ -842,7 +842,10 @@ _PLATFORM_CONNECTED_CHECKERS: dict[Platform, Callable[[PlatformConfig], bool]] =
     Platform.WHATSAPP_CLOUD: lambda cfg: bool(
         cfg.extra.get("phone_number_id") and cfg.extra.get("access_token")
     ),
-    Platform.SIGNAL: lambda cfg: bool(cfg.extra.get("http_url")),
+    Platform.SIGNAL: lambda cfg: bool(
+        (cfg.extra.get("http_url") or os.getenv("SIGNAL_HTTP_URL", "")) and
+        (cfg.extra.get("account") or os.getenv("SIGNAL_ACCOUNT", ""))
+    ),
     Platform.API_SERVER: lambda cfg: _has_usable_api_server_key(
         cfg.extra.get("key") if cfg else None
     ),
