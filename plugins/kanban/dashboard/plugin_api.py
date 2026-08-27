@@ -2360,6 +2360,21 @@ _CLUSTER_BOARDS_CACHE_TTL_SEC = 30.0
 _CLUSTER_BOARDS_FANOUT_TIMEOUT_SEC = 2.0
 _CLUSTER_BOARDS_MAX_HOSTS = 8
 
+# CONS-3 field allowlist: the fan-out surface is served over an unauthenticated
+# NATS subject, so we mirror the responder's projection here as defense in
+# depth — even if an older responder ships extra fields, this merge strips
+# them before they hit the dashboard client. Keep in lockstep with
+# ``kanban_cluster_responder._CLUSTER_BOARD_ALLOWED_FIELDS``.
+_CLUSTER_BOARD_ALLOWED_FIELDS = frozenset(
+    {"slug", "name", "counts", "total", "is_current", "origin_host"}
+)
+
+
+def _sanitize_cluster_board(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project a merged board row down to the CONS-3 allowlist."""
+    return {k: raw[k] for k in _CLUSTER_BOARD_ALLOWED_FIELDS if k in raw}
+
+
 # Module-level cache: {"ts": float, "include_archived": bool, "payload": dict}
 # Two-tuple key (include_archived) so the archived/non-archived views don't
 # poison each other's cache slot.
@@ -2456,7 +2471,10 @@ async def _fanout_cluster_boards(include_archived: bool) -> dict[str, Any]:
                 # stamp them (defense in depth against a downstream drift).
                 b = dict(b)
                 b.setdefault("origin_host", host)
-                merged_boards.append(b)
+                # CONS-3: strip everything but the allowlist so an older
+                # responder shipping db_path / project_id / description
+                # cannot leak through the fan-out to unauthenticated peers.
+                merged_boards.append(_sanitize_cluster_board(b))
 
         try:
             await sub.unsubscribe()
