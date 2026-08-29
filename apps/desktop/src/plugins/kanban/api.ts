@@ -14,6 +14,7 @@ import { atom, type PluginRestOptions, type PluginStorage, queryClient } from '@
 import type {
   BoardMeta,
   BoardsResponse,
+  ClusterBoardsResponse,
   KanbanBoard,
   KanbanProfile,
   KanbanProject,
@@ -135,6 +136,7 @@ export const boardKey = (slug: string, archived: boolean) => ['kanban', 'board',
 export const taskKey = (slug: string, id: string) => ['kanban', 'task', slug, id] as const
 export const logKey = (slug: string, id: string) => ['kanban', 'log', slug, id] as const
 export const BOARDS_KEY = ['kanban', 'boards'] as const
+export const CLUSTER_BOARDS_KEY = ['kanban', 'cluster', 'boards'] as const
 export const PROFILES_KEY = ['kanban', 'profiles'] as const
 export const PROJECTS_KEY = ['kanban', 'projects'] as const
 export const ORCHESTRATION_KEY = ['kanban', 'orchestration'] as const
@@ -150,6 +152,12 @@ export const fetchTask = (id: string) => call<KanbanTaskDetail>(withBoard(`/task
 export const fetchLog = (id: string) => call<WorkerLog>(withBoard(`/tasks/${id}/log`, { tail: '16384' }))
 
 export const fetchBoards = () => call<BoardsResponse>('/boards')
+
+/** Every board across every NATS-connected cluster host, with per-board
+ *  ``origin_host`` for the switcher badge. Falls through gracefully if the
+ *  cluster responder is down — ``errors`` names each unreachable host and
+ *  the local host's boards still land in ``boards``. */
+export const fetchClusterBoards = () => call<ClusterBoardsResponse>('/cluster/boards')
 
 export const fetchProfiles = () => call<{ profiles: KanbanProfile[] }>('/profiles')
 

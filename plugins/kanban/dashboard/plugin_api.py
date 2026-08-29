@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import time
 from dataclasses import asdict
@@ -2338,6 +2339,219 @@ def list_boards(include_archived: bool = Query(False)):
         proj = proj_map.get(pid) if pid else None
         b["project_name"] = proj.name if proj else None
     return {"boards": boards, "current": current}
+
+
+# ---------------------------------------------------------------------------
+# Cluster board aggregation (KR1 of GOAL t_a56e5621 — task t_4dfc729c)
+#
+# Fans out ``executive.agents.kanban_cluster.boards`` across every NATS-
+# connected host and merges the per-host board lists. The responder side
+# is ``kanban_cluster_responder.py`` in the EAF platform (systemd unit
+# ``kanban-cluster-responder.service`` on hermes2 + hermes1). Both replies
+# arrive as flat JSON envelopes ``{ok, result:{origin_host, boards, current}}``.
+#
+# A down host surfaces as ``{host, error, boards: []}`` in the response —
+# never a 500 — so a single flaky peer can't take the dashboard down.
+# Results are cached module-locally for 30s to bound fan-out cost.
+# ---------------------------------------------------------------------------
+
+_CLUSTER_BOARDS_SUBJECT = "executive.agents.kanban_cluster.boards"
+_CLUSTER_BOARDS_CACHE_TTL_SEC = 30.0
+_CLUSTER_BOARDS_FANOUT_TIMEOUT_SEC = 2.0
+_CLUSTER_BOARDS_MAX_HOSTS = 8
+
+# CONS-3 field allowlist: the fan-out surface is served over an unauthenticated
+# NATS subject, so we mirror the responder's projection here as defense in
+# depth — even if an older responder ships extra fields, this merge strips
+# them before they hit the dashboard client. Keep in lockstep with
+# ``kanban_cluster_responder._CLUSTER_BOARD_ALLOWED_FIELDS``.
+_CLUSTER_BOARD_ALLOWED_FIELDS = frozenset(
+    {"slug", "name", "counts", "total", "is_current", "origin_host"}
+)
+
+
+def _sanitize_cluster_board(raw: dict[str, Any]) -> dict[str, Any]:
+    """Project a merged board row down to the CONS-3 allowlist."""
+    return {k: raw[k] for k in _CLUSTER_BOARD_ALLOWED_FIELDS if k in raw}
+
+
+# Module-level cache: {"ts": float, "include_archived": bool, "payload": dict}
+# Two-tuple key (include_archived) so the archived/non-archived views don't
+# poison each other's cache slot.
+_cluster_boards_cache: dict[bool, dict[str, Any]] = {}
+_cluster_boards_lock = asyncio.Lock()
+
+
+async def _fanout_cluster_boards(include_archived: bool) -> dict[str, Any]:
+    """Fan out the boards request to every host and merge replies.
+
+    Uses NATS request-many: publish once to an inbox, subscribe to that
+    inbox, collect every reply until the deadline expires. This is the
+    canonical pattern for RPC scatter-gather over a shared subject.
+    """
+    try:
+        from nats.aio.client import Client as NATS  # type: ignore
+    except Exception as exc:
+        return {
+            "boards": [],
+            "hosts": [],
+            "errors": [{"host": "?", "error": f"nats-py unavailable: {exc}"}],
+            "cached": False,
+            "generated_at": time.time(),
+        }
+
+    nats_url = os.environ.get("NATS_URL", "nats://127.0.0.1:4222")
+    nc = NATS()
+    hosts_ok: list[str] = []
+    errors: list[dict[str, str]] = []
+    merged_boards: list[dict[str, Any]] = []
+    currents: dict[str, str] = {}
+
+    try:
+        await nc.connect(
+            servers=[nats_url],
+            name="kanban-dashboard-cluster-fanout",
+            connect_timeout=2,
+            max_reconnect_attempts=0,
+        )
+    except Exception as exc:
+        return {
+            "boards": [],
+            "hosts": [],
+            "errors": [{"host": "?", "error": f"nats connect failed: {exc}"}],
+            "cached": False,
+            "generated_at": time.time(),
+        }
+
+    try:
+        inbox = nc.new_inbox()
+        replies: asyncio.Queue = asyncio.Queue()
+
+        async def _on_reply(msg):  # noqa: D401 — nats callback
+            await replies.put(msg)
+
+        sub = await nc.subscribe(inbox, cb=_on_reply)
+        request_id = f"cluster-{int(time.time() * 1000)}"
+        payload = json.dumps({
+            "v": 1,
+            "request_id": request_id,
+            "include_archived": include_archived,
+        }).encode("utf-8")
+        await nc.publish(_CLUSTER_BOARDS_SUBJECT, payload, reply=inbox)
+        await nc.flush()
+
+        deadline = asyncio.get_event_loop().time() + _CLUSTER_BOARDS_FANOUT_TIMEOUT_SEC
+        while len(hosts_ok) + len(errors) < _CLUSTER_BOARDS_MAX_HOSTS:
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                msg = await asyncio.wait_for(replies.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+            try:
+                body = json.loads(msg.data.decode("utf-8"))
+            except Exception as exc:
+                errors.append({"host": "?", "error": f"decode failed: {exc}"})
+                continue
+            if not body.get("ok"):
+                errors.append({
+                    "host": (body.get("result") or {}).get("origin_host", "?"),
+                    "error": str(body.get("error") or "unknown"),
+                })
+                continue
+            result = body.get("result") or {}
+            host = str(result.get("origin_host") or "?")
+            hosts_ok.append(host)
+            if result.get("current"):
+                currents[host] = result["current"]
+            for b in result.get("boards") or []:
+                # Guard: enforce origin_host on every merged board so the
+                # frontend can badge them even if a responder forgot to
+                # stamp them (defense in depth against a downstream drift).
+                b = dict(b)
+                b.setdefault("origin_host", host)
+                # CONS-3: strip everything but the allowlist so an older
+                # responder shipping db_path / project_id / description
+                # cannot leak through the fan-out to unauthenticated peers.
+                merged_boards.append(_sanitize_cluster_board(b))
+
+        try:
+            await sub.unsubscribe()
+        except Exception:
+            pass
+    finally:
+        try:
+            await nc.drain()
+        except Exception:
+            pass
+
+    # If we got zero replies, surface a synthetic timeout entry so the
+    # frontend can render "cluster fan-out timed out" instead of an empty
+    # board list. Callers still get 200 OK.
+    if not hosts_ok and not errors:
+        errors.append({"host": "?", "error": "timeout: no cluster hosts replied"})
+
+    return {
+        "boards": merged_boards,
+        "hosts": sorted(hosts_ok),
+        "currents": currents,
+        "errors": errors,
+        "cached": False,
+        "generated_at": time.time(),
+    }
+
+
+async def _cluster_boards_cached(include_archived: bool) -> dict[str, Any]:
+    """Return the 30s-cached fan-out payload, refreshing if stale."""
+    now = time.time()
+    entry = _cluster_boards_cache.get(bool(include_archived))
+    if entry and (now - entry.get("ts", 0)) < _CLUSTER_BOARDS_CACHE_TTL_SEC:
+        payload = dict(entry["payload"])
+        payload["cached"] = True
+        payload["cache_age_seconds"] = round(now - entry["ts"], 3)
+        return payload
+    async with _cluster_boards_lock:
+        # Re-check inside the lock so concurrent requests coalesce.
+        entry = _cluster_boards_cache.get(bool(include_archived))
+        now2 = time.time()
+        if entry and (now2 - entry.get("ts", 0)) < _CLUSTER_BOARDS_CACHE_TTL_SEC:
+            payload = dict(entry["payload"])
+            payload["cached"] = True
+            payload["cache_age_seconds"] = round(now2 - entry["ts"], 3)
+            return payload
+        payload = await _fanout_cluster_boards(include_archived)
+        _cluster_boards_cache[bool(include_archived)] = {"ts": now2, "payload": payload}
+        return payload
+
+
+@router.get("/cluster/boards")
+async def cluster_boards(
+    include_archived: bool = Query(False),
+    refresh: bool = Query(False, description="Bypass the 30s cache"),
+):
+    """Return the merged cluster-wide board list (hermes2 + hermes1 + peers).
+
+    Response envelope::
+
+        {
+          "boards":   [{slug, name, counts, total, origin_host, ...}, ...],
+          "hosts":    ["hermes1", "hermes2"],           # hosts that replied
+          "currents": {"hermes1": "slug", "hermes2": "slug"},
+          "errors":   [{"host": "...", "error": "timeout"}, ...],
+          "cached":   bool,
+          "cache_age_seconds": <float, only when cached=true>,
+          "generated_at": <epoch seconds>
+        }
+
+    Anti-fabrication contract for task t_4dfc729c: this endpoint MUST list
+    boards whose ``origin_host`` covers every live cluster host (currently
+    hermes2 + hermes1). A single-host response indicates the peer responder
+    is down and should surface via ``errors``.
+    """
+    if refresh:
+        _cluster_boards_cache.pop(bool(include_archived), None)
+    return await _cluster_boards_cached(include_archived)
 
 
 def _validate_workdir(raw: str) -> str:
