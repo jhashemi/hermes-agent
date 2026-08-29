@@ -8389,9 +8389,12 @@ class DispatchResult:
     surface the deadlock instead of the child silently vanishing from
     the board — the operator can then either mark the parent's block
     as ``waiting_for=<child_id>`` (activates the review-child exception
-    and promotes the child) or unblock the parent by hand. Populated
-    only in dry-run to keep the hot-path scan bounded; live dispatch
-    ticks skip the extra query."""
+    and promotes the child) or unblock the parent by hand.
+
+    Populated on every tick (both dry-run and live). Live ticks
+    additionally emit one ``parent_deadlock_detected`` task_event per
+    (child, parent) pair per parent-block-event-id so ``hermes kanban
+    tail`` and stall-watchdogs see the pair without a dry-run poll."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -10462,30 +10465,92 @@ def _dispatch_once_locked(
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
-    # Dry-run only: enumerate parent-deadlocked children so the operator
-    # can see WHY the queue looks empty when review children are gated
-    # behind blocked parents. Skipped on live ticks to keep the hot path
-    # cheap — the same information is recoverable from the DB by hand.
-    # See ``DispatchResult.skipped_parent_deadlock`` for the contract.
-    if dry_run:
-        deadlock_rows = conn.execute(
-            "SELECT c.id AS child_id, p.id AS parent_id "
-            "FROM tasks c "
-            "JOIN task_links l ON l.child_id = c.id "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE c.status = 'todo' AND p.status = 'blocked'"
-        ).fetchall()
-        for row in deadlock_rows:
-            child_id = row["child_id"]
-            parent_id = row["parent_id"]
-            # Skip the review-child case (parent waiting on this child):
-            # that pattern is now auto-promoted by recompute_ready + the
-            # ``_effective_parent_status`` helper. Only genuine
-            # deadlocks (blocked parent NOT waiting on this child) end
-            # up in the bucket.
-            if _parent_blocked_waiting_for_child(conn, parent_id, child_id):
-                continue
-            result.skipped_parent_deadlock.append((child_id, parent_id))
+    # Enumerate parent-deadlocked children so the operator can see WHY
+    # the queue looks empty when review children are gated behind blocked
+    # parents. Populates ``DispatchResult.skipped_parent_deadlock`` on
+    # every tick (one indexed join — cheap) so both ``dispatch --dry-run``
+    # and live telemetry surface the pairs.
+    #
+    # On live ticks we additionally emit a ``parent_deadlock_detected``
+    # task_event per pair so ``hermes kanban tail`` and stall-watchdogs
+    # see the deadlock. Rate-limited to at most one emission per (child,
+    # parent) pair per parent-block-event-id: repeatedly detecting the
+    # same deadlock every tick would spam the event log until the
+    # operator either sets ``waiting_for=<child_id>`` on the parent's
+    # block (activates the review-child exception) or unblocks the
+    # parent by hand. See ``DispatchResult.skipped_parent_deadlock``
+    # and the review-child exception in ``_parent_blocked_waiting_for_child``.
+    deadlock_rows = conn.execute(
+        "SELECT c.id AS child_id, p.id AS parent_id "
+        "FROM tasks c "
+        "JOIN task_links l ON l.child_id = c.id "
+        "JOIN tasks p ON p.id = l.parent_id "
+        "WHERE c.status = 'todo' AND p.status = 'blocked'"
+    ).fetchall()
+    new_deadlock_pairs: list[tuple[str, str, int]] = []
+    for row in deadlock_rows:
+        child_id = row["child_id"]
+        parent_id = row["parent_id"]
+        # Skip the review-child case (parent waiting on this child):
+        # that pattern is auto-promoted by recompute_ready + the
+        # ``_effective_parent_status`` helper. Only genuine
+        # deadlocks (blocked parent NOT waiting on this child) end
+        # up in the bucket / emit the event.
+        if _parent_blocked_waiting_for_child(conn, parent_id, child_id):
+            continue
+        result.skipped_parent_deadlock.append((child_id, parent_id))
+        if dry_run:
+            continue
+        # Live tick: determine whether this pair still needs an event
+        # emitted. The key is the parent's most recent ``blocked`` event
+        # id — a fresh block on the same parent (kind flip, re-block
+        # after unblock) resets the rate limit so a new deadlock cycle
+        # re-fires exactly once.
+        parent_block_row = conn.execute(
+            "SELECT id FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        if parent_block_row is None:
+            # Parent is ``blocked`` but has no ``blocked`` event? Legacy
+            # / manual SQL row — emit unconditionally, tagged with -1
+            # so future ticks can dedupe against the same sentinel.
+            parent_block_event_id = -1
+        else:
+            parent_block_event_id = int(parent_block_row["id"])
+        prior = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'parent_deadlock_detected' "
+            "  AND json_extract(payload, '$.parent_id') = ? "
+            "  AND json_extract(payload, '$.parent_block_event_id') = ? "
+            "LIMIT 1",
+            (child_id, parent_id, parent_block_event_id),
+        ).fetchone()
+        if prior is not None:
+            continue
+        new_deadlock_pairs.append((child_id, parent_id, parent_block_event_id))
+    if new_deadlock_pairs:
+        # Emit inside a write txn so a crash mid-loop can't leave a
+        # half-populated event log. The txn is small (one INSERT per
+        # pair) and only runs when a NEW deadlock pair appears.
+        with write_txn(conn):
+            for child_id, parent_id, parent_block_event_id in new_deadlock_pairs:
+                _append_event(
+                    conn, child_id, "parent_deadlock_detected",
+                    {
+                        "parent_id": parent_id,
+                        "parent_block_event_id": parent_block_event_id,
+                        "hint": (
+                            "Parent is blocked but its block event does not "
+                            "name this child in waiting_for. To unblock: call "
+                            "kanban_block on the parent with "
+                            "waiting_for=<this_child_id> "
+                            "(activates the review-child exception and promotes "
+                            "the child to ready), or unblock the parent."
+                        ),
+                    },
+                )
     return result
 
 

@@ -369,12 +369,16 @@ def test_dispatch_dry_run_reports_parent_deadlock(kanban_home):
             assert parent == p1
 
 
-def test_dispatch_live_tick_skips_deadlock_scan(kanban_home):
-    """A live (non-dry-run) tick keeps ``skipped_parent_deadlock``
-    empty. The scan is dry-run-only to keep the hot path cheap."""
+def test_dispatch_live_tick_populates_skipped_parent_deadlock(kanban_home):
+    """A live (non-dry-run) tick also populates ``skipped_parent_deadlock``
+    now — the field is authoritative on every tick so telemetry /
+    watchdogs can consume it without polling with ``dry_run=True``. The
+    scan is a single indexed join and only walks pairs where the child
+    is already ``todo`` and the parent is already ``blocked``, so the
+    hot-path cost is bounded even on large boards."""
     with kb.connect() as conn:
         p = kb.create_task(conn, title="p", assignee="worker")
-        _c = kb.create_task(conn, title="c", assignee="reviewer", parents=[p])
+        c = kb.create_task(conn, title="c", assignee="reviewer", parents=[p])
         assert kb.block_task(
             conn, p, reason="need info", kind="needs_input",
         )
@@ -382,4 +386,154 @@ def test_dispatch_live_tick_skips_deadlock_scan(kanban_home):
         result = kb.dispatch_once(
             conn, spawn_fn=lambda *a, **k: None, dry_run=False,
         )
-    assert result.skipped_parent_deadlock == []
+    assert (c, p) in result.skipped_parent_deadlock
+
+
+# ---------------------------------------------------------------------------
+# Fix (d): live-tick ``parent_deadlock_detected`` event emission.
+#
+# Recurrence-proof for task ``t_115096f9``: a review child created as a
+# CHILD of a governance-blocked parent (without the ``waiting_for``
+# handshake) was silently un-dispatchable for 4+ hours. The dry-run
+# bucket existed but never landed in the event log, so
+# ``hermes kanban tail`` and stall-watchdogs were blind.
+# ---------------------------------------------------------------------------
+
+
+def _count_events(conn, task_id, kind):
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM task_events "
+        "WHERE task_id = ? AND kind = ?",
+        (task_id, kind),
+    ).fetchone()
+    return int(row["n"])
+
+
+def test_live_tick_emits_parent_deadlock_detected_event(kanban_home):
+    """Exact t_4f53c009 shape: parent blocks without naming child in
+    ``waiting_for``; child sits in ``todo`` behind the blocked parent.
+    One live tick must emit exactly one ``parent_deadlock_detected``
+    event on the child, with the parent id and the parent's block
+    event id captured in the payload so ``hermes kanban tail`` can
+    surface it and stall-watchdogs can act on it."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="review-child", assignee="reviewer",
+            parents=[parent],
+        )
+        # Parent goes blocked WITHOUT waiting_for=<child_id> — the
+        # invisible-deadlock shape.
+        assert kb.block_task(
+            conn, parent,
+            reason="review-required: needs approval",
+            kind="needs_input",
+        )
+        assert kb.get_task(conn, parent).status == "blocked"
+        assert kb.get_task(conn, child).status == "todo"
+
+    with kb.connect() as conn:
+        result = kb.dispatch_once(
+            conn, spawn_fn=lambda *a, **k: None, dry_run=False,
+        )
+    # Result field populated on live tick too (was dry-run-only).
+    assert (child, parent) in result.skipped_parent_deadlock
+
+    with kb.connect() as conn:
+        assert _count_events(conn, child, "parent_deadlock_detected") == 1
+        payload = _last_event(conn, child, "parent_deadlock_detected")
+        assert payload is not None
+        assert payload["parent_id"] == parent
+        # The block event id should be a positive integer (points at the
+        # parent's most recent ``blocked`` event).
+        assert isinstance(payload["parent_block_event_id"], int)
+        assert payload["parent_block_event_id"] > 0
+        assert "waiting_for" in payload["hint"]
+
+
+def test_live_tick_rate_limits_repeated_deadlock_emission(kanban_home):
+    """Repeated dispatch ticks on the same unresolved deadlock must
+    emit the event exactly once — not once per tick. The rate limit
+    key is the parent's most recent ``blocked`` event id."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="child", assignee="reviewer", parents=[parent],
+        )
+        assert kb.block_task(
+            conn, parent, reason="need info", kind="needs_input",
+        )
+
+    for _tick in range(5):
+        with kb.connect() as conn:
+            kb.dispatch_once(
+                conn, spawn_fn=lambda *a, **k: None, dry_run=False,
+            )
+
+    with kb.connect() as conn:
+        assert _count_events(conn, child, "parent_deadlock_detected") == 1
+
+
+def test_live_tick_reemits_after_new_block_event(kanban_home):
+    """A fresh ``blocked`` task_event on the parent resets the
+    rate-limit key so the NEXT deadlock cycle re-emits exactly once.
+    This is the intended behaviour: a re-block after an unblock is a
+    new deadlock cycle, and operators need to see it once.
+
+    We SQL-inject the second ``blocked`` event to sidestep the
+    BLOCK_RECURRENCE_LIMIT loop-breaker (``block_task`` routes a
+    repeat-block on the same parent to ``triage`` on the second hit).
+    That loop-breaker is intentional; here we're stress-testing the
+    dedup key, not the loop-breaker."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="child", assignee="reviewer", parents=[parent],
+        )
+        assert kb.block_task(
+            conn, parent, reason="cycle 1", kind="needs_input",
+        )
+
+    with kb.connect() as conn:
+        kb.dispatch_once(conn, spawn_fn=lambda *a, **k: None, dry_run=False)
+
+    # Emulate a fresh block cycle: insert a NEW 'blocked' event on the
+    # parent. Parent status stays 'blocked'; only the most-recent
+    # blocked event id (which is our dedup key) changes.
+    with kb.connect() as conn:
+        conn.execute(
+            "INSERT INTO task_events (task_id, kind, payload, created_at) "
+            "VALUES (?, 'blocked', ?, strftime('%s','now'))",
+            (parent, json.dumps({"reason": "cycle 2", "kind": "needs_input"})),
+        )
+        conn.commit()
+
+    with kb.connect() as conn:
+        kb.dispatch_once(conn, spawn_fn=lambda *a, **k: None, dry_run=False)
+
+    with kb.connect() as conn:
+        assert _count_events(conn, child, "parent_deadlock_detected") == 2
+
+
+def test_live_tick_does_not_emit_for_review_child_exception(kanban_home):
+    """The review-child exception (parent block names child in
+    ``waiting_for``) auto-promotes the child on the same tick. No
+    ``parent_deadlock_detected`` event should fire for that shape —
+    it is not a deadlock. Regression against over-eager emission."""
+    with kb.connect() as conn:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        child = kb.create_task(
+            conn, title="review-child", assignee="reviewer",
+            parents=[parent],
+        )
+        assert kb.block_task(
+            conn, parent, reason="review",
+            kind="needs_input", waiting_for=child,
+        )
+
+    with kb.connect() as conn:
+        kb.dispatch_once(conn, spawn_fn=lambda *a, **k: None, dry_run=False)
+
+    with kb.connect() as conn:
+        assert _count_events(conn, child, "parent_deadlock_detected") == 0
+        assert kb.get_task(conn, child).status in ("ready", "running")
