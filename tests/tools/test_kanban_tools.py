@@ -1063,6 +1063,12 @@ def strict_assignee_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_PROFILE", "test-worker")
     monkeypatch.delenv("HERMES_SESSION_ID", raising=False)
     monkeypatch.delenv("HERMES_KANBAN_VIRTUAL_ASSIGNEES", raising=False)
+    # t_15f3ec29: the top-level conftest sets
+    # HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE=1 as an autouse escape hatch so
+    # the entire test suite (which uses synthetic assignees like "a"/"w")
+    # keeps working after the DB-layer guard was added. These strict-env
+    # tests EXPECT the guard to fire, so delete the hatch here.
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE", raising=False)
     from pathlib import Path as _Path
     monkeypatch.setattr(_Path, "home", lambda: tmp_path)
 

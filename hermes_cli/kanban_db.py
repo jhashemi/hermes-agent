@@ -3650,6 +3650,30 @@ def create_task(
     if provider_override and not model_override:
         raise ValueError("provider_override requires a model_override")
     assignee = _canonical_assignee(assignee)
+    # Ghost-profile guard (t_15f3ec29). validate_assignee is already run at the
+    # kanban_create tool layer, but direct DB inserts (dashboard POST /tasks,
+    # `hermes kanban create` CLI, kanban_repository_facade, clarify_tool,
+    # decompose/swarm paths) bypass it. Enforcing here as well is
+    # defense-in-depth: three ghost-assignee stalls in one week
+    # ('orchestrator', 'cc-deployment-expert', 'cc-knowledge-architect',
+    # plus 'alice'/'default' on other boards) came in through insert paths
+    # that never touched the tool. Set
+    # ``HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE=1`` for an emergency escape
+    # hatch (migrations, replaying corrupt boards, tests that intentionally
+    # exercise this failure mode). Empty/None ``assignee`` is left to the
+    # ``kanban_create`` tool's own required-field check, keeping this
+    # helper orthogonal to that policy.
+    if assignee and not os.environ.get(
+        "HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE", ""
+    ).strip():
+        _assignee_err = validate_assignee(assignee)
+        if _assignee_err:
+            raise ValueError(
+                f"unknown_assignee: {assignee!r} is not a known profile "
+                f"on disk and not in the virtual-assignee registry. "
+                f"{_assignee_err.get('hint', '')} "
+                f"(set HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE=1 to override)"
+            )
     if not title or not title.strip():
         raise ValueError("title is required")
     if initial_status not in VALID_INITIAL_STATUSES:
