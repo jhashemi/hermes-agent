@@ -8389,9 +8389,12 @@ class DispatchResult:
     surface the deadlock instead of the child silently vanishing from
     the board — the operator can then either mark the parent's block
     as ``waiting_for=<child_id>`` (activates the review-child exception
-    and promotes the child) or unblock the parent by hand. Populated
-    only in dry-run to keep the hot-path scan bounded; live dispatch
-    ticks skip the extra query."""
+    and promotes the child) or unblock the parent by hand.
+
+    Populated on every tick (both dry-run and live). Live ticks
+    additionally emit one ``parent_deadlock_detected`` task_event per
+    (child, parent) pair per parent-block-event-id so ``hermes kanban
+    tail`` and stall-watchdogs see the pair without a dry-run poll."""
 
 
 # Bounded registry of recently-reaped worker child exits, populated by the
@@ -10462,30 +10465,92 @@ def _dispatch_once_locked(
             )
             if auto:
                 result.auto_blocked.append(claimed.id)
-    # Dry-run only: enumerate parent-deadlocked children so the operator
-    # can see WHY the queue looks empty when review children are gated
-    # behind blocked parents. Skipped on live ticks to keep the hot path
-    # cheap — the same information is recoverable from the DB by hand.
-    # See ``DispatchResult.skipped_parent_deadlock`` for the contract.
-    if dry_run:
-        deadlock_rows = conn.execute(
-            "SELECT c.id AS child_id, p.id AS parent_id "
-            "FROM tasks c "
-            "JOIN task_links l ON l.child_id = c.id "
-            "JOIN tasks p ON p.id = l.parent_id "
-            "WHERE c.status = 'todo' AND p.status = 'blocked'"
-        ).fetchall()
-        for row in deadlock_rows:
-            child_id = row["child_id"]
-            parent_id = row["parent_id"]
-            # Skip the review-child case (parent waiting on this child):
-            # that pattern is now auto-promoted by recompute_ready + the
-            # ``_effective_parent_status`` helper. Only genuine
-            # deadlocks (blocked parent NOT waiting on this child) end
-            # up in the bucket.
-            if _parent_blocked_waiting_for_child(conn, parent_id, child_id):
-                continue
-            result.skipped_parent_deadlock.append((child_id, parent_id))
+    # Enumerate parent-deadlocked children so the operator can see WHY
+    # the queue looks empty when review children are gated behind blocked
+    # parents. Populates ``DispatchResult.skipped_parent_deadlock`` on
+    # every tick (one indexed join — cheap) so both ``dispatch --dry-run``
+    # and live telemetry surface the pairs.
+    #
+    # On live ticks we additionally emit a ``parent_deadlock_detected``
+    # task_event per pair so ``hermes kanban tail`` and stall-watchdogs
+    # see the deadlock. Rate-limited to at most one emission per (child,
+    # parent) pair per parent-block-event-id: repeatedly detecting the
+    # same deadlock every tick would spam the event log until the
+    # operator either sets ``waiting_for=<child_id>`` on the parent's
+    # block (activates the review-child exception) or unblocks the
+    # parent by hand. See ``DispatchResult.skipped_parent_deadlock``
+    # and the review-child exception in ``_parent_blocked_waiting_for_child``.
+    deadlock_rows = conn.execute(
+        "SELECT c.id AS child_id, p.id AS parent_id "
+        "FROM tasks c "
+        "JOIN task_links l ON l.child_id = c.id "
+        "JOIN tasks p ON p.id = l.parent_id "
+        "WHERE c.status = 'todo' AND p.status = 'blocked'"
+    ).fetchall()
+    new_deadlock_pairs: list[tuple[str, str, int]] = []
+    for row in deadlock_rows:
+        child_id = row["child_id"]
+        parent_id = row["parent_id"]
+        # Skip the review-child case (parent waiting on this child):
+        # that pattern is auto-promoted by recompute_ready + the
+        # ``_effective_parent_status`` helper. Only genuine
+        # deadlocks (blocked parent NOT waiting on this child) end
+        # up in the bucket / emit the event.
+        if _parent_blocked_waiting_for_child(conn, parent_id, child_id):
+            continue
+        result.skipped_parent_deadlock.append((child_id, parent_id))
+        if dry_run:
+            continue
+        # Live tick: determine whether this pair still needs an event
+        # emitted. The key is the parent's most recent ``blocked`` event
+        # id — a fresh block on the same parent (kind flip, re-block
+        # after unblock) resets the rate limit so a new deadlock cycle
+        # re-fires exactly once.
+        parent_block_row = conn.execute(
+            "SELECT id FROM task_events "
+            "WHERE task_id = ? AND kind = 'blocked' "
+            "ORDER BY id DESC LIMIT 1",
+            (parent_id,),
+        ).fetchone()
+        if parent_block_row is None:
+            # Parent is ``blocked`` but has no ``blocked`` event? Legacy
+            # / manual SQL row — emit unconditionally, tagged with -1
+            # so future ticks can dedupe against the same sentinel.
+            parent_block_event_id = -1
+        else:
+            parent_block_event_id = int(parent_block_row["id"])
+        prior = conn.execute(
+            "SELECT 1 FROM task_events "
+            "WHERE task_id = ? AND kind = 'parent_deadlock_detected' "
+            "  AND json_extract(payload, '$.parent_id') = ? "
+            "  AND json_extract(payload, '$.parent_block_event_id') = ? "
+            "LIMIT 1",
+            (child_id, parent_id, parent_block_event_id),
+        ).fetchone()
+        if prior is not None:
+            continue
+        new_deadlock_pairs.append((child_id, parent_id, parent_block_event_id))
+    if new_deadlock_pairs:
+        # Emit inside a write txn so a crash mid-loop can't leave a
+        # half-populated event log. The txn is small (one INSERT per
+        # pair) and only runs when a NEW deadlock pair appears.
+        with write_txn(conn):
+            for child_id, parent_id, parent_block_event_id in new_deadlock_pairs:
+                _append_event(
+                    conn, child_id, "parent_deadlock_detected",
+                    {
+                        "parent_id": parent_id,
+                        "parent_block_event_id": parent_block_event_id,
+                        "hint": (
+                            "Parent is blocked but its block event does not "
+                            "name this child in waiting_for. To unblock: call "
+                            "kanban_block on the parent with "
+                            "waiting_for=<this_child_id> "
+                            "(activates the review-child exception and promotes "
+                            "the child to ready), or unblock the parent."
+                        ),
+                    },
+                )
     return result
 
 
@@ -10775,6 +10840,94 @@ def _retag_legacy_worker_sessions(workspaces_root_path: str) -> None:
         _retagged_workspace_roots.add(workspaces_root_path)
     except Exception as exc:
         _log.debug("kanban worker: legacy session retag skipped (%s)", exc)
+
+
+def _should_detach_worker_cgroup() -> bool:
+    """Return True if new kanban workers should be spawned into their own cgroup.
+
+    Opt-in for the initial rollout: set ``HERMES_KANBAN_SPAWN_DETACH=1``
+    (or ``true``/``yes``/``on``) in the gateway's environment to enable.
+    Any other value — or the env var unset — keeps the legacy
+    gateway-cgroup-attached spawn.
+
+    The right place to set this is the gateway systemd unit's
+    ``[Service] Environment=`` block, so every dispatcher tick in the
+    long-lived daemon spawns detached without affecting one-shot
+    ``hermes kanban ...`` CLI invocations, test harnesses, or foreign
+    integrators. Once operational confidence has built up (weeks, not
+    days), the default can be flipped without changing any test.
+
+    Even when the env var is on, the wrapper only fires on Linux hosts
+    with a user-scope systemd manager (``XDG_RUNTIME_DIR`` set) and
+    ``systemd-run`` on PATH. On any other host the guard returns False
+    and the legacy attached spawn is used — no worker is ever refused
+    because the host can't satisfy the detach precondition.
+
+    See t_6ca85bd2 — the cgroup detach exists specifically so a gateway
+    stop/restart does NOT tear down every worker in flight.
+    """
+    override = os.environ.get("HERMES_KANBAN_SPAWN_DETACH", "").strip().lower()
+    if override not in ("1", "true", "yes", "on"):
+        return False
+    # Enabled — now check the host can actually satisfy it.
+    if _IS_WINDOWS:
+        return False
+    if not sys.platform.startswith("linux"):
+        return False
+    if not os.environ.get("XDG_RUNTIME_DIR"):
+        return False
+    if _find_executable("systemd-run") is None:
+        return False
+    return True
+
+
+def _find_executable(name: str) -> "Optional[str]":
+    """Return an absolute path for ``name`` on PATH, or ``None``.
+
+    Thin wrapper over :func:`shutil.which` — pulled out so tests can
+    monkeypatch a single seam.
+    """
+    import shutil
+    return shutil.which(name)
+
+
+# Slice under which detached workers are placed. Kept in sync with the
+# hermes-workers.slice unit if one is later shipped as a systemd unit — but
+# ``systemd-run`` auto-creates a transient slice with this name on first
+# use, so no pre-provisioned unit is required for the fix to land.
+_KANBAN_WORKER_SLICE = "hermes-workers.slice"
+
+
+def _wrap_argv_for_cgroup_detach(cmd: list) -> list:
+    """Prepend ``systemd-run --user --scope --slice=… --`` to ``cmd``.
+
+    ``--scope`` is critical: it creates a *transient scope* around the
+    argv and then execs the argv (systemd-run itself becomes the target
+    binary). That means the returned pid from ``subprocess.Popen`` is the
+    worker's real pid — not a wrapper's — so ``_pid_alive``,
+    ``_popen_retention`` / ``_sweep_popen_retention``, and
+    ``Popen.poll()``-based exit classification all continue to work
+    unchanged.
+
+    ``--slice=hermes-workers.slice`` places the transient scope under a
+    dedicated slice so it is trivially inspectable / kill-able as a group
+    (``systemctl --user status hermes-workers.slice``) and can carry its
+    own resource controls later without changing this call.
+
+    The returned argv is a new list; the original is not mutated.
+    """
+    return [
+        "systemd-run",
+        "--user",
+        "--scope",
+        f"--slice={_KANBAN_WORKER_SLICE}",
+        "--quiet",
+        # ``--`` guarantees systemd-run treats subsequent items as the
+        # target argv rather than its own options, even if a future
+        # worker-command flag happens to collide with a systemd-run flag.
+        "--",
+        *cmd,
+    ]
 
 
 def _default_spawn(
@@ -11087,11 +11240,42 @@ def _default_spawn(
                 # Fall through to local spawn below
     # ── End cluster routing ─────────────────────────────────────────
 
+    # ── cgroup detach (t_6ca85bd2) ─────────────────────────────────────
+    # By default the gateway spawns workers as its own subprocess children
+    # inside the ``hermes-gateway.service`` unit cgroup. When systemd stops
+    # or restarts the gateway (routine deploy, OOM, ``systemctl restart``),
+    # it tears down the *whole* unit cgroup with ``KillMode=mixed`` and
+    # SIGKILLs every worker in flight — regardless of ``start_new_session``,
+    # because cgroup membership is orthogonal to session/process groups.
+    # Proven live 2026-08-29: a user-manager gateway stop killed 6 workers
+    # across 2 boards, each losing its full working context.
+    #
+    # Fix: wrap the argv with ``systemd-run --user --scope --slice=...``.
+    # ``--scope`` moves the child into a fresh transient scope under a
+    # dedicated ``hermes-workers.slice``, so it is no longer part of the
+    # gateway's cgroup. Because ``--scope`` execs into the target command,
+    # ``Popen.pid`` still returns the worker's real pid, ``Popen.poll()``
+    # still returns the worker's real exit code, and every existing reap
+    # path (``_pid_alive``, ``_popen_retention``, ``_sweep_popen_retention``,
+    # ``_classify_worker_exit``) works unchanged for the same-gateway
+    # lifetime.
+    #
+    # Guarded by ``_should_detach_worker_cgroup()`` — a no-op on Windows,
+    # macOS, systems without ``systemd-run`` on PATH, or when the user
+    # sets ``HERMES_KANBAN_SPAWN_DETACH=0`` to bypass (e.g. inside test
+    # harnesses that mock ``subprocess.Popen`` and don't want the extra
+    # argv layer).
+    spawn_cmd = cmd
+    detached = False
+    if _should_detach_worker_cgroup():
+        spawn_cmd = _wrap_argv_for_cgroup_detach(cmd)
+        detached = spawn_cmd is not cmd
+
     # Use 'a' so a re-run on unblock appends rather than overwrites.
     log_f = open(log_path, "ab")
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
-            cmd,
+            spawn_cmd,
             cwd=workspace if os.path.isdir(workspace) else None,
             stdin=subprocess.DEVNULL,
             stdout=log_f,
@@ -11102,10 +11286,38 @@ def _default_spawn(
         )
     except FileNotFoundError:
         log_f.close()
-        raise RuntimeError(
-            "`hermes` executable not found on PATH. "
-            "Install Hermes Agent or activate its venv before running the kanban dispatcher."
-        )
+        # If the detach wrapper is what failed (e.g. systemd-run appeared
+        # on PATH between the guard check and the exec), retry without it
+        # so a mis-configured host still spawns workers — the old
+        # gateway-cgroup-attached path is degraded but functional.
+        if detached:
+            logger.warning(
+                "[dispatch] detached spawn failed (systemd-run missing at "
+                "exec time); retrying without cgroup detach"
+            )
+            log_f = open(log_path, "ab")
+            try:
+                proc = subprocess.Popen(  # noqa: S603 -- fallback path
+                    cmd,
+                    cwd=workspace if os.path.isdir(workspace) else None,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
+                )
+            except FileNotFoundError:
+                log_f.close()
+                raise RuntimeError(
+                    "`hermes` executable not found on PATH. "
+                    "Install Hermes Agent or activate its venv before running the kanban dispatcher."
+                )
+        else:
+            raise RuntimeError(
+                "`hermes` executable not found on PATH. "
+                "Install Hermes Agent or activate its venv before running the kanban dispatcher."
+            )
     # NOTE: we intentionally do NOT close log_f here — we want Popen's
     # child process to keep writing after this function returns.  The
     # handle is kept alive by the child's inheritance.  The parent's
