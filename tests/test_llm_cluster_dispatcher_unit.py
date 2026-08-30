@@ -28,6 +28,14 @@ import llm_cluster_dispatcher as lcd
 # Fixtures / builders
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _isolated_breaker(tmp_path):
+    """Isolate the circuit breaker from the live production state file.
+
+    CircuitBreaker class was removed in a refactor. This fixture is now a no-op.
+    """
+    yield
+
 def make_telemetry(node_id="hermes1", cpu_count=16, load_1min=0.5,
                    mem_avail_gb=22.0, disk_free_pct=57.0, active_workers=0,
                    max_workers=16, heartbeat_age_s=0.0, status="healthy"):
@@ -952,3 +960,264 @@ class TestOllamaKeyEnvFileBranch:
         (d / ".env").write_text("FOO=bar\nOLLAMA_API_KEY=real_key\nBAZ=qux\n")
         with mock.patch.object(Path, "home", return_value=tmp_path):
             assert lcd._ollama_key() == "real_key"
+
+
+# ---------------------------------------------------------------------------
+# evaluate_node() — regression tests for hard gates + nervous-system gates
+# ---------------------------------------------------------------------------
+
+class TestEvaluateNode:
+    """Verify five legacy hard gates remain unaffected by nervous-system gate insertion.
+    
+    Acceptance criteria:
+    1. Each hard gate fires with original threshold and message
+    2. Relative ordering among hard gates is unchanged
+    3. When all nervous-system probes are GREEN, decisions are identical to pre-change
+    """
+    
+    def test_evaluate_node_healthy_all_green_returns_none(self):
+        """Baseline: healthy node, all metrics within bounds, no nervous gates.
+        
+        When all nervous-system probes pass (empty probe_state) and all hard gates
+        pass, evaluate_node() should return None (eligible).
+        """
+        node = make_telemetry(
+            node_id="hermes1",
+            status="healthy",
+            heartbeat_age_s=10.0,  # well under HEARTBEAT_STALE_S=120
+            cpu_count=16,
+            load_1min=8.0,  # load_ratio = 0.5, well under 0.85
+            disk_free_pct=50.0,  # well above DISK_FREE_HARD_MIN_PCT=8
+            active_workers=8,
+            max_workers=16,  # well below capacity
+        )
+        task = {}
+        probe_state = {}  # all nervous-system probes green
+        
+        result = lcd.evaluate_node(node, task, probe_state)
+        assert result is None, "Healthy node with all metrics passing should be eligible"
+    
+    def test_evaluate_node_nervous_gate_rejection_first(self):
+        """Nervous-system gates run BEFORE hard gates.
+        
+        Even if hard gates would pass, a nervous-system gate rejection prevents
+        hard-gate evaluation and returns the nervous-gate rejection reason.
+        """
+        node = make_telemetry(
+            status="healthy",
+            heartbeat_age_s=10.0,
+            cpu_count=16,
+            load_1min=8.0,
+            disk_free_pct=50.0,
+            active_workers=8,
+            max_workers=16,
+        )
+        task = {}
+        
+        # Mock _check_nervous_system_gates to simulate a rejection
+        with mock.patch.object(
+            lcd, "_check_nervous_system_gates",
+            return_value=("memory_pressure", "mem_avail < threshold")
+        ):
+            result = lcd.evaluate_node(node, task, {})
+        
+        assert result is not None, "Nervous-gate rejection should prevent hard-gate checks"
+        assert result[0] == "memory_pressure"
+        assert "mem_avail < threshold" in result[1]
+    
+    def test_hard_gate_status_health_check(self):
+        """Hard gate 1: status != "healthy" is rejected.
+        
+        Threshold: exactly one value allowed: "healthy".
+        Message contains: node_id, status.
+        """
+        node = make_telemetry(status="overloaded")
+        result = lcd.evaluate_node(node, {}, {})
+        
+        assert result is not None, "Non-healthy status should be rejected"
+        assert result[0] == "health"
+        assert "status=overloaded" in result[1]
+        assert node.node_id in result[1]
+    
+    def test_hard_gate_heartbeat_stale_threshold_120s(self):
+        """Hard gate 2: heartbeat_age_s > 120 is rejected.
+        
+        Threshold: HEARTBEAT_STALE_S = 120.0
+        Boundary: exactly 120 passes; 120.1 fails.
+        Message contains: node_id, age_s, threshold.
+        """
+        # Just over the threshold
+        node_stale = make_telemetry(heartbeat_age_s=120.1)
+        result_stale = lcd.evaluate_node(node_stale, {}, {})
+        assert result_stale is not None
+        assert result_stale[0] == "heartbeat"
+        assert "120.1" in result_stale[1]
+        assert "120" in result_stale[1]
+        
+        # Exactly at threshold (boundary)
+        node_boundary = make_telemetry(heartbeat_age_s=120.0)
+        result_boundary = lcd.evaluate_node(node_boundary, {}, {})
+        assert result_boundary is None, "Heartbeat exactly at 120s should still be eligible"
+    
+    def test_hard_gate_load_ratio_threshold_0_85(self):
+        """Hard gate 3: load_ratio > 0.85 is rejected.
+        
+        Threshold: LOAD_RATIO_HARD_MAX = 0.85
+        Boundary: 0.85 passes; 0.851 fails.
+        load_ratio = load_1min / max(1, cpu_count)
+        """
+        # Just over threshold: cpu_count=16, load_1min=13.61 => ratio=0.850625
+        node_over = make_telemetry(cpu_count=16, load_1min=13.61)
+        result_over = lcd.evaluate_node(node_over, {}, {})
+        assert result_over is not None
+        assert result_over[0] == "load_ratio"
+        
+        # At exact boundary: load_ratio = 0.85
+        node_at = make_telemetry(cpu_count=16, load_1min=13.6)
+        result_at = lcd.evaluate_node(node_at, {}, {})
+        assert result_at is None, "load_ratio exactly at 0.85 should be eligible"
+    
+    def test_hard_gate_disk_free_threshold_8pct(self):
+        """Hard gate 4: disk_free_pct < 8 is rejected.
+        
+        Threshold: DISK_FREE_HARD_MIN_PCT = 8.0
+        Boundary: 8.0 passes; 7.9 fails.
+        Message contains: node_id, free_pct, threshold.
+        """
+        # Below threshold
+        node_low = make_telemetry(disk_free_pct=7.9)
+        result_low = lcd.evaluate_node(node_low, {}, {})
+        assert result_low is not None
+        assert result_low[0] == "disk_free"
+        assert "7.9" in result_low[1]
+        
+        # Exactly at threshold (boundary)
+        node_boundary = make_telemetry(disk_free_pct=8.0)
+        result_boundary = lcd.evaluate_node(node_boundary, {}, {})
+        assert result_boundary is None, "disk_free_pct exactly at 8.0 should be eligible"
+    
+    def test_hard_gate_active_workers_capacity(self):
+        """Hard gate 5: active_workers >= max_workers is rejected.
+        
+        Threshold: active_workers must be strictly < max_workers.
+        Boundary: active_workers=15, max_workers=16 passes; 16>=16 fails.
+        Message contains: node_id, active_workers, max_workers.
+        """
+        # At capacity (equal)
+        node_at_capacity = make_telemetry(active_workers=16, max_workers=16)
+        result_at = lcd.evaluate_node(node_at_capacity, {}, {})
+        assert result_at is not None
+        assert result_at[0] == "active_workers"
+        assert "16" in result_at[1]
+        
+        # One below capacity (boundary)
+        node_one_below = make_telemetry(active_workers=15, max_workers=16)
+        result_below = lcd.evaluate_node(node_one_below, {}, {})
+        assert result_below is None, "active_workers one below capacity should be eligible"
+    
+    def test_hard_gates_evaluation_order_preserved(self):
+        """Hard gates are evaluated in order: status → heartbeat → load → disk → workers.
+        
+        When multiple hard gates fail, the first one in order is returned.
+        This verifies the ordering is unchanged from the original implementation.
+        """
+        # Fail multiple gates; expect the first one to be reported
+        node = make_telemetry(
+            status="unhealthy",  # Fails gate 1 (status)
+            heartbeat_age_s=200.0,  # Fails gate 2 (heartbeat)
+            cpu_count=16,
+            load_1min=20.0,  # Fails gate 3 (load_ratio > 0.85)
+            disk_free_pct=5.0,  # Fails gate 4 (disk < 8%)
+            active_workers=16,
+            max_workers=16,  # Fails gate 5 (workers at capacity)
+        )
+        result = lcd.evaluate_node(node, {}, {})
+        
+        assert result is not None
+        assert result[0] == "health", "Status check should be first gate evaluated"
+    
+    def test_hard_gate_disk_check_before_workers_check(self):
+        """Disk check (gate 4) runs before workers check (gate 5).
+        
+        When both disk and workers gates would fail, disk failure is reported first.
+        """
+        node = make_telemetry(
+            status="healthy",
+            heartbeat_age_s=10.0,
+            cpu_count=16,
+            load_1min=8.0,
+            disk_free_pct=5.0,  # Below 8% threshold
+            active_workers=16,
+            max_workers=16,  # At capacity
+        )
+        result = lcd.evaluate_node(node, {}, {})
+        
+        assert result is not None
+        assert result[0] == "disk_free", "Disk check should come before workers check"
+    
+    def test_hard_gate_load_check_before_disk_check(self):
+        """Load check (gate 3) runs before disk check (gate 4).
+        
+        When both load and disk gates would fail, load failure is reported first.
+        """
+        node = make_telemetry(
+            status="healthy",
+            heartbeat_age_s=10.0,
+            cpu_count=16,
+            load_1min=16.0,  # Above 0.85 threshold (ratio = 1.0)
+            disk_free_pct=5.0,  # Below 8% threshold
+            active_workers=8,
+            max_workers=16,
+        )
+        result = lcd.evaluate_node(node, {}, {})
+        
+        assert result is not None
+        assert result[0] == "load_ratio", "Load check should come before disk check"
+    
+    def test_node_passes_all_hard_gates_returns_none(self):
+        """Comprehensive test: node passing all hard gates returns None.
+        
+        This is the success path showing that the hard gates still function
+        as originally designed when all conditions are met.
+        """
+        node = make_telemetry(
+            node_id="hermes2",
+            status="healthy",
+            heartbeat_age_s=30.0,  # < 120
+            cpu_count=8,
+            load_1min=4.0,  # ratio = 0.5, < 0.85
+            disk_free_pct=42.0,  # >= 8
+            active_workers=3,  # < 8
+            max_workers=8,
+        )
+        
+        # No nervous-system rejection
+        with mock.patch.object(lcd, "_check_nervous_system_gates", return_value=None):
+            result = lcd.evaluate_node(node, {}, {})
+        
+        assert result is None, "Node should be eligible when all gates pass"
+    
+    def test_evaluate_node_with_multiple_nodes_consistent_decisions(self):
+        """Test multiple nodes get consistent evaluation under same conditions.
+        
+        Nodes with identical metrics should receive identical evaluation results.
+        This verifies no state leakage between invocations.
+        """
+        metrics = dict(
+            status="healthy",
+            heartbeat_age_s=15.0,
+            cpu_count=16,
+            load_1min=10.0,
+            disk_free_pct=35.0,
+            active_workers=7,
+            max_workers=16,
+        )
+        
+        node1 = make_telemetry(node_id="hermes1", **metrics)
+        node2 = make_telemetry(node_id="hermes2", **metrics)
+        
+        with mock.patch.object(lcd, "_check_nervous_system_gates", return_value=None):
+            result1 = lcd.evaluate_node(node1, {}, {})
+            result2 = lcd.evaluate_node(node2, {}, {})
+        
+        assert result1 == result2, "Identical nodes should receive identical decisions"

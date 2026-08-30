@@ -37,7 +37,7 @@ dependencies = [
   # extra and gets lazy-installed via `tools/lazy_deps.py` when the
   # user picks that backend. Smaller `dependencies` = smaller blast
   # radius for the next supply-chain attack.
-  "openai==2.24.0",
+  "openai[realtime]>=2.50,<3",
   "certifi==2026.5.20",
   "python-dotenv==1.2.2",
   "fire==0.7.1",
@@ -142,6 +142,16 @@ dependencies = [
   # through this native module in-process; shared metrics installs no network
   # exporter and consumes only its bounded projection.
   "nemo-relay>=0.6.0,<0.7; (sys_platform == 'darwin' and platform_machine == 'arm64') or (sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'linux' and platform_machine == 'aarch64') or (sys_platform == 'win32' and platform_machine == 'AMD64') or (sys_platform == 'win32' and platform_machine == 'ARM64')",
+  # RCA 2026-08-24 (KR3b — ops): required by executive_agents_platform's
+  # AsyncMemoryStore (src/memory/memory_store.py). The venv that runs ALL
+  # voice twins (ExecStart=/home/ubuntu/hermes-agent/venv/bin/python3) was
+  # missing sqlalchemy, triggering the [MemoryStore] JSON-fallback degradation
+  # warning 6x per session. greenlet is sqlalchemy's required async extension
+  # on CPython. aiosqlite is the async SQLite driver used by the AsyncStore.
+  # Exact pins follow the project's supply-chain policy (see comments above).
+  "sqlalchemy==2.0.51",
+  "greenlet==3.5.5",
+  "aiosqlite==0.22.1",
 ]
 
 [project.optional-dependencies]

@@ -508,6 +508,62 @@ class TestRuntimeRepair:
 
 
 class TestRuntimeCutover:
+    def test_stage_candidate_venv_syncs_frozen_not_locked(self, tmp_path):
+        """The candidate sync must install exactly-as-locked (--frozen), not
+        assert lock freshness (--locked).
+
+        uv >= 0.12 removed global exclude-newer; when uv.lock records that
+        policy, every freshly bootstrapped uv fails ``uv sync --locked`` with
+        "The lockfile at `uv.lock` needs to be updated, but `--locked` was
+        provided", aborting the runtime repair before cutover. Found by the
+        VFE-KANBAN-CORRUPTION-02 repair canary (t_f9d37efd), validated
+        end-to-end SQLite 3.45.1 → 3.53.1 with --frozen.
+        """
+        from hermes_cli import managed_uv as mu
+
+        root = tmp_path / "checkout"
+        root.mkdir()
+        (root / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        (root / "uv.lock").write_text("# lock\n", encoding="utf-8")
+        runtime_root = root / ".hermes-runtime"
+        runtime_root.mkdir()
+        generation = runtime_root / "python" / "generation-test"
+        candidate_python = generation / "bin" / "python"
+        candidate_python.parent.mkdir(parents=True)
+        candidate_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        candidate_python.chmod(0o755)
+        fixed = _runtime_info(candidate_python, (3, 53, 1))
+
+        sync_cmds: list[list[str]] = []
+
+        def fake_run(cmd, *args, **kwargs):
+            argv = [str(c) for c in cmd]
+            if "venv" in argv[:2] or (len(argv) > 1 and argv[1] == "venv"):
+                out = SimpleNamespace(returncode=0, stderr="", stdout="")
+            elif "sync" in argv[:2] or (len(argv) > 1 and argv[1] == "sync"):
+                sync_cmds.append(argv)
+                out = SimpleNamespace(returncode=0, stderr="", stdout="")
+            else:
+                out = SimpleNamespace(returncode=0, stderr="", stdout="")
+            return out
+
+        with patch.object(mu.subprocess, "run", side_effect=fake_run), \
+             patch.object(mu, "_smoke_candidate_venv", return_value=(True, "", fixed)):
+            candidate = mu._stage_candidate_venv(
+                "uv", project_root=root, generation=generation, python=candidate_python
+            )
+
+        assert candidate is not None, "staging must succeed with mocked subprocess"
+        assert sync_cmds, "a uv sync command must have been issued"
+        sync_argv = sync_cmds[0]
+        assert "--frozen" in sync_argv, (
+            f"candidate sync must pass --frozen (uv>=0.12 rejects --locked "
+            f"on lockfiles recording exclude-newer): {sync_argv}"
+        )
+        assert "--locked" not in sync_argv, (
+            f"candidate sync must not pass --locked: {sync_argv}"
+        )
+
     def test_os_lock_blocks_concurrent_repair_and_releases(self, tmp_path):
         from hermes_cli.managed_uv import _acquire_repair_lock, _release_repair_lock
 

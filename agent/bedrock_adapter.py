@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import re
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1015,6 +1016,51 @@ def stream_converse_with_callbacks(
 # High-level API: call Bedrock Converse
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Model output-token caps (Bedrock)
+# ---------------------------------------------------------------------------
+# Bedrock Converse rejects maxTokens above the model's output limit with a
+# ValidationException — which retries can never fix, so the whole cascade
+# dead-ends (observed 2026-08-24: agent max_tokens=131072 vs sonnet-4-6
+# limit 128000, haiku-4-5 limit 64000). Clamp at request-build time so the
+# request is always valid regardless of config drift.
+
+_BEDROCK_OUTPUT_LIMITS = {
+    "claude-sonnet-4-6": 128_000,
+    "claude-haiku-4-5": 64_000,
+    "claude-opus-4-7": 32_000,
+}
+_BEDROCK_DEFAULT_OUTPUT_LIMIT = 64_000
+
+# Rate-limited clamp logging (avoid log spam on every request).
+_last_clamp_log = {"ts": 0.0, "key": ""}
+
+
+def _get_bedrock_max_output(model: str) -> int:
+    """Substring match so date-stamped IDs (…-20251001-v1:0) resolve."""
+    m = model.lower()
+    for name, cap in _BEDROCK_OUTPUT_LIMITS.items():
+        if name in m:
+            return cap
+    return _BEDROCK_DEFAULT_OUTPUT_LIMIT
+
+
+def clamp_max_tokens(model: str, max_tokens: int) -> int:
+    """Clamp requested max_tokens to the model's output limit, logging once/min."""
+    cap = _get_bedrock_max_output(model)
+    if max_tokens > cap:
+        now = time.monotonic()
+        key = f"{model}:{max_tokens}>{cap}"
+        if now - _last_clamp_log["ts"] > 60 or _last_clamp_log["key"] != key:
+            logger.info(
+                "Bedrock max_tokens clamped %s -> %s for %s (model output limit)",
+                max_tokens, cap, model,
+            )
+            _last_clamp_log.update(ts=now, key=key)
+        return cap
+    return max_tokens
+
+
 def build_converse_kwargs(
     model: str,
     messages: List[Dict],
@@ -1036,7 +1082,7 @@ def build_converse_kwargs(
         "modelId": model,
         "messages": converse_messages,
         "inferenceConfig": {
-            "maxTokens": max_tokens,
+            "maxTokens": clamp_max_tokens(model, max_tokens),
         },
     }
 

@@ -9,8 +9,12 @@ Provides commands:
   /access-revoke      - Revoke access from a user
   /access-status      - Check if current user has access
 
-Thread-safety: All methods are protected by threading.Lock() to prevent race
+Thread-safety: All methods are protected by threading.RLock() to prevent race
 conditions during concurrent access to the whitelist and JSON file operations.
+RLock (reentrant) is used so a lock-holding method can safely call another
+lock-guarded helper without self-deadlocking. File writes use write-to-temp
++ os.replace() for atomicity, so a concurrent reader (or a crash mid-write)
+never observes a partial/corrupted JSON file.
 
 Audit Logging: All access grant/revoke operations are logged to ~/.hermes/audit.log
 with timestamp, user_id, action, and grantor_id for compliance and debugging.
@@ -18,6 +22,7 @@ with timestamp, user_id, action, and grantor_id for compliance and debugging.
 
 import os
 import json
+import tempfile
 import threading
 import re
 from typing import Set, Optional, Dict, Any, Union
@@ -28,8 +33,11 @@ from gateway.error_response import (
     ErrorResponse,
     ErrorCode,
     ErrorSeverity,
+    EmojiIcon,
     create_access_denied_error,
     create_validation_error,
+    format_info,
+    format_success,
 )
 
 
@@ -103,8 +111,11 @@ class AccessControlManager:
 
     def __init__(self):
         self.whitelist: Set[str] = set(DEFAULT_WHITELIST)
-        self._lock = threading.Lock()  # Protects whitelist and file I/O
-        self._audit_lock = threading.Lock()  # Protects audit log I/O
+        # RLock (reentrant) is used so a lock-holding method may safely call
+        # another lock-guarded helper (e.g. grant_access -> _save_to_file)
+        # without self-deadlocking. Required by P2-002 DoD.
+        self._lock = threading.RLock()  # Protects whitelist and file I/O
+        self._audit_lock = threading.RLock()  # Protects audit log I/O
         self._load_from_file()
 
     def _load_from_file(self):
@@ -128,8 +139,12 @@ class AccessControlManager:
         self._save_to_file()
 
     def _save_to_file(self):
-        """Persist whitelist to disk.
-        
+        """Persist whitelist to disk atomically.
+
+        Uses write-to-temp + os.replace() so a crash or concurrent reader
+        never sees a partially-written / truncated JSON file. os.replace()
+        is atomic on POSIX and Windows for same-filesystem renames.
+
         NOTE: Must be called with self._lock held.
         """
         try:
@@ -137,7 +152,29 @@ class AccessControlManager:
                 "whitelist": sorted(list(self.whitelist)),
                 "description": "WhatsApp gateway access control",
             }
-            ACCESS_CONTROL_FILE.write_text(json.dumps(data, indent=2))
+            payload = json.dumps(data, indent=2)
+            target = ACCESS_CONTROL_FILE
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Temp file lives in the same directory so os.replace() stays
+            # on the same filesystem (required for atomicity).
+            fd, tmp_path = tempfile.mkstemp(
+                prefix=".access_control.",
+                suffix=".json.tmp",
+                dir=str(target.parent),
+            )
+            try:
+                with os.fdopen(fd, "w") as tmp:
+                    tmp.write(payload)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                os.replace(tmp_path, target)  # atomic rename
+            except Exception:
+                # Clean up the temp file if the rename never happened.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             import logging
             logging.error(f"Failed to save access control: {e}")
@@ -309,14 +346,23 @@ def require_access(command_name: str):
             manager = get_access_manager()
             if not manager.has_access(event):
                 user_id = manager.get_user_id(event)
-                return (
-                    f"🚫 Access Denied\n\n"
-                    f"User: {user_id}\n"
-                    f"Command: /{command_name}\n\n"
+                error = create_access_denied_error(
+                    user_id=user_id,
+                    command=command_name,
+                    reason=(
+                        "You don't have permission to use this command. "
+                        "Contact an administrator. Current access: /access-status"
+                    ),
+                )
+                # Preserve the extra context detail the old hand-rolled string
+                # carried (command name + hint) so operators still see it.
+                error.context["details"] = (
+                    f"Command: /{command_name}\n"
                     f"You don't have permission to use this command. "
                     f"Contact an administrator.\n\n"
                     f"Current access: /access-status"
                 )
+                return error.to_emoji_response()
             return await func(gateway_runner, event, *args, **kwargs)
         return wrapper
     return decorator
@@ -396,13 +442,13 @@ async def handle_access_grant_command(
     newly_added = manager.grant_access(user_id, grantor_id=requester_id)
 
     if newly_added:
-        return (
-            f"✅ Granted access to **{user_id}**\\n\\n"
+        return format_success(
+            f"Granted access to **{user_id}**\\n\\n"
             f"They can now use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
-        return f"ℹ️ User **{user_id}** already has access."
+        return format_info(f"User **{user_id}** already has access.")
 
 
 async def handle_access_revoke_command(
@@ -472,13 +518,13 @@ async def handle_access_revoke_command(
     was_removed = manager.revoke_access(user_id, grantor_id=requester_id)
 
     if was_removed:
-        return (
-            f"✅ Revoked access from **{user_id}**\\n\\n"
+        return format_success(
+            f"Revoked access from **{user_id}**\\n\\n"
             f"They can no longer use agent and instance commands.\\n\\n"
             f"Current access: /access-list"
         )
     else:
-        return f"ℹ️ User **{user_id}** did not have access to revoke."
+        return format_info(f"User **{user_id}** did not have access to revoke.")
 
 
 async def handle_access_status_command(
@@ -490,7 +536,7 @@ async def handle_access_status_command(
     user_id = manager.get_user_id(event)
     has_access = manager.has_access(event)
 
-    status_icon = "✅" if has_access else "🚫"
+    status_icon = EmojiIcon.SUCCESS if has_access else EmojiIcon.ACCESS_DENIED
     permission = "Granted" if has_access else "Denied"
 
     return (

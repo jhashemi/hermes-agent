@@ -50,11 +50,11 @@ export default function ProgressScreen({ bootstrap }: ProgressProps) {
   }, [bootstrap.status])
 
   const isUpdate = mode === 'update'
-  const title = bootstrap.status === 'completed' ? 'Done' : isUpdate ? 'Updating Hermes' : 'Setting up Hermes Agent'
+  const title = bootstrap.status === 'completed' ? 'Done' : isUpdate ? 'Updating AI Assistant' : 'Setting up AI Assistant'
 
   const description = isUpdate
-    ? 'Hermes is updating to the latest version — this only takes a moment.'
-    : 'This is a one-time setup. The Hermes installer is downloading dependencies and configuring your machine. Subsequent launches will skip this step.'
+    ? 'AI Assistant is updating to the latest version. This only takes a moment.'
+    : 'This is a one-time setup. AI Assistant is downloading and configuring everything it needs. Later launches will be much faster.'
 
   const pct = Math.round(progress.fraction * 100)
 

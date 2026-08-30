@@ -1549,6 +1549,239 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _signaled_status(signum: int) -> int:
+    """Raw wait-status for a WIFSIGNALED child with the given signal number."""
+    return signum & 0x7F
+
+
+# ---------------------------------------------------------------------------
+# FIX-A: Popen retention tests
+#
+# These tests verify the fix for the Popen-retention bug where _default_spawn()
+# discarded the Popen handle, allowing Python's GC to consume the child exit
+# status through subprocess._active before reap_worker_zombies() could record
+# it into _recent_worker_exits.  Without the fix, _classify_worker_exit()
+# returned ("unknown", None) for every spawned worker — the root cause of the
+# 90% "pid N not alive" classifier failure on adr-006b-phase-2.
+# ---------------------------------------------------------------------------
+
+
+def test_popen_retention_sigkill_classified_as_signaled(
+    kanban_home, monkeypatch,
+):
+    """Worker killed by SIGKILL (rc=137 shell, Popen.returncode=-9) is
+    classified as 'signaled' with signal 9, not 'unknown'.
+
+    This is the primary regression guard for FIX-A: a Popen handle in
+    _popen_retention whose child exits with signal 9 must be swept by
+    reap_worker_zombies() and recorded into _recent_worker_exits so the
+    crash classifier returns 'killed by signal 9' instead of 'pid N not alive'.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98001
+
+    # Build a mock Popen object whose poll() reports SIGKILL (returncode = -9).
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = -9  # Python encodes SIGKILL as -9
+
+    # Seed the retention dict directly (simulates _default_spawn storing it).
+    _kb._popen_retention[pid] = mock_proc
+
+    # Ensure no stale entry from a previous test.
+    _kb._recent_worker_exits.pop(pid, None)
+
+    # reap_worker_zombies() calls _sweep_popen_retention() internally.
+    _kb.reap_worker_zombies()
+
+    # After the sweep, the entry must be gone from the retention dict.
+    assert pid not in _kb._popen_retention, (
+        "handle should be pruned after exit is recorded"
+    )
+
+    # And _classify_worker_exit must now return 'signaled' with signal 9.
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "signaled", (
+        f"expected 'signaled', got '{kind}' — Popen retention sweep not working"
+    )
+    assert code == 9, f"expected signal 9 (SIGKILL), got {code}"
+
+    # Verify this is the 'killed by signal 9' error text path used by
+    # detect_crashed_workers to stamp run.error.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="sigkill-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        # Re-seed so detect_crashed_workers can find it (reap already pruned it).
+        _kb._record_worker_exit(pid, _kb._popen_returncode_to_raw_status(-9))
+
+        kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.last_failure_error is not None
+        assert "killed by signal 9" in task.last_failure_error, (
+            f"expected 'killed by signal 9' in error, got: {task.last_failure_error!r}"
+        )
+
+
+def test_popen_retention_nonzero_exit_classified_correctly(
+    kanban_home, monkeypatch,
+):
+    """Worker that exits with rc=2 is classified as 'nonzero_exit' with code 2,
+    not 'unknown'.
+
+    Regression guard: a Popen handle with returncode=2 must be swept by
+    reap_worker_zombies() so run.error reads 'pid N exited with code 2'.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98002
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = 2  # Normal exit, code 2
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb.reap_worker_zombies()
+
+    assert pid not in _kb._popen_retention
+
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "nonzero_exit", (
+        f"expected 'nonzero_exit', got '{kind}'"
+    )
+    assert code == 2, f"expected exit code 2, got {code}"
+
+    # Verify the full path: detect_crashed_workers stamps the right error text.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="nonzero-exit-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        _kb._record_worker_exit(pid, _kb._popen_returncode_to_raw_status(2))
+
+        kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.last_failure_error is not None
+        assert "exited with code 2" in task.last_failure_error, (
+            f"expected 'exited with code 2' in error, got: {task.last_failure_error!r}"
+        )
+
+
+def test_popen_retention_rate_limited_exit_not_counted_as_failure(
+    kanban_home, monkeypatch,
+):
+    """Worker that exits with KANBAN_RATE_LIMIT_EXIT_CODE is classified as
+    'rate_limited' and does NOT increment consecutive_failures.
+
+    Regression guard: the rate-limit exit path must survive the Popen retention
+    fix unscathed — a rate-limited exit seeded via _popen_retention must be
+    swept, recorded, and classified as rate_limited so the circuit breaker
+    never trips on a quota wall.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98003
+    rl_code = _kb.KANBAN_RATE_LIMIT_EXIT_CODE
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = rl_code  # Rate-limit sentinel exit code
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb.reap_worker_zombies()
+
+    assert pid not in _kb._popen_retention
+
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "rate_limited", (
+        f"expected 'rate_limited', got '{kind}'"
+    )
+    assert code == rl_code
+
+    # Verify consecutive_failures is NOT incremented.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="rate-limited-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        _kb._record_worker_exit(
+            pid, _kb._popen_returncode_to_raw_status(rl_code)
+        )
+
+        crashed = kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+
+        # rate_limited requeue must NOT appear in crashed list.
+        assert tid not in crashed, (
+            "rate-limited requeue must not count as a crash"
+        )
+        assert task.consecutive_failures == 0, (
+            f"rate-limit must not increment failures, got {task.consecutive_failures}"
+        )
+        assert task.status == "ready", (
+            f"rate-limited task should be requeued to ready, got {task.status}"
+        )
+
+
+def test_popen_retention_still_running_not_pruned():
+    """A Popen handle whose child is still running (poll() returns None) must
+    NOT be pruned from _popen_retention and must NOT create a stale entry in
+    _recent_worker_exits.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98004
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = None  # Still running
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb._sweep_popen_retention()
+
+    # Handle must stay in the retention dict while the child is alive.
+    assert pid in _kb._popen_retention, (
+        "still-running handle must not be pruned"
+    )
+    # Must not have created a spurious exit entry.
+    assert pid not in _kb._recent_worker_exits, (
+        "still-running child must not appear in _recent_worker_exits"
+    )
+
+    # Cleanup: remove handle so it doesn't affect other tests.
+    _kb._popen_retention.pop(pid, None)
+
+
 
 
 

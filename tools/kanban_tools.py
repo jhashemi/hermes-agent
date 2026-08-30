@@ -807,6 +807,24 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
                 )
+            except kb.CompletionEvidenceRejected as evidence_err:
+                # VFE-COMPLETE-01 pre-hook veto. Task state is NOT
+                # mutated (the veto runs before the completion write
+                # txn) and a ``completion_blocked_evidence`` audit event
+                # is already durable. Surface the reason verbatim so the
+                # worker can fix its metadata and retry. Same phrasing
+                # pattern as HallucinatedCardsError: spell out that the
+                # task is still in-flight and retry is expected.
+                source_hint = (
+                    f" (source: {evidence_err.veto_source})"
+                    if evidence_err.veto_source else ""
+                )
+                return tool_error(
+                    f"kanban_complete blocked: {evidence_err.reason}{source_hint}. "
+                    f"Your task is still in-flight (no state change). "
+                    f"Fix the completion evidence and retry kanban_complete "
+                    f"with the corrected summary/metadata."
+                )
             if not ok:
                 return tool_error(
                     f"could not complete {tid} (unknown id or already terminal)"
@@ -856,6 +874,20 @@ def _handle_block(args: dict, **kw) -> str:
         waiting_for_event = str(waiting_for_event).strip() if waiting_for_event else None
     if waiting_for_condition:
         waiting_for_condition = str(waiting_for_condition).strip() if waiting_for_condition else None
+    # ``unblocks`` — optional list of child ids to atomically promote
+    # to ready as part of this block. Filter to strings, strip, dedupe.
+    unblocks_raw = args.get("unblocks")
+    unblocks: list[str] = []
+    if isinstance(unblocks_raw, list):
+        _seen: set[str] = set()
+        for _x in unblocks_raw:
+            if not isinstance(_x, str):
+                continue
+            _s = _x.strip()
+            if not _s or _s in _seen:
+                continue
+            _seen.add(_s)
+            unblocks.append(_s)
     
     try:
         kb, conn = _connect(board=board)
@@ -897,6 +929,7 @@ def _handle_block(args: dict, **kw) -> str:
                 waiting_for_commit=waiting_for_commit,
                 waiting_for_event=waiting_for_event,
                 waiting_for_condition=waiting_for_condition,
+                unblocks=unblocks or None,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1259,6 +1292,28 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
+        )
+    # Assignee validation (okr_audit acct_fail_e9b3a1532629, VFE-ROUTE-01
+    # Front A1). Refuse tickets whose assignee is neither a Hermes profile
+    # on disk nor a registered virtual assignee — otherwise the dispatcher
+    # falls back to a regular CLI worker under an implicit profile, produces
+    # prose, exits rc=0 without calling ``kanban_complete``/``kanban_block``,
+    # and the ticket loops forever burning inference budget. The registry
+    # file at ``<kanban_home>/virtual_assignees.yaml`` lists names that DO
+    # have external handlers (e.g. ``livekit-boardroom``); missing/empty is
+    # treated as an empty allowlist. This tool-layer check only makes the
+    # failure loud — actual route-through dispatch is Front A2.
+    try:
+        from hermes_cli import kanban_db as _kb_validate
+        _assignee_err = _kb_validate.validate_assignee(str(assignee))
+    except Exception:
+        _assignee_err = None
+    if _assignee_err:
+        return tool_error(
+            f"unknown assignee {assignee!r}: {_assignee_err.get('hint', '')}",
+            error_code="unknown_assignee",
+            assignee=str(assignee),
+            hint=_assignee_err.get("hint"),
         )
     body = args.get("body")
     parents = args.get("parents") or []
@@ -1848,6 +1903,25 @@ KANBAN_BLOCK_SCHEMA = {
                 "description": (
                     "Optional: human-readable predicate describing what "
                     "condition must be met for unblocking (for L3 rechecker audit)."
+                ),
+            },
+            "unblocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional: child task ids to atomically promote to "
+                    "'ready' as part of this block. Use this when your "
+                    "block IS a handoff to a review child (i.e. "
+                    "``waiting_for`` names that child) — the review "
+                    "child inherits your parent-gate, so naming it "
+                    "here guarantees it lands in the dispatcher's "
+                    "queue instead of stalling in 'todo'. Each id "
+                    "must already be linked as a child of this task; "
+                    "ids that fail preconditions (wrong parent, not "
+                    "in todo/blocked, own governance gate, sticky "
+                    "block, unresolved dependency) are recorded in "
+                    "the block event and skipped without failing the "
+                    "block itself."
                 ),
             },
             "board": _board_schema_prop(),

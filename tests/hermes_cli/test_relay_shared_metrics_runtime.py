@@ -974,4 +974,41 @@ def test_failed_flush_keeps_daily_export_open_for_later_task(
 
 
 
+def test_real_binding_drains_orphaned_scope_before_session_pop(
+    real_binding_runtime,
+):
+    """Orphan drain must work against the pinned native binding (#81521).
+
+    Regression guard for the #81601 review finding: the native binding's
+    ``get_scope_stack()`` returns a ``ScopeStack`` object (not a list and
+    not a ``ScopeHandle``), and ``scope.pop`` rejects it with TypeError.
+    The drain path must use the version-correct top accessor
+    (``scope.get_handle()``) and compare handles by uuid, because native
+    ``ScopeHandle`` instances do not compare equal by value.
+    """
+    runtime = relay_runtime.get_runtime()
+    assert runtime is not None
+    session = runtime.ensure_session({"session_id": "native-orphan-drain"})
+    assert session is not None
+
+    orphan = runtime.run_in_session(
+        session,
+        real_binding_runtime.scope.push,
+        "orphaned-physical-llm",
+        real_binding_runtime.ScopeType.Function,
+        handle=session.handle,
+    )
+    assert orphan is not None
+
+    # Without the drain fix this fails: the direct session pop raises
+    # "scope handle is not at the top of the stack", and the pre-fix
+    # drain retried with a ScopeStack object that pop() rejects.
+    failure = runtime._close_scope_handle(
+        session,
+        session.handle,
+        output={},
+        allow_closing=True,
+        failure_label="session scope close failed",
+    )
+    assert failure is None, failure
 

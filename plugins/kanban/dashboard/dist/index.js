@@ -584,19 +584,62 @@
     }, [tenantFilter, includeArchived, board]);
 
     // --- load list of boards for the switcher ------------------------------
+    // The switcher list also carries a per-board `origin_host` tag when the
+    // gateway can reach its NATS-connected cluster peers. Everything below
+    // treats the cluster fan-out as a soft dependency: if it fails or times
+    // out, the switcher shows the local /boards list unchanged.
     const loadBoardList = useCallback(function () {
-      return SDK.fetchJSON(withBoard(`${API}/boards`, board))
-        .then(function (data) {
+      const local = SDK.fetchJSON(withBoard(`${API}/boards`, board));
+      const cluster = SDK.fetchJSON(`${API}/cluster/boards`).catch(function () { return null; });
+      return Promise.all([local, cluster])
+        .then(function (results) {
+          const data = results[0];
+          const clusterData = results[1];
           const boards = (data && data.boards) || [];
+          // Resolve which host in the cluster reply IS this dashboard's
+          // process — the one whose reported "current board" matches the
+          // authoritative /boards reply. Fall back to null when the fan-out
+          // is empty; the switcher then simply hides host badges.
+          let localHost = null;
+          const currents = (clusterData && clusterData.currents) || {};
+          for (const hostName in currents) {
+            if (currents[hostName] === (data && data.current)) {
+              localHost = hostName;
+              break;
+            }
+          }
+          // Stamp local boards with the resolved origin_host so the switcher
+          // can render "host: <name>" alongside the label.
+          const stamped = boards.map(function (b) {
+            const copy = Object.assign({}, b);
+            if (!copy.origin_host && localHost) copy.origin_host = localHost;
+            return copy;
+          });
+          // Append peer-host boards the local /boards call can't see (they
+          // live in the other host's DB) so the user sees the full cluster
+          // topology. Keyed by (host, slug) to keep replicated boards
+          // distinct across hosts.
+          const seen = new Set(stamped.map(function (b) {
+            return (b.origin_host || "") + "::" + b.slug;
+          }));
+          const clusterBoards = (clusterData && clusterData.boards) || [];
+          for (const cb of clusterBoards) {
+            const key = (cb.origin_host || "") + "::" + cb.slug;
+            if (cb.origin_host && cb.origin_host !== localHost && !seen.has(key)) {
+              stamped.push(Object.assign({}, cb, { _peer: true }));
+              seen.add(key);
+            }
+          }
           const storedBoard = readSelectedBoard();
-          setBoardList(boards);
+          setBoardList(stamped);
           if (!storedBoard && !board && data && data.current) {
             setBoard(data.current);
             return;
           }
           // If the stored slug isn't in the list any longer (board was
           // deleted in the CLI while dashboard was open), fall back to
-          // default so the UI doesn't hang on a 404.
+          // default so the UI doesn't hang on a 404. Peer-host boards
+          // don't count — they're not selectable in this dashboard.
           if (board && board !== "default" && !boards.find(function (b) { return b.slug === board; })) {
             setBoard("default");
             writeSelectedBoard("default");
@@ -1838,6 +1881,21 @@
     const currentTotal = current ? current.total : 0;
     const hasMultipleBoards = list.length > 1;
 
+    // Origin-host badge: only render when more than one host is in play
+    // (otherwise every board would say "hermes2" and the badge is noise).
+    // The local host is the one flagged on non-peer boards during merge;
+    // peer boards keep their own origin_host and get the highlighted style.
+    const hostSet = new Set();
+    for (const b of list) { if (b.origin_host) hostSet.add(b.origin_host); }
+    const showHostBadges = hostSet.size > 1;
+    const localHost = (function () {
+      // Whichever host owns the non-peer boards is "local".
+      for (const b of list) {
+        if (!b._peer && b.origin_host) return b.origin_host;
+      }
+      return null;
+    })();
+
     // Hide entirely when only the default board exists AND it's empty —
     // single-project users never see boards UI unless they ask for it.
     // We show the [+ New board] affordance as soon as any board has a
@@ -1879,14 +1937,41 @@
               title: "Boards are independent work streams. Each board has its own tasks, tenants, and assignees.",
             }, selectChangeHandler(function (v) { if (v) props.onSwitch(v); })),
               list.map(function (b) {
-                const label = b.total > 0
+                const base = b.total > 0
                   ? `${b.name || b.slug} · ${b.total}`
                   : (b.name || b.slug);
-                return h(SelectOption, { key: b.slug, value: b.slug }, label);
+                // Suffix the host tag inside the option label so it shows
+                // both in the collapsed trigger and in every dropdown row.
+                // Peer boards get a "(peer)" hint since selecting them
+                // in this dashboard won't switch views.
+                const suffix = (showHostBadges && b.origin_host)
+                  ? ` — ${b.origin_host}${b._peer ? " (peer)" : ""}`
+                  : "";
+                return h(SelectOption, {
+                  key: (b.origin_host || "") + "::" + b.slug,
+                  value: b.slug,
+                  disabled: !!b._peer,
+                  title: b.origin_host
+                    ? (b._peer
+                      ? `This board lives on ${b.origin_host}. Open the dashboard on that host to work with it.`
+                      : `Local board on ${b.origin_host}.`)
+                    : undefined,
+                }, base + suffix);
               }),
             ),
+            // Live-cards count for the current board. Also render the
+            // "origin: <host>" tag next to it when the cluster view is
+            // active, so the header row echoes what's in the dropdown.
             h("span", { className: "text-xs text-muted-foreground" },
               `${currentTotal || 0} task${currentTotal === 1 ? "" : "s"}`),
+            (showHostBadges && current && current.origin_host)
+              ? h("span", {
+                  className: "hermes-kanban-boardswitcher-host text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground",
+                  title: (current._peer
+                    ? `Peer host: ${current.origin_host}`
+                    : `Local host: ${current.origin_host}`),
+                }, current.origin_host)
+              : null,
           ),
         ),
         h("div", { className: "flex-1" }),

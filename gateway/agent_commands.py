@@ -19,9 +19,12 @@ from gateway.error_response import (
     ErrorResponse,
     ErrorCode,
     ErrorSeverity,
+    EmojiIcon,
     create_access_denied_error,
     create_not_found_error,
     create_validation_error,
+    format_info,
+    format_warning,
 )
 from gateway.access_control import (
     get_access_manager,
@@ -119,8 +122,8 @@ async def handle_load_agent_command(
 
     # Check if voice clone is available
     if not persona_data.get("voice_uuid"):
-        return (
-            f"⚠️  {persona_data['name']} voice clone not ready yet. "
+        return format_warning(
+            f"{persona_data['name']} voice clone not ready yet. "
             f"Available agents: /agents-list"
         )
 
@@ -174,13 +177,13 @@ async def handle_agents_disconnect_command(
 ) -> str:
     """Handle /agents-disconnect or /disconnect command."""
     if not hasattr(gateway_runner, "_persona_manager"):
-        return "ℹ️ Not connected to any agent (using default)."
+        return format_info("Not connected to any agent (using default).")
 
     persona_mgr: PersonaManager = gateway_runner._persona_manager
     current = persona_mgr.get_persona_name()
 
     if not current:
-        return "ℹ️ Not connected to any agent (using default)."
+        return format_info("Not connected to any agent (using default).")
 
     persona_mgr.reset_persona()
     return f"✓ Disconnected from **{current}**. Switched back to default."
@@ -246,13 +249,42 @@ async def handle_switch_instance_command(
     
     orchestrator: InstanceOrchestrator = gateway_runner._instance_orchestrator
     
+    # Pre-check: verify instance exists in orchestrator registry BEFORE switch.
+    # This lets us return a helpful error listing available instances instead
+    # of a bare "not found" (task t_fc932369).
+    available_instances = list(orchestrator._get_registry().keys())
+    if instance_name not in available_instances:
+        if available_instances:
+            details = "Available instances:\n" + "\n".join(
+                f"  • /switch-{name}" for name in available_instances
+            )
+        else:
+            details = "No instances are currently configured."
+        error = ErrorResponse(
+            code=ErrorCode.INSTANCE_NOT_FOUND,
+            message=(
+                f"Instance '{instance_name}' not found. "
+                f"Available: {', '.join(available_instances) if available_instances else '(none)'}."
+            ),
+            context={
+                "resource_type": "instance",
+                "resource_id": instance_name,
+                "available_instances": available_instances,
+                "details": details,
+            },
+            severity=ErrorSeverity.LOW.value,
+            user_id=access_mgr.get_user_id(event),
+        )
+        return error.to_emoji_response()
+
     # Attempt switch
     success = orchestrator.set_current_instance(
         instance_name,
         chat_id=event.chat_id,
     )
-    
+
     if not success:
+        # Defensive fallback — pre-check above should have caught this.
         error = create_not_found_error(
             resource_type="instance",
             resource_id=instance_name,

@@ -639,11 +639,23 @@ class TestHealthAndStatus:
     """Test health check and status endpoints."""
     
     def test_health_check_endpoint(self, client_with_auth):
-        """Health check endpoint should return 200."""
+        """Health check endpoint should require auth (AUTH-GATE-ZERO / KR-1).
+
+        A minimal unauthenticated /health would leak deployment fingerprints
+        (instance name, timestamp) to scanners. Fail-closed: 401 without a
+        valid key, 200 with one.
+        """
         client, _, _ = client_with_auth
-        
+
+        # Unauthenticated → 401
         response = client.get("/health")
-        
+        assert response.status_code == 401
+
+        # Authenticated → 200 with expected body
+        response = client.get(
+            "/health",
+            headers={"X-Hermes-Key": "test-secret-key"},
+        )
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "ok"

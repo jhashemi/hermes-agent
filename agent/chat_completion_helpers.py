@@ -1109,6 +1109,18 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 _close_request_client_once("interrupt_abort")
             except Exception:
                 pass
+            # #81521 (sibling of the streaming-path fix): wait for the worker
+            # to unwind Relay-managed scopes before surfacing
+            # InterruptedError, so turn teardown cannot race a still-open
+            # physical scope and corrupt the LIFO stack.
+            t.join(timeout=2.0)
+            if t.is_alive():
+                logger.warning(
+                    "Non-streaming worker still alive after interrupt abort "
+                    "(%.1fs join timeout); Relay teardown will best-effort "
+                    "drain orphaned scopes (#81521).",
+                    2.0,
+                )
             raise InterruptedError("Agent interrupted during API call")
     if result["error"] is not None:
         raise result["error"]
@@ -2673,6 +2685,19 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         while t.is_alive():
             t.join(timeout=0.3)
             if agent._interrupt_requested:
+                # #81521 (sibling of the main streaming-path fix): give the
+                # Bedrock worker a bounded window to unwind its Relay-managed
+                # stream scopes before surfacing InterruptedError, so turn
+                # teardown cannot race a still-open physical scope and corrupt
+                # the LIFO stack.
+                t.join(timeout=2.0)
+                if t.is_alive():
+                    logger.warning(
+                        "Bedrock streaming worker still alive after interrupt "
+                        "(%.1fs join timeout); Relay teardown will best-effort "
+                        "drain orphaned scopes (#81521).",
+                        2.0,
+                    )
                 raise InterruptedError("Agent interrupted during Bedrock API call")
             # Liveness watchdog: no Bedrock event for longer than the stale
             # timeout means the stream has wedged (open socket, keep-alives but
@@ -4187,6 +4212,21 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 _close_request_client_once("stream_interrupt_abort")
             except Exception:
                 pass
+            # Wait for the worker to unwind Relay-managed stream scopes
+            # (physical LLM + deferred logical) before surfacing
+            # InterruptedError. Raising immediately lets turn teardown
+            # (finish_logical_calls / end_turn / close_session) race a
+            # still-open physical scope and corrupt the LIFO stack —
+            # "scope handle is not at the top of the stack" → CLI EIO /
+            # redraw storm (#81521).
+            t.join(timeout=2.0)
+            if t.is_alive():
+                logger.warning(
+                    "Streaming worker still alive after interrupt abort "
+                    "(%.1fs join timeout); Relay teardown will best-effort "
+                    "drain orphaned scopes (#81521).",
+                    2.0,
+                )
             raise InterruptedError("Agent interrupted during streaming API call")
     # Worker thread exited before the main thread's poll loop could check
     # the interrupt flag.  If the worker returned early due to an interrupt

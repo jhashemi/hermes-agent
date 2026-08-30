@@ -50,8 +50,8 @@ export default function Failure({ bootstrap }: FailureProps) {
         <p className="m-0 mx-auto max-w-xl text-center text-sm leading-normal tracking-tight text-muted-foreground">
           {bootstrap.error ??
             (isUpdate
-              ? 'Something went wrong during the update.'
-              : 'Something went wrong during installation.')}
+              ? 'There was a problem during the update. Please try again or contact support.'
+              : 'There was a problem during installation. Please try again or contact support.')}
         </p>
       </div>
 

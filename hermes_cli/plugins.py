@@ -212,6 +212,30 @@ VALID_HOOKS: Set[str] = {
     "kanban_task_claimed",
     "kanban_task_completed",
     "kanban_task_blocked",
+    # Kanban pre-completion veto hook (VFE-COMPLETE-01 hard-gate seam).
+    # Fires in the WORKER (or CLI) process INSIDE ``complete_task`` BEFORE
+    # the write txn that would flip the task to done. Unlike the observer
+    # ``kanban_task_*`` hooks above, callbacks here MAY return a dict to
+    # veto the completion:
+    #
+    #   {"veto": True, "reason": "<human-readable explanation>"}
+    #
+    # When any registered callback returns a veto dict, ``complete_task``
+    # raises ``CompletionEvidenceRejected`` before mutating task state and
+    # emits a ``completion_blocked_evidence`` audit event on the task
+    # (mirroring the existing ``completion_blocked_hallucination`` pattern).
+    # Callbacks that return ``None`` or any non-veto value are treated as
+    # abstentions. A callback that raises is logged and treated as abstain
+    # (fail-open) so a buggy policy plugin cannot wedge every completion.
+    #
+    # This is the ONLY kanban hook whose return value influences flow —
+    # all others are observer-only. Kept separate from
+    # ``kanban_task_completed`` so the observer/veto split stays legible.
+    #
+    # Kwargs: task_id: str, board: str | None, assignee: str | None,
+    #   summary: str | None, result: str | None, metadata: dict | None,
+    #   profile_name: str.
+    "kanban_task_completing",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
@@ -1929,6 +1953,27 @@ class PluginManager:
         persisted to session DB.
         """
         kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        # Optional defense-in-depth: if the caller reached us before
+        # ``discover_and_load`` has run in this process (e.g. a fresh CLI
+        # subprocess that skipped the normal startup path but is now
+        # dispatching a kanban tool), trigger discovery lazily so
+        # registered plugins can still respond.  Opt-in via env var
+        # because eager mid-invoke discovery mutates registrations in
+        # ways that break tests which drive the manager directly with
+        # a hand-crafted registry.  Set
+        # ``HERMES_ENABLE_LAZY_HOOK_DISCOVERY=1`` to enable in production
+        # workers that skip the CLI's normal startup path.
+        if (
+            not self._discovered
+            and env_var_enabled("HERMES_ENABLE_LAZY_HOOK_DISCOVERY")
+        ):
+            try:
+                self.discover_and_load(force=False)
+            except Exception as exc:
+                logger.debug(
+                    "lazy discovery on invoke_hook(%s) failed: %s",
+                    hook_name, exc,
+                )
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         for cb in callbacks:

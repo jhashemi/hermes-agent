@@ -263,8 +263,12 @@ class SignalAdapter(BasePlatformAdapter):
         super().__init__(config, Platform.SIGNAL)
 
         extra = config.extra or {}
-        self.http_url = extra.get("http_url", "http://127.0.0.1:8080").rstrip("/")
-        self.account = extra.get("account", "")
+        # Defensive: pull from config + env vars, no unsafe defaults.
+        # If both are empty, initialization will proceed but connect() will fail
+        # with a clear error message. This prevents the silent "connection to
+        # 127.0.0.1:8080 failed" spam every 5 minutes when Signal is unconfigured.
+        self.http_url = (extra.get("http_url", "") or os.getenv("SIGNAL_HTTP_URL", "")).rstrip("/")
+        self.account = extra.get("account", "") or os.getenv("SIGNAL_ACCOUNT", "")
         self.ignore_stories = extra.get("ignore_stories", True)
 
         # Parse allowlists — group policy is derived from presence of group allowlist

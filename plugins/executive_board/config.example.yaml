@@ -1,0 +1,155 @@
+# Executive Board Plugin Configuration Example
+# Location: ~/.hermes/config.yaml, under 'plugins:' block
+#
+# Copy this section into your config.yaml and adjust values for your environment.
+# All values shown are defaults; uncomment and modify as needed.
+
+plugins:
+  executive_board:
+    # Master enable/disable flag
+    enabled: true
+
+    # Roster of voice agents available for board sessions.
+    # Must be subset of: [orion, helios, atlas]
+    # Recommended: Start with ["orion"], expand after validation.
+    voice_agents:
+      - orion
+
+    # HARD CONSTRAINT: Always disable voice on hermes1.
+    # Only hermes2 LiveKit workers handle voice sessions.
+    # Changing this to false on hermes1 will cause immediate failure.
+    hermes1_voice_disabled: true
+
+    # LiveKit worker pool name or endpoint.
+    # hermes2 environment: "hermes2-pool" or fully-qualified endpoint URL.
+    liveki_workers: "hermes2-pool"
+
+    # Text-to-speech provider for board voice agents.
+    # CONSTRAINT: Only "resemble" is supported.
+    # Do not change this value.
+    tts_provider: "resemble"
+
+    # Session inactivity timeout (seconds).
+    # If no activity detected for this duration, session is auto-closed.
+    # Valid range: 60-3600 (1 min - 1 hour)
+    # Default: 900 (15 minutes)
+    session_timeout_seconds: 900
+
+    # Maximum session lifetime (hours).
+    # Sessions older than this are automatically archived.
+    # Valid range: 1-24 hours
+    # Default: 4 hours
+    max_session_age_hours: 4
+
+    # Polling interval for /board poll command (seconds).
+    # Frequency of decision snapshot refresh when polling active session.
+    # Valid range: 1-30 seconds
+    # Default: 5 seconds
+    polling_interval_seconds: 5
+
+    # In-memory decision buffer size.
+    # When database writes are slow, decisions buffer locally.
+    # Valid range: 10-500 decisions
+    # Default: 50
+    decision_buffer_size: 50
+
+    # Enable automatic remediation (Phase 1 OFF, Phase 2+ to be enabled).
+    # Currently unsupported. Leave as false.
+    # Changing to true will cause plugin initialization to fail.
+    enable_auto_remediate: false
+
+    # Named accounts with admin credentials.
+    # Each account gates /board config command access and audit logging.
+    # Format: list of {name, admin_telegram_id, archive_webhook}
+    accounts:
+      # Example: steve_jobs' executive board account
+      - name: "steve_jobs_board"
+        # Telegram user ID (numeric) allowed to run /board config.
+        # Get your ID via @userinfobot on Telegram.
+        admin_telegram_id: "1234567890"
+        # Optional: webhook URL for session archive notifications.
+        # When a session is archived, a POST will be sent here with decision summary.
+        # Leave empty to skip webhook notifications.
+        archive_webhook: ""
+      # You can add more accounts for other stakeholders
+      # - name: "product_board"
+      #   admin_telegram_id: "9876543210"
+      #   archive_webhook: "https://webhook.example.com/decisions"
+
+    # ===== Advanced / Rarely Changed =====
+
+    # LiveKit ingress authentication token (if not auto-generated).
+    # Usually managed by LiveKit platform; leave empty for auto.
+    # liveki_ingress_token: ""
+
+    # Resemble API key (if not in environment).
+    # Recommended: Set EXECUTIVE_BOARD_RESEMBLE_API_KEY environment variable instead.
+    # If set here, must be encrypted in config (do not commit plaintext).
+    # resemble_api_key: "${EXECUTIVE_BOARD_RESEMBLE_API_KEY}"
+
+    # Message role validation (strict mode).
+    # When true, plugin enforces strict user ↔ assistant message sequencing.
+    # Violation triggers RED governance alert and session abort.
+    # Leave as true (hard constraint).
+    strict_message_roles: true
+
+    # Prompt caching mode.
+    # When true, system prompt is cached and immutable (sacred constraint).
+    # When false, allows per-command prompt mutations (NOT RECOMMENDED).
+    # Leave as true (hard constraint).
+    prompt_cache_locked: true
+
+    # Database connection timeout (seconds) for okr_accountability.db queries.
+    db_query_timeout_seconds: 5
+
+    # Database connection timeout for kanban_board.db archives.
+    db_archive_timeout_seconds: 10
+
+# ============================================================================
+# Environment Variables
+# ============================================================================
+#
+# The executive_board plugin also respects these environment variables:
+#
+#   EXECUTIVE_BOARD_LIVEKI_WORKERS
+#     Override 'liveki_workers' from config. Example: hermes2-prod
+#
+#   EXECUTIVE_BOARD_RESEMBLE_API_KEY
+#     Resemble TTS API key. Recommended over config file (never commit secrets).
+#
+#   HERMES_EXEC_BOARD_DEBUG
+#     Set to "1" or "true" to enable debug logging for board commands.
+#
+# ============================================================================
+# Validation & Startup
+# ============================================================================
+#
+# Plugin validation runs at startup:
+#   1. Verify hermes1_voice_disabled == true (fail-safe)
+#   2. Check liveki_workers is reachable
+#   3. Verify tts_provider == "resemble" (only provider)
+#   4. Load Resemble API key from env or config
+#   5. Open read-only connections to okr_accountability.db and kanban_board.db
+#   6. Validate all accounts' admin_telegram_id are numeric
+#
+# If any validation fails, plugin will not load. Check logs for details.
+#
+# ============================================================================
+# Troubleshooting
+# ============================================================================
+#
+# Q: Plugin fails to load, error "hermes1_voice_disabled must be true"
+# A: Set hermes1_voice_disabled: true in config. Voice agents only run on hermes2.
+#
+# Q: /board commands not available in Telegram
+# A: Ensure enabled: true. Restart hermes agent after config change.
+#
+# Q: "LiveKit worker unreachable" error
+# A: Verify liveki_workers points to correct hermes2 endpoint.
+#    Check hermes2 is running: hermes health --remote hermes2
+#
+# Q: TTS voice sounds robotic or delayed
+# A: Resemble quality depends on API tier. Contact NousResearch support.
+#    Always verify tts_provider: "resemble" in config (no other TTS supported).
+#
+# ============================================================================

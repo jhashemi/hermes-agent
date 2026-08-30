@@ -132,6 +132,10 @@ export interface BoardMeta {
   /** First-class Project the board is scoped to (id) + resolved name. */
   project_id?: null | string
   project_name?: null | string
+  /** Host that owns this board's DB. Present on cluster-merged boards
+   *  (from GET /cluster/boards); the local switcher uses it to badge
+   *  peer-host boards distinctly from local ones. */
+  origin_host?: null | string
 }
 
 /** GET /projects — first-class Hermes projects available to scope a board. */
@@ -156,6 +160,23 @@ export interface TaskEstimate {
 export interface BoardsResponse {
   boards: BoardMeta[]
   current: string
+}
+
+/** GET /cluster/boards — every board across every NATS-connected host.
+ *  Board rows are CONS-3-minimized: slug, name, counts, total, is_current,
+ *  origin_host. Everything else (db_path, project_id, ...) stays behind
+ *  each host's local /boards auth gate. */
+export interface ClusterBoardsResponse {
+  boards: BoardMeta[]
+  /** Hosts that replied within the fan-out deadline. */
+  hosts: string[]
+  /** Per-host current-board slug: `{host: slug}`. */
+  currents: Record<string, string>
+  /** Per-host reply failures, if any (down responder, timeout, decode). */
+  errors: Array<{ host: string; error: string }>
+  cached: boolean
+  cache_age_seconds?: number
+  generated_at: number
 }
 
 /** GET /tasks/:id/log — the worker's stdout/stderr tail. */

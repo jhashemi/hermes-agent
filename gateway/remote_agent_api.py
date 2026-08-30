@@ -260,11 +260,38 @@ _rate_limiter: Optional[RateLimiter] = None
 
 
 def get_rate_limiter() -> RateLimiter:
-    """Get or create the global rate limiter instance."""
+    """Get or create the global rate limiter instance.
+
+    Phase 2 policy (t_b292b559): 10 requests per 60 seconds, keyed by
+    X-Hermes-User header. See use sites in execute_agent_prompt (FastAPI)
+    and execute_prompt (Flask blueprint).
+    """
     global _rate_limiter
     if _rate_limiter is None:
-        _rate_limiter = RateLimiter(max_requests=100, window_seconds=60)
+        _rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
     return _rate_limiter
+
+
+def _rate_limit_key(
+    x_hermes_user: Optional[str],
+    x_hermes_key: Optional[str],
+) -> str:
+    """Compute the rate-limit bucket key for a request.
+
+    Task t_b292b559 requires keying by X-Hermes-User. When that header is
+    absent (e.g. legacy callers that only send X-Hermes-Key), we fall back
+    to hashing the API key so unauthenticated hammering still gets bucketed.
+    The bucket string is prefixed to keep user- and key-buckets disjoint.
+    """
+    if x_hermes_user:
+        stripped = x_hermes_user.strip()
+        if stripped:
+            return f"user:{stripped}"
+    if x_hermes_key:
+        # Prefix so a user literally named "<key>:<value>" cannot collide
+        # with a real key bucket. Truncate for log-safe key ids elsewhere.
+        return f"key:{x_hermes_key}"
+    return "anonymous:"
 
 
 # P1-001: SECURITY — Enable Authentication on Remote API
@@ -438,13 +465,14 @@ async def create_remote_api_blueprint(app, gateway_runner):
                 logger.warning(f"Unauthorized request from {x_hermes_user or 'unknown'}: invalid API key")
                 raise HTTPException(status_code=401, detail="Unauthorized")
 
-            # P3-005: Check rate limit
+            # P3-005 / t_b292b559: Check rate limit (10/min per X-Hermes-User)
             rate_limiter = get_rate_limiter()
-            allowed, retry_after = rate_limiter.is_allowed(x_hermes_key)
+            rl_key = _rate_limit_key(x_hermes_user, x_hermes_key)
+            allowed, retry_after = rate_limiter.is_allowed(rl_key)
             
             if not allowed:
                 logger.warning(
-                    f"[RateLimit] Request denied for key: {x_hermes_key[:8]}... "
+                    f"[RateLimit] Request denied for bucket: {rl_key[:32]}... "
                     f"from {x_hermes_user or 'unknown'} (retry after {retry_after}s)"
                 )
                 response = JSONResponse(
@@ -621,13 +649,14 @@ def create_remote_api_flask_blueprint():
                 logger.warning(f"Unauthorized Flask request from {username}: invalid API key")
                 return jsonify({"status": "error", "error": "Unauthorized"}), 401
 
-            # P3-005: Check rate limit
+            # P3-005 / t_b292b559: Check rate limit (10/min per X-Hermes-User)
             rate_limiter = get_rate_limiter()
-            allowed, retry_after = rate_limiter.is_allowed(api_key)
+            rl_key = _rate_limit_key(username if username != "unknown" else None, api_key)
+            allowed, retry_after = rate_limiter.is_allowed(rl_key)
             
             if not allowed:
                 logger.warning(
-                    f"[RateLimit] Flask request denied for key: {api_key[:8]}... "
+                    f"[RateLimit] Flask request denied for bucket: {rl_key[:32]}... "
                     f"from {username} (retry after {retry_after}s)"
                 )
                 response = jsonify({

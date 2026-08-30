@@ -1,0 +1,19 @@
+[Unit]
+Description=Kick the Hermes kanban stall-watchdog every 15 min (FIX-6)
+Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
+
+[Timer]
+# Match the gateway-embedded loop cadence
+# (kanban.stall_watchdog_interval_seconds, default 900s = 15 min) so a
+# host that switches between "gateway on" and "gateway off" doesn't
+# suddenly see 4x-frequency escalations.
+OnBootSec=2min
+OnUnitActiveSec=15min
+AccuracySec=1min
+# Persistent so a host that was offline gets one catch-up run at boot
+# instead of quietly missing the interval.
+Persistent=true
+Unit=hermes-kanban-stall-watchdog.service
+
+[Install]
+WantedBy=timers.target
