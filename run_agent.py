@@ -1553,7 +1553,30 @@ class AIAgent:
         OpenAI-compatible endpoints fronting those models are recognised —
         URL-only detection misses that case and silently sends the wrong
         kwarg, which the upstream model rejects with a 400.
+
+        Bedrock-hosted Claude models reject any output cap above the model's
+        real limit with an HTTP 400 ('max_tokens: 131072 > 64000 ...') on
+        BOTH wire formats. The native Converse path clamps at build time
+        (bedrock_adapter.clamp_max_tokens); route OpenAI-compat traffic for
+        those models through the same clamp so the request is always valid.
+        Only lowers; never raises. Non-Bedrock models are untouched.
         """
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return {"max_tokens": value} if value else {}
+        if value > 0:
+            m = (self.model or "").lower()
+            # Bedrock limits table is Claude-specific — only clamp when the
+            # model itself is a Bedrock-hosted Claude, regardless of provider
+            # wiring (covers global./us./eu. cross-region profile prefixes).
+            if "anthropic.claude" in m:
+                try:
+                    from agent.bedrock_adapter import clamp_max_tokens
+
+                    value = clamp_max_tokens(m, value)
+                except Exception:
+                    pass
         if (
             self._is_direct_openai_url()
             or self._is_azure_openai_url()
