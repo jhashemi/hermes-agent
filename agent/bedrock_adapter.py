@@ -1204,6 +1204,48 @@ def stream_converse_with_callbacks(
 # High-level API: call Bedrock Converse
 # ---------------------------------------------------------------------------
 
+# Per-model maximum output token ceilings for Bedrock Converse. Bedrock
+# rejects any maxTokens above the model's real limit with a
+# ValidationException, so we clamp before sending. Keys are matched as
+# substrings against the model ID (prefix first, longest match wins).
+_BEDROCK_MAX_OUTPUT_LIMITS = {
+    "us.anthropic.claude-sonnet-4-6": 128000,
+    "global.anthropic.claude-sonnet-4-6": 128000,
+    "eu.anthropic.claude-sonnet-4-6": 128000,
+    "anthropic.claude-sonnet-4-6": 128000,
+    "us.anthropic.claude-haiku-4-5": 64000,
+    "global.anthropic.claude-haiku-4-5": 64000,
+    "eu.anthropic.claude-haiku-4-5": 64000,
+    "anthropic.claude-haiku-4-5": 64000,
+    "us.anthropic.claude-opus-4": 128000,
+    "global.anthropic.claude-opus-4": 128000,
+    "eu.anthropic.claude-opus-4": 128000,
+    "anthropic.claude-opus-4": 128000,
+}
+
+
+def clamp_bedrock_max_tokens(model: str, max_tokens: Optional[int]) -> Optional[int]:
+    """Clamp ``max_tokens`` to the model's real Bedrock output ceiling.
+
+    Returns ``None`` when no clamp applies (unknown model) so the caller's
+    original value is preserved. ``None`` input passes through untouched.
+    """
+    if max_tokens is None:
+        return None
+    model_lower = (model or "").lower()
+    # longest-match prefix wins so specific inference profiles (us. / global. /
+    # eu.) beat the generic anthropic.claude-* family keys.
+    best_limit = None
+    best_len = -1
+    for key, limit in _BEDROCK_MAX_OUTPUT_LIMITS.items():
+        if model_lower.startswith(key.lower()) and len(key) > best_len:
+            best_limit = limit
+            best_len = len(key)
+    if best_limit is not None and max_tokens > best_limit:
+        return best_limit
+    return max_tokens
+
+
 def build_converse_kwargs(
     model: str,
     messages: List[Dict],
@@ -1218,6 +1260,10 @@ def build_converse_kwargs(
 
     Converts OpenAI-format inputs to Converse API parameters.
 
+    ``max_tokens`` is clamped to the model's real Bedrock output ceiling (e.g.
+    128000 for sonnet-4-6, 64000 for haiku-4-5) before the request is built —
+    Bedrock rejects over-limit values with ValidationException.
+
     ``max_tokens=None`` omits ``inferenceConfig.maxTokens`` entirely, in which
     case Bedrock defaults to the model's maximum allowed output — the Converse
     field is optional per the AWS API reference. The default stays 4096 so
@@ -1228,8 +1274,9 @@ def build_converse_kwargs(
     cache_enabled = _model_supports_prompt_cache(model)
 
     inference_config: Dict[str, Any] = {}
-    if max_tokens is not None:
-        inference_config["maxTokens"] = max_tokens
+    clamped = clamp_bedrock_max_tokens(model, max_tokens)
+    if clamped is not None:
+        inference_config["maxTokens"] = clamped
 
     kwargs: Dict[str, Any] = {
         "modelId": model,
