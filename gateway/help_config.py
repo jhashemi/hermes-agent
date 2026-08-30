@@ -18,9 +18,15 @@ class HelpConfigError(Exception):
 class HelpConfigLoader:
     """Load and validate help configuration from YAML."""
 
-    # Expected YAML structure for validation
+    # Expected YAML structure for validation.
+    #
+    # ``commands`` is intentionally NOT required here — per-command
+    # descriptions are derived from ``hermes_cli.commands.COMMAND_REGISTRY``
+    # at runtime (see ``gateway/help_menu.py``).  This yaml only carries
+    # authored copy: topic titles, prose descriptions, examples, and the
+    # welcome-card quick reference.
     REQUIRED_SECTIONS = {"agents", "instances", "general"}
-    REQUIRED_TOPIC_KEYS = {"title", "description", "commands", "example"}
+    REQUIRED_TOPIC_KEYS = {"title", "description", "example"}
     REQUIRED_TOP_LEVEL_KEYS = {"categories", "quick_reference"}
 
     def __init__(self, config_path: Optional[str] = None):
@@ -175,16 +181,17 @@ class HelpConfigLoader:
                 f"Topic '{topic_name}': 'example' must be a string"
             )
 
-        # Validate commands dictionary
+        # Validate commands dictionary IF present (optional now — the
+        # dynamic help system reads command descriptions from
+        # COMMAND_REGISTRY, not from yaml.  Left here for backwards
+        # compatibility with any external help.yaml files that still carry
+        # the old ``commands`` block: we type-check but don't require it.)
         commands = topic.get("commands")
+        if commands is None:
+            return
         if not isinstance(commands, dict):
             raise HelpConfigError(
                 f"Topic '{topic_name}': 'commands' must be a dictionary"
-            )
-
-        if not commands:
-            raise HelpConfigError(
-                f"Topic '{topic_name}': 'commands' cannot be empty"
             )
 
         # Validate each command
