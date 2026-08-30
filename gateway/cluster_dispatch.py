@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Callable, Optional
@@ -333,9 +334,12 @@ def remote_spawn_cmd(
 
     # Environment variables for the remote worker
     env_lines = []
-    env_lines.append(f"export HERMES_KANBAN_TASK={task_id}")
-    env_lines.append(f"export HERMES_KANBAN_WORKSPACE={workspace}")
-    env_lines.append(f"export HERMES_KANBAN_BOARD={board}")
+    # shlex.quote: workspace paths contain spaces; task/board ids and any
+    # caller-influenced value must never break out of the quoting (the
+    # t_dda5868a suite proves the payload with shell metacharacters).
+    env_lines.append(f"export HERMES_KANBAN_TASK={shlex.quote(str(task_id))}")
+    env_lines.append(f"export HERMES_KANBAN_WORKSPACE={shlex.quote(str(workspace))}")
+    env_lines.append(f"export HERMES_KANBAN_BOARD={shlex.quote(str(board))}")
 
     # Merge caller-supplied env with the resolved API endpoint env. The
     # resolved values LAST so an explicit test/override in env_extra can
@@ -349,7 +353,6 @@ def remote_spawn_cmd(
     # sees the literal string. (The three env vars above ship raw for
     # bug-for-bug parity with the original implementation; task_id/board/
     # workspace are already validated upstream.)
-    import shlex
     merged_env: dict[str, str] = {}
     if env_extra:
         merged_env.update(env_extra)
