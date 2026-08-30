@@ -1717,6 +1717,21 @@ class AIAgent:
             or model_forces_max_completion_tokens(self.model)
         ):
             return {"max_completion_tokens": value}
+
+        # Bedrock-hosted Claude rejects any output cap above the model's
+        # real limit (HTTP 400 'max_tokens: 131072 > 64000 ...') on its
+        # OpenAI-compat surface. Clamp the value against the shared limits
+        # table; only lowers, never raises; other providers untouched.
+        _m = (self.model or "").lower()
+        if "anthropic.claude" in _m or "claude" in _m:
+            try:
+                from agent.bedrock_adapter import clamp_bedrock_max_tokens
+
+                clamped = clamp_bedrock_max_tokens(_m, value)
+                if clamped is not None and clamped > 0:
+                    value = clamped
+            except Exception:
+                pass
         return {"max_tokens": value}
 
     @staticmethod

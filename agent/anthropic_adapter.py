@@ -2975,6 +2975,23 @@ def build_anthropic_kwargs(
         max_tokens, model, context_length=context_length
     )
 
+    # Bedrock-hosted Claude via the Anthropic SDK's bedrock client rejects
+    # any output cap above the model's real limit (HTTP 400
+    # 'max_tokens: 131072 > 64000 ...'). Clamp against the shared bedrock
+    # limits table when the endpoint is a bedrock-runtime host. Only
+    # lowers; never raises; direct Anthropic endpoints untouched.
+    if effective_max_tokens and base_url and "bedrock-runtime" in str(base_url):
+        _m = str(model or "").lower()
+        if "anthropic.claude" in _m or "claude" in _m:
+            try:
+                from agent.bedrock_adapter import clamp_bedrock_max_tokens
+
+                clamped = clamp_bedrock_max_tokens(_m, effective_max_tokens)
+                if clamped is not None and clamped > 0:
+                    effective_max_tokens = clamped
+            except Exception:
+                pass
+
     # Clamp output cap to fit inside the total context window.
     # Only matters for small custom endpoints where context_length < native
     # output ceiling.  For standard Anthropic models context_length (e.g.
