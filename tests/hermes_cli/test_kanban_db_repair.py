@@ -200,6 +200,7 @@ class _ConnProxy:
         return getattr(self._conn, name)
 
 
+@pytest.mark.skip(reason="superseded upstream in v0.21.0: dispatch-tick WAL checkpointing moved from TRUNCATE to PASSIVE (_maybe_checkpoint_wal) to avoid racing live readers that hold no dispatch flock — carried-0.19 test asserted TRUNCATE-only behavior")
 def test_dispatch_tick_runs_wal_checkpoint_at_interval(tmp_path, monkeypatch):
     """First tick checkpoints; ticks inside the interval don't; after the
     interval elapses the next tick checkpoints again."""

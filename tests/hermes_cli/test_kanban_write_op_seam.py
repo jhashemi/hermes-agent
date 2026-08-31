@@ -128,7 +128,13 @@ def _drive_every_write_op(conn):
     kb.complete_task(conn, parent, summary="done")
     # release_stale_claims: needs a stale-claimed task
     stale = kb.create_task(conn, title="stale", assignee="worker")
-    kb.claim_task(conn, stale, ttl_seconds=-1)  # immediately-expired claim
+    kb.claim_task(conn, stale, ttl_seconds=3600)
+    # v0.21: force the claim stale by backdating claim_expires directly
+    # (claim_task clamps ttl to a positive minimum, so ttl_seconds=-1 no
+    # longer produces an immediately-expired claim).
+    conn.execute(
+        "UPDATE tasks SET claim_expires = 1 WHERE id = ?", (stale,)
+    )
     kb.release_stale_claims(conn)
     # add_notify_sub
     notify_task = kb.create_task(conn, title="notify", assignee="worker")
