@@ -62,8 +62,47 @@ sys.modules.setdefault("agents.voice_agents_plugin", _self)
 sys.modules.setdefault("voice_agents_plugin", _self)
 logger.debug("[voice-agents] identity alias registered from %s", __name__)
 
-# Bridge service URL (env-overridable for cluster / multi-host topology)
-VOICE_BRIDGE_URL = os.environ.get("VOICE_BRIDGE_URL", "http://localhost:8193")
+# Bridge service URL (env-overridable for cluster / multi-host topology),
+# validated at import — a malformed override falls back to the default rather
+# than poisoning every request at first use.
+_DEFAULT_BRIDGE_URL = "http://localhost:8193"
+VOICE_BRIDGE_URL = os.environ.get("VOICE_BRIDGE_URL", _DEFAULT_BRIDGE_URL)
+
+
+def _validate_bridge_url(url: str) -> str:
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        logger.error(
+            "[voice-agents] invalid VOICE_BRIDGE_URL %r (need http(s)://host:port); "
+            "falling back to %s", url, _DEFAULT_BRIDGE_URL,
+        )
+        return _DEFAULT_BRIDGE_URL
+    return url
+
+
+VOICE_BRIDGE_URL = _validate_bridge_url(VOICE_BRIDGE_URL)
+_bridge_health_checked = False
+
+
+def _bridge_health_ping_once() -> None:
+    """First-use health ping — fire-and-forget daemon thread, never blocks dispatch."""
+    global _bridge_health_checked
+
+    def _ping():
+        try:
+            resp = requests.get(f"{VOICE_BRIDGE_URL}/list", timeout=3)
+            if resp.status_code == 200:
+                logger.debug("[voice-agents] bridge health OK at %s", VOICE_BRIDGE_URL)
+            else:
+                logger.warning("[voice-agents] bridge health: /list -> HTTP %s", resp.status_code)
+        except Exception as exc:
+            logger.warning("[voice-agents] bridge health ping failed: %s", exc)
+
+    if not _bridge_health_checked:
+        _bridge_health_checked = True
+        threading.Thread(target=_ping, daemon=True, name="voice-agents-health").start()
 
 
 # Locate the executive-agents-platform tree (registry agents dir + optional
@@ -77,7 +116,7 @@ def _resolve_platform_root() -> Path:
         if p.exists():
             return p
     default = Path("/home/ubuntu/executive_agents_platform")
-    return default if default.exists() else default
+    return default
 
 
 PLATFORM_DIR = _resolve_platform_root()
@@ -243,6 +282,43 @@ class VoiceAgentRegistry:
 
 _registry: Optional[VoiceAgentRegistry] = None
 _sessions: Dict[str, VoiceAgentSession] = {}
+_state_lock = threading.Lock()  # guards lazy registry init + _sessions mutations
+_SESSIONS_MAX = int(os.environ.get("VOICE_SESSIONS_MAX", "256"))
+
+
+def _evict_sessions_locked() -> None:
+    """Bound _sessions: drop the oldest entries beyond _SESSIONS_MAX.
+
+    Caller MUST hold _state_lock. Sessions normally leave via /voice-disconnect;
+    this covers users who never disconnect (leak guard). Oldest = smallest _ts.
+    """
+    if len(_sessions) <= _SESSIONS_MAX:
+        return
+    overflow = len(_sessions) - _SESSIONS_MAX
+    oldest = sorted(_sessions.items(), key=lambda kv: getattr(kv[1], "_ts", 0.0))
+    for user_id, _ in oldest[:overflow]:
+        del _sessions[user_id]
+    logger.info("[voice-agents] evicted %d stale session(s) (bound=%d)", overflow, _SESSIONS_MAX)
+
+
+def _voice_agents_status() -> Dict[str, Any]:
+    """Observability snapshot: registry + session-map health (no lock held by callers)."""
+    with _state_lock:
+        sessions = {
+            uid: {"agent_id": s.agent_id, "session_id": s.session_id,
+                  "age_s": round(time.monotonic() - getattr(s, "_ts", time.monotonic()), 1)}
+            for uid, s in _sessions.items()
+        }
+    return {
+        "registry_loaded": _registry is not None,
+        "registry_agents": len(_registry.list_all()) if _registry else 0,
+        "session_count": len(sessions),
+        "sessions_bound": _SESSIONS_MAX,
+        "otel_available": _OTEL_AVAILABLE,
+        "bridge_url": VOICE_BRIDGE_URL,
+        "platform_dir": str(PLATFORM_DIR),
+        "sessions": sessions,
+    }
 
 # ---------------------------------------------------------------------------
 # Cross-identity state adoption — completes the identity collapse at the top
@@ -266,8 +342,10 @@ if _opp_mod is not None and _opp_mod is not sys.modules[__name__]:
 def _get_registry() -> VoiceAgentRegistry:
     global _registry
     if _registry is None:
-        _registry = VoiceAgentRegistry(PLATFORM_DIR / "agents")
-        _registry.load()
+        with _state_lock:  # double-checked lazy init — one registry per process
+            if _registry is None:
+                _registry = VoiceAgentRegistry(PLATFORM_DIR / "agents")
+                _registry.load()
     return _registry
 
 
@@ -282,13 +360,16 @@ def _sync_sessions_from_bridge() -> None:
             user_id = s.get("user_id", "")
             agent_id = s.get("agent_id", "")
             session_id = s.get("session_id", "")
-            if user_id and agent_id and user_id not in _sessions:
-                _sessions[user_id] = VoiceAgentSession(
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    session_id=session_id,
-                )
-                logger.info("[voice-agents] Restored session: user=%s agent=%s", user_id, agent_id)
+            if user_id and agent_id:
+                with _state_lock:
+                    if user_id not in _sessions:  # re-check under lock
+                        _sessions[user_id] = VoiceAgentSession(
+                            user_id=user_id,
+                            agent_id=agent_id,
+                            session_id=session_id,
+                        )
+                        _evict_sessions_locked()
+                        logger.info("[voice-agents] Restored session: user=%s agent=%s", user_id, agent_id)
     except Exception as e:
         logger.warning("[voice-agents] Could not sync sessions from bridge: %s", e)
 
@@ -473,14 +554,16 @@ def _handle_load_agent(text: str, event: Any, gateway: Any) -> Optional[Dict]:
         err = bridge_resp.get("message", "unknown error") if bridge_resp else "bridge unreachable"
         return {"action": "rewrite", "text": f"❌ Failed to connect to {agent_id}: {err}"}
 
-    # Store session
+    # Store session (lock-guarded mutation + eviction bound)
     session = VoiceAgentSession(
         user_id=user_id,
         agent_id=agent_id,
         session_id=bridge_resp.get("session_id", ""),
         chat_id=chat_id,
     )
-    _sessions[user_id] = session
+    with _state_lock:
+        _sessions[user_id] = session
+        _evict_sessions_locked()
 
     # OTel session-start span (no-op when tracer unavailable / collector down)
     try:
@@ -543,7 +626,8 @@ def _handle_list_agents(event: Any) -> Optional[Dict]:
 def _handle_disconnect(event: Any) -> Optional[Dict]:
     """Handle /voice-disconnect command."""
     user_id = getattr(event.source, "user_id", "")
-    session = _sessions.pop(user_id, None)
+    with _state_lock:
+        session = _sessions.pop(user_id, None)
 
     if not session:
         return {"action": "rewrite", "text": "ℹ️ No voice agent connected.\n\nType /voice-agents to see available agents."}
@@ -634,6 +718,9 @@ def pre_gateway_dispatch_hook(event: Any, gateway: Any = None, session_store: An
     user_id = getattr(event.source, "user_id", "")
     msg_type = getattr(event, "message_type", None)
     msg_type_str = str(msg_type) if msg_type else ""
+
+    # First-use bridge health probe (async daemon, never blocks; runs once)
+    _bridge_health_ping_once()
 
     # ── Command routing (always runs regardless of session) ──────────────────
     if text.startswith("/load-"):
@@ -815,12 +902,23 @@ async def _start_voice_out_subscriber(gateway: Any) -> None:
         except RuntimeError:
             pass
 
-    # Lazy import the dedup injector
+    # Lazy import the dedup injector. Search order: installed distribution →
+    # EAF_SRC/EAF_ROOT env override → documented literal default. Existence-
+    # checked; a missing framework never breaks the subscriber (logged + return).
     try:
         from voice_gateway_bridge import AnalogTextInjector  # type: ignore
     except ImportError:
-        framework_src = Path("/home/ubuntu/executive_agents_framework/src")
-        if framework_src.exists() and str(framework_src) not in sys.path:
+        framework_src: Optional[Path] = None
+        eaf_override = os.environ.get("EAF_SRC") or os.environ.get("EAF_ROOT")
+        if eaf_override:
+            candidate = Path(eaf_override) / "src"
+            if candidate.exists():
+                framework_src = candidate
+        if framework_src is None:
+            literal = Path("/home/ubuntu/executive_agents_framework/src")
+            if literal.exists():
+                framework_src = literal
+        if framework_src is not None and str(framework_src) not in sys.path:
             sys.path.insert(0, str(framework_src))
         try:
             from voice_gateway_bridge import AnalogTextInjector  # type: ignore
