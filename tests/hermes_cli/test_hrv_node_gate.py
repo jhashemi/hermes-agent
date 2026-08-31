@@ -368,5 +368,219 @@ class TestMetricEmission:
         assert metrics_called == ["memory_pressure"]
 
 
+class TestDispatcherHealth:
+    """Test kanban_dispatcher_health rejection condition.
+    
+    Acceptance criterion: A node with RED kanban_dispatcher_health is never
+    selected. The production _check_dispatcher_health is a systemd-integration
+    hook that currently returns False; these tests pin the rejection contract
+    so that when the systemd integration lands, the reason string, ordering,
+    and rejection semantics stay stable.
+    """
+    
+    def test_red_dispatcher_health_rejected(self, monkeypatch):
+        """Node with RED dispatcher health should be rejected."""
+        gate = HRVNodeGate()
+        # Populate green probes so we know rejection is from dispatcher_health,
+        # not from memory_pressure or other gates.
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=30.0,
+            bedrock_tpm_remaining=50000,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        
+        # Simulate RED dispatcher_health by patching the hook
+        monkeypatch.setattr(gate, "_check_dispatcher_health", lambda hostname: True)
+        
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "kanban_dispatcher_health"
+    
+    def test_green_dispatcher_health_passes(self):
+        """Node with GREEN dispatcher health should not be rejected on this
+        condition (the default stub returns False = GREEN)."""
+        gate = HRVNodeGate()
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=30.0,
+            bedrock_tpm_remaining=50000,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        
+        # Default _check_dispatcher_health returns False (green)
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result != "kanban_dispatcher_health"
+    
+    def test_dispatcher_health_evaluated_before_bedrock(self, monkeypatch):
+        """Dispatcher health rejection has priority over bedrock rate limit,
+        matching the source-order gate sequence."""
+        gate = HRVNodeGate()
+        # Both dispatcher health AND bedrock TPM are RED
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=30.0,
+            bedrock_tpm_remaining=500,  # would trigger bedrock rejection
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        monkeypatch.setattr(gate, "_check_dispatcher_health", lambda hostname: True)
+        
+        # dispatcher_health should win (evaluated before bedrock)
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "kanban_dispatcher_health"
+
+
+class TestBedrockPerModelSaturation:
+    """Explicit coverage for the per-model saturation acceptance criterion:
+    'A task pinned to a model with RED bedrock_rate_limit_saturation is not
+    dispatched to that model's saturated node.'
+    
+    The rejection reason string carries the pinned model name, so downstream
+    consumers can distinguish per-model saturation from a global limit.
+    """
+    
+    def test_rejection_reason_includes_pinned_model(self):
+        """The rejection reason must qualify the exact pinned model name."""
+        gate = HRVNodeGate()
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            bedrock_tpm_remaining=500,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        
+        # Task pinned to a specific model
+        result = gate.evaluate_node(
+            "task1", "hermes2", "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        )
+        assert result == (
+            "bedrock_rate_limit_saturation"
+            "[anthropic.claude-3-5-sonnet-20241022-v2:0]"
+        )
+    
+    def test_saturated_node_still_rejects_a_second_model_pin(self):
+        """The node-level TPM probe is model-agnostic: any pinned model on a
+        TPM-saturated node is rejected. The reason string names the model."""
+        gate = HRVNodeGate()
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            bedrock_tpm_remaining=500,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        
+        # First model pin
+        r1 = gate.evaluate_node("task-a", "hermes2", "claude-haiku")
+        # Second model pin on the same saturated node
+        r2 = gate.evaluate_node("task-b", "hermes2", "gpt-4o")
+        
+        assert r1 == "bedrock_rate_limit_saturation[claude-haiku]"
+        assert r2 == "bedrock_rate_limit_saturation[gpt-4o]"
+    
+    def test_healthy_node_accepts_any_model_pin(self):
+        """A node with green TPM accepts tasks regardless of the pinned model."""
+        gate = HRVNodeGate()
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            bedrock_tpm_remaining=100000,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        
+        assert gate.evaluate_node("t1", "hermes2", "claude-haiku") is None
+        assert gate.evaluate_node("t2", "hermes2", "gpt-4o") is None
+
+
+class TestUrgentIntervalPriorityBoundary:
+    """Boundary tests for 'urgent rejects <P0, accepts P0'.
+    
+    P0 == priority 0 (highest). Anything > 0 is 'below P0' per the current
+    gate implementation (see hrv_node_gate.py line 249: task_priority > 0).
+    """
+    
+    def test_urgent_p0_accepted(self):
+        """P0 (priority=0) MUST be accepted during urgent state."""
+        gate = HRVNodeGate()
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="urgent", ts=get_now_ts()))
+        assert gate.evaluate_node("t", "hermes2", "m", task_priority=0) is None
+    
+    def test_urgent_p1_rejected(self):
+        """P1 (priority=1) MUST be rejected during urgent state."""
+        gate = HRVNodeGate()
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="urgent", ts=get_now_ts()))
+        assert (
+            gate.evaluate_node("t", "hermes2", "m", task_priority=1)
+            == "hrv_urgent_state"
+        )
+    
+    def test_urgent_high_priority_number_rejected(self):
+        """Any priority > 0 is rejected under 'urgent'."""
+        gate = HRVNodeGate()
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="urgent", ts=get_now_ts()))
+        for prio in (2, 5, 10, 99):
+            assert (
+                gate.evaluate_node("t", "hermes2", "m", task_priority=prio)
+                == "hrv_urgent_state"
+            ), f"priority {prio} should be rejected under urgent"
+    
+    def test_urgent_none_priority_fails_open(self):
+        """Task with unknown (None) priority under urgent: fails open — the
+        gate cannot prove the task is < P0 without a numeric priority."""
+        gate = HRVNodeGate()
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="urgent", ts=get_now_ts()))
+        # Contract: don't reject when we can't classify the priority
+        assert gate.evaluate_node("t", "hermes2", "m", task_priority=None) is None
+    
+    def test_non_urgent_states_accept_any_priority(self):
+        """Under calm/alert/anxious, any priority is accepted."""
+        gate = HRVNodeGate()
+        for state in ("calm", "alert", "anxious"):
+            gate.set_hrv_digest(HRVDigestSnapshot(interval_class=state, ts=get_now_ts()))
+            for prio in (0, 1, 5):
+                assert (
+                    gate.evaluate_node("t", "hermes2", "m", task_priority=prio)
+                    is None
+                ), f"state={state} prio={prio} should pass"
+
+
+class TestGreenNodeNonUrgentAccepted:
+    """Explicit end-to-end coverage: node with all probes green AND
+    non-urgent interval class is accepted, regardless of task priority."""
+    
+    def test_all_green_calm_accepts_p1(self):
+        gate = HRVNodeGate()
+        gate.set_node_probe_snapshot("hermes2", NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=20.0,
+            mem_gb_available=16.0,
+            bedrock_tpm_remaining=80000,
+            ts=get_now_ts(),
+        ))
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="calm", ts=get_now_ts()))
+        
+        result = gate.evaluate_node(
+            "task1", "hermes2", "claude-haiku",
+            task_priority=1,
+            task_min_resources={"mem_gb": 2.0, "bedrock_tpm_reservation": 5000},
+        )
+        assert result is None
+    
+    def test_all_green_alert_accepts_p0(self):
+        gate = HRVNodeGate()
+        gate.set_node_probe_snapshot("hermes2", NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=40.0,
+            mem_gb_available=8.0,
+            bedrock_tpm_remaining=25000,
+            ts=get_now_ts(),
+        ))
+        gate.set_hrv_digest(HRVDigestSnapshot(interval_class="alert", ts=get_now_ts()))
+        
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku", task_priority=0)
+        assert result is None
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
