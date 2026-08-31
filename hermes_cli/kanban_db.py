@@ -492,6 +492,75 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
 
 
+def _fire_kanban_write_op(
+    conn: sqlite3.Connection,
+    op: str,
+    task_id: str = "",
+    *,
+    result: Any = None,
+    **fields: Any,
+) -> None:
+    """Fire the ``kanban_write_op`` observer seam, fully best-effort.
+
+    Called at the end of each kernel write op AFTER its ``write_txn`` block
+    has committed. Observer-only (NO veto): the return value of any callback
+    is ignored; a raising callback is swallowed. This mirrors the
+    ``_fire_kanban_lifecycle_hook`` contract so a misbehaving observer can
+    never wedge a board write.
+
+    The seam carries enough context for an out-of-tree consumer (e.g. the
+    DuckDB dual-write mirror plugin) to reconstruct the write against a
+    second store without reaching back into kernel internals:
+
+    * ``op`` — the kernel-side function name (``create_task`` /
+      ``assign_task`` / …). Stable identifier — callers key their
+      dispatch table on this string.
+    * ``task_id`` — primary task identifier when the op is task-scoped;
+      the empty string for board-scoped ops (``release_stale_claims``).
+    * ``board`` — board slug resolved via ``get_current_board()`` so the
+      consumer can address the mirror without opening the SQLite conn.
+    * ``sqlite_path`` — resolved on-disk path of the SQLite database
+      that just committed (``None`` for in-memory / unusual conns).
+      Consumers derive their mirror path from this without needing
+      access to the ``sqlite3.Connection`` object directly.
+    * ``result`` — the op's return value (task id from ``create_task``,
+      row id from ``add_comment``, ``Task`` from ``claim_task`` …).
+      Used by the mirror to preserve id passthrough across backends.
+    * ``**fields`` — the op-specific kwargs the mirror needs to replay
+      the write (``title``, ``assignee`` for ``create_task``;
+      ``parent_id``, ``child_id`` for ``link_tasks`` …).
+
+    Args:
+        conn: The SQLite connection whose txn just committed. Used only
+            to recover the database path for the ``sqlite_path`` kwarg;
+            the seam does NOT re-open a txn on it.
+        op: Kernel-side operation name.
+        task_id: Task id or empty string for board-scoped ops.
+        result: Op return value (id passthrough, may be ``None``).
+        **fields: Op-specific kwargs sufficient to replay the write.
+    """
+    sqlite_path: Optional[str] = None
+    try:
+        rows = list(conn.execute("PRAGMA database_list"))
+        for r in rows:
+            name = r[1] if len(r) > 1 else None
+            path = r[2] if len(r) > 2 else None
+            if name == "main" and path:
+                sqlite_path = str(path)
+                break
+    except Exception:  # pragma: no cover - defensive
+        sqlite_path = None
+    _fire_kanban_lifecycle_hook(
+        "kanban_write_op",
+        task_id,
+        op=op,
+        board=get_current_board(),
+        sqlite_path=sqlite_path,
+        result=result,
+        **fields,
+    )
+
+
 def _collect_completing_veto(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4696,6 +4765,37 @@ def create_task(
                         ),
                     )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
+            # write_txn has committed (post-commit hook site).
+            _fire_kanban_write_op(
+                conn,
+                "create_task",
+                task_id,
+                result=task_id,
+                title=title,
+                assignee=assignee,
+                created_by=created_by,
+                workspace_kind=workspace_kind,
+                workspace_path=workspace_path,
+                branch_name=branch_name,
+                tenant=tenant,
+                priority=priority,
+                parents=tuple(parents) if parents else (),
+                triage=triage,
+                idempotency_key=idempotency_key,
+                max_runtime_seconds=max_runtime_seconds,
+                skills=tuple(skills) if skills else None,
+                max_retries=max_retries,
+                model_override=model_override,
+                provider_override=provider_override,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
+                initial_status=initial_status,
+                session_id=session_id,
+                board_override=board,
+                project_id=project_id,
+                project_source_task_id=project_source_task_id,
+                peer_review_assignee=peer_review_assignee,
+            )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -4911,6 +5011,7 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
     Reassign after the current run completes if needed.
     """
     profile = _canonical_assignee(profile)
+    _did_write = False
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
@@ -4934,7 +5035,12 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         else:
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         _append_event(conn, task_id, "assigned", {"assignee": profile})
-        return True
+        _did_write = True
+    if _did_write:
+        _fire_kanban_write_op(
+            conn, "assign_task", task_id, result=True, profile=profile,
+        )
+    return True
 
 
 def set_model_override(
@@ -5015,6 +5121,10 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             {"parent": parent_id, "child": child_id},
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
+    _fire_kanban_write_op(
+        conn, "link_tasks", child_id,
+        parent_id=parent_id, child_id=child_id,
+    )
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -5058,6 +5168,10 @@ def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
         # unblock_task; without this the child stays stuck in todo until the
         # next dispatcher tick or a manual `hermes kanban recompute` (issue #22459).
         recompute_ready(conn)
+        _fire_kanban_write_op(
+            conn, "unlink_tasks", child_id,
+            result=True, parent_id=parent_id, child_id=child_id,
+        )
     return removed
 
 
@@ -5104,6 +5218,7 @@ def add_comment(
     if not author or not author.strip():
         raise ValueError("comment author is required")
     now = int(time.time())
+    row_id: int = 0
     with write_txn(conn):
         if not conn.execute(
             "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
@@ -5115,7 +5230,12 @@ def add_comment(
             (task_id, author.strip(), body.strip(), now),
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        row_id = int(cur.lastrowid or 0)
+    _fire_kanban_write_op(
+        conn, "add_comment", task_id,
+        result=row_id, author=author, body=body,
+    )
+    return row_id
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -6395,6 +6515,15 @@ def claim_task(
             conn, task_id, "claimed", claimed_payload, run_id=run_id,
         )
         claimed = get_task(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "claim_task", task_id,
+        result=claimed,
+        run_id=run_id,
+        ttl_seconds=ttl_seconds,
+        claimer=claimer,
+        lock=lock,
+        expires=expires,
+    )
     _fire_kanban_lifecycle_hook(
         "kanban_task_claimed",
         task_id,
@@ -6494,6 +6623,7 @@ def heartbeat_claim(
     """
     expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
     lock = claimer or _claimer_id()
+    _held = False
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
@@ -6507,8 +6637,14 @@ def heartbeat_claim(
                     "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
                     (expires, run_id),
                 )
-            return True
-        return False
+            _held = True
+    if _held:
+        _fire_kanban_write_op(
+            conn, "heartbeat_claim", task_id,
+            result=True, ttl_seconds=ttl_seconds, claimer=claimer,
+            lock=lock, expires=expires,
+        )
+    return _held
 
 
 def release_stale_claims(
@@ -6743,6 +6879,10 @@ def release_stale_claims(
                 run_id=run_id,
             )
             reclaimed += 1
+    _fire_kanban_write_op(
+        conn, "release_stale_claims", "",
+        result=reclaimed, reclaimed_count=reclaimed,
+    )
     return reclaimed
 
 
@@ -6813,6 +6953,10 @@ def reclaim_task(
     # a fresh budget. (_clear_failure_counter opens its own write_txn,
     # so it runs after the enclosing one commits.)
     _clear_failure_counter(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "reclaim_task", task_id,
+        result=True, reason=reason, prev_lock=prev_lock,
+    )
     return True
 
 
@@ -6840,11 +6984,18 @@ def reassign_task(
         reclaim_task(conn, task_id, reason=reason or "reassign")
     # assign_task handles its own txn + the still-running guard.
     try:
-        return assign_task(conn, task_id, profile)
+        _ok = assign_task(conn, task_id, profile)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
         return False
+    if _ok:
+        _fire_kanban_write_op(
+            conn, "reassign_task", task_id,
+            result=_ok, profile=profile,
+            reclaim_first=reclaim_first, reason=reason,
+        )
+    return _ok
 
 
 def _verify_created_cards(
@@ -7573,6 +7724,22 @@ def complete_task(
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "complete_task", task_id,
+        result=True,
+        summary=summary,
+        completion_result=result,
+        metadata=metadata,
+        created_cards=tuple(created_cards) if created_cards else (),
+        expected_run_id=expected_run_id,
+        unblocks=tuple(unblocks) if unblocks else (),
+        commit_hash=commit_hash,
+        test_run_id=test_run_id,
+        pending_peer_review=pending_peer_review,
+        peer_review_assignee=peer_review_assignee,
+        review_verdict=review_verdict,
+        run_id=run_id,
+    )
     _fire_kanban_lifecycle_hook(
         "kanban_task_completed",
         task_id,
@@ -8278,6 +8445,19 @@ def block_task(
                 run_id=run_id,
                 reason=reason,
             )
+            _fire_kanban_write_op(
+                conn, "block_task", task_id,
+                result=True,
+                reason=reason,
+                kind=kind,
+                waiting_for=waiting_for,
+                waiting_for_commit=waiting_for_commit,
+                waiting_for_event=waiting_for_event,
+                waiting_for_condition=waiting_for_condition,
+                unblocks=tuple(unblocks_norm),
+                expected_run_id=expected_run_id,
+                run_id=run_id,
+            )
             return True
 
         # Truly-blocked kinds. Increment the unblock-loop counter when this is a
@@ -8510,6 +8690,19 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
+    _fire_kanban_write_op(
+        conn, "block_task", task_id,
+        result=True,
+        reason=reason,
+        kind=kind,
+        waiting_for=waiting_for,
+        waiting_for_commit=waiting_for_commit,
+        waiting_for_event=waiting_for_event,
+        waiting_for_condition=waiting_for_condition,
+        unblocks=tuple(unblocks_norm),
+        expected_run_id=expected_run_id,
+        run_id=run_id,
+    )
     return True
 
 
@@ -8595,6 +8788,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     state) holds for the rest of this function's lifetime.
     """
     now = int(time.time())
+    _unblocked = False
+    _new_status: Optional[str] = None
     with write_txn(conn):
         stale = conn.execute(
             "SELECT current_run_id FROM tasks WHERE id = ? AND status IN ('blocked', 'scheduled')",
@@ -8661,7 +8856,14 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,
         )
-        return True
+        _unblocked = True
+        _new_status = new_status
+    if _unblocked:
+        _fire_kanban_write_op(
+            conn, "unblock_task", task_id,
+            result=True, new_status=_new_status,
+        )
+    return _unblocked
 
 
 def specify_triage_task(
@@ -13371,6 +13573,16 @@ def add_notify_sub(
                 """,
                 (metadata_json, task_id, platform, chat_id, thread_id or ""),
             )
+    _fire_kanban_write_op(
+        conn, "add_notify_sub", task_id,
+        platform=platform,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        thread_id=thread_id,
+        user_id=user_id,
+        notifier_profile=notifier_profile,
+        delivery_metadata=dict(delivery_metadata) if delivery_metadata else None,
+    )
 
 
 def list_notify_subs(

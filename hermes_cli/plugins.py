@@ -236,6 +236,49 @@ VALID_HOOKS: Set[str] = {
     #   summary: str | None, result: str | None, metadata: dict | None,
     #   profile_name: str.
     "kanban_task_completing",
+    # Kanban write-op observer seam (ADR-006b P2 row 1).
+    # Fires from ``hermes_cli.kanban_db`` at the end of every kernel write
+    # op — ``create_task`` / ``assign_task`` / ``reassign_task`` /
+    # ``link_tasks`` / ``unlink_tasks`` / ``add_comment`` / ``claim_task`` /
+    # ``heartbeat_claim`` / ``release_stale_claims`` / ``reclaim_task`` /
+    # ``complete_task`` / ``block_task`` / ``unblock_task`` /
+    # ``add_notify_sub`` — AFTER the enclosing SQLite ``write_txn`` has
+    # committed. Observer-only: the return value of any callback is
+    # IGNORED (no veto), and a raising callback is swallowed and logged
+    # at DEBUG so a misbehaving observer can never wedge a board write.
+    # Fires in whichever process is executing the write (dispatcher,
+    # worker, CLI, gateway MCP path) — plugins that want an eventually-
+    # complete view MUST subscribe in every process that mutates a
+    # board, not just the dispatcher.
+    #
+    # Kwargs (stable, additive-only):
+    #   * op: str — kernel function name (``create_task`` etc.);
+    #       consumers key dispatch tables on this exact string.
+    #   * task_id: str — primary task id or ``""`` for board-scoped
+    #       ops (``release_stale_claims``).
+    #   * board: str — board slug from ``get_current_board()``.
+    #   * sqlite_path: str | None — resolved on-disk path of the
+    #       SQLite database that just committed (``None`` for
+    #       in-memory / unusual conns).
+    #   * result: Any — the op's SQLite return value (``task_id`` from
+    #       ``create_task``, row id from ``add_comment``, ``Task``
+    #       from ``claim_task``, ``bool`` / ``int`` for the rest).
+    #       Consumers that need to preserve id-passthrough across a
+    #       second backend read this field.
+    #   * profile_name: str — active profile (added by the shared
+    #       lifecycle dispatch machinery).
+    #   * Plus op-specific kwargs sufficient to replay the write
+    #       against a second store; the exact set matches the outer
+    #       function's signature with two collisions renamed to avoid
+    #       clashing with the framing kwargs:
+    #         - ``create_task.board`` (board-slug override) → ``board_override``
+    #         - ``complete_task.result`` (completion string)  → ``completion_result``
+    #
+    # Named consumer at land time: ``vfe-kanban-dual-write`` plugin
+    # (mirrors every write to the DuckDB kanban store under
+    # ``HERMES_KANBAN_WRITE_BACKEND=dual``; extracted from the
+    # in-kernel ``kanban_dual_write`` shim per ADR-006b row 1).
+    "kanban_write_op",
 }
 
 ENTRY_POINTS_GROUP = "hermes_agent.plugins"
