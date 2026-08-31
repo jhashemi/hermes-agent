@@ -237,6 +237,11 @@ def derive_room(agent_id: str, user_id: str) -> str:
 # Async start helper + per-room FSM registry (used by /voice-handoff)
 # ---------------------------------------------------------------------------
 
+# Per-room FSM registry — NOTE: intentionally NOT the voice_agents_plugin
+# agent _registry/_sessions state (those live in voice_agents_plugin.py and are
+# identity-collapsed across import names). This one maps room name -> ModeFSM
+# for handoff state and has an entirely different key domain; kept separate
+# deliberately (dedupe reviewed 2026-08-31, D-006179 lineage).
 _room_fsm_registry: dict[str, Any] = {}
 
 
