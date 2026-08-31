@@ -65,20 +65,35 @@ STATE_CLEAR = "clear"
 class NodeStress:
     """A single node's stress status as seen by the dispatcher.
 
-    Mirrors the fields the HRV gate already caches, but we only surface
-    the two conditions the spec calls out: memory_pressure and
-    kanban_dispatcher_health.
+    Mirrors the fields the HRV gate already caches. The spec (t_5d0beb8f)
+    surfaces three RED conditions independently — the broadcaster checks
+    each against the >50% node threshold separately so subscribers can
+    tell WHY the cluster went into backpressure:
+
+      * memory_pressure_red:      swap_pct >= 90% (or explicit OOM signal)
+      * dispatcher_health_red:    kanban dispatcher systemd unit is
+                                  activating / crashed in last 10min
+      * urgent_state_red:         hrv.status.digest.interval_class ==
+                                  'urgent' on this node
+
+    ``is_red`` remains a convenience OR-fold for callers that only care
+    whether the node is stressed at all.
     """
 
     hostname: str
     memory_pressure_red: bool = False
     dispatcher_health_red: bool = False
+    urgent_state_red: bool = False
     ts: Optional[str] = None  # ISO8601 of the underlying probe timestamp
 
     @property
     def is_red(self) -> bool:
-        """True if either RED condition holds."""
-        return bool(self.memory_pressure_red or self.dispatcher_health_red)
+        """True if ANY RED condition holds."""
+        return bool(
+            self.memory_pressure_red
+            or self.dispatcher_health_red
+            or self.urgent_state_red
+        )
 
 
 @dataclass
@@ -87,6 +102,11 @@ class BackpressureSnapshot:
 
     ``state`` is the *new* desired state, ``changed`` records whether it
     differs from the last-known state that was passed in.
+
+    Per-probe fractions are surfaced so subscribers can see exactly WHICH
+    trigger fired (and consumer-side circuit breakers can be tuned per
+    probe if needed). ``stress_fraction`` is the max across probes — the
+    scalar the hysteresis logic actually uses.
     """
 
     state: str
@@ -95,15 +115,32 @@ class BackpressureSnapshot:
     total_nodes: int = 0
     changed: bool = False
     ts: str = ""
+    # Per-probe fractions (t_5d0beb8f — payload transparency for subscribers)
+    memory_pressure_fraction: float = 0.0
+    dispatcher_health_fraction: float = 0.0
+    urgent_state_fraction: float = 0.0
+    triggering_probes: List[str] = field(default_factory=list)
 
     def to_payload(self) -> Dict[str, Any]:
-        """JSON-serialisable NATS payload matching the spec."""
+        """JSON-serialisable NATS payload matching the spec.
+
+        Subscribers use ``state`` for the hold/release decision and
+        ``triggering_probes`` for context (which failure class fired).
+        """
         if self.state == STATE_ACTIVE:
             return {
                 "state": STATE_ACTIVE,
                 "red_nodes": list(self.red_nodes),
                 "stress_fraction": round(self.stress_fraction, 4),
                 "total_nodes": self.total_nodes,
+                "triggering_probes": list(self.triggering_probes),
+                "probe_fractions": {
+                    "memory_pressure": round(self.memory_pressure_fraction, 4),
+                    "kanban_dispatcher_health": round(
+                        self.dispatcher_health_fraction, 4
+                    ),
+                    "hrv_urgent_state": round(self.urgent_state_fraction, 4),
+                },
                 "ts": self.ts,
             }
         return {"state": STATE_CLEAR, "ts": self.ts}
@@ -131,69 +168,115 @@ def compute_backpressure(
 ) -> BackpressureSnapshot:
     """Pure compute — decide next backpressure state from probes.
 
+    Per-probe threshold semantics (t_5d0beb8f):
+      Trigger backpressure ACTIVE when the fraction of RED nodes on ANY
+      single probe crosses ``threshold``. This is stricter than a
+      union-fold, and matches the ticket body's "ANY of: >50% ... OR
+      >50% ... OR >50% ..." wording. ``stress_fraction`` reported to
+      subscribers is ``max(mem_frac, disp_frac, urgent_frac)``.
+
     Args:
       nodes: current per-node stress snapshots.
       current_state: the last-published state (``"active"`` / ``"clear"``);
         needed for hysteresis.
-      threshold: fraction at or above which we go active.
+      threshold: fraction at or above which we go active (per probe).
       hysteresis: the buffer band below threshold we must fall through
         before clearing. Effective clear point = ``threshold - hysteresis``.
       now_iso: pinned timestamp for tests. Defaults to real wall-clock.
 
     Returns:
-      A :class:`BackpressureSnapshot` capturing the next state, the RED
-      node list, and whether it differs from ``current_state``.
+      A :class:`BackpressureSnapshot` capturing the next state, per-probe
+      fractions, the list of triggering probes, and whether the state
+      differs from ``current_state``.
     """
     nodes_list = list(nodes)
     total = len(nodes_list)
-    red = [n for n in nodes_list if n.is_red]
-    red_hostnames = sorted(n.hostname for n in red)
-
-    if total == 0:
-        # Fail-open: no probes yet → never go active
-        stress = 0.0
-    else:
-        stress = len(red) / total
-
     ts = now_iso or _iso_now()
 
-    if current_state == STATE_ACTIVE:
-        # Only clear when we drop through the lower band
-        if stress < (threshold - hysteresis):
-            return BackpressureSnapshot(
-                state=STATE_CLEAR,
-                red_nodes=red_hostnames,
-                stress_fraction=stress,
-                total_nodes=total,
-                changed=True,
-                ts=ts,
-            )
+    if total == 0:
+        # Fail-open: no probes yet → never go active (cold-cluster protection)
         return BackpressureSnapshot(
-            state=STATE_ACTIVE,
-            red_nodes=red_hostnames,
-            stress_fraction=stress,
-            total_nodes=total,
+            state=STATE_CLEAR if current_state != STATE_ACTIVE else STATE_ACTIVE,
+            red_nodes=[],
+            stress_fraction=0.0,
+            total_nodes=0,
             changed=False,
             ts=ts,
         )
 
-    # current_state == "clear" (or unknown → treat as clear)
-    if total > 0 and stress >= threshold:
-        return BackpressureSnapshot(
-            state=STATE_ACTIVE,
-            red_nodes=red_hostnames,
-            stress_fraction=stress,
-            total_nodes=total,
-            changed=True,
-            ts=ts,
-        )
-    return BackpressureSnapshot(
-        state=STATE_CLEAR,
+    mem_count = sum(1 for n in nodes_list if n.memory_pressure_red)
+    disp_count = sum(1 for n in nodes_list if n.dispatcher_health_red)
+    urgent_count = sum(1 for n in nodes_list if n.urgent_state_red)
+
+    mem_frac = mem_count / total
+    disp_frac = disp_count / total
+    urgent_frac = urgent_count / total
+
+    # Union of nodes that are RED on at least one probe — useful for the
+    # subscriber's "which hostnames are hot" list even if only one probe
+    # is above threshold.
+    red_hostnames = sorted(n.hostname for n in nodes_list if n.is_red)
+
+    stress = max(mem_frac, disp_frac, urgent_frac)
+
+    # Which probes actually crossed threshold — surfaced in the payload
+    # so the subscriber can log/route on the specific failure class.
+    triggering: List[str] = []
+    if mem_frac >= threshold:
+        triggering.append("memory_pressure")
+    if disp_frac >= threshold:
+        triggering.append("kanban_dispatcher_health")
+    if urgent_frac >= threshold:
+        triggering.append("hrv_urgent_state")
+
+    common_kwargs: Dict[str, Any] = dict(
         red_nodes=red_hostnames,
         stress_fraction=stress,
         total_nodes=total,
-        changed=False,
         ts=ts,
+        memory_pressure_fraction=mem_frac,
+        dispatcher_health_fraction=disp_frac,
+        urgent_state_fraction=urgent_frac,
+    )
+
+    if current_state == STATE_ACTIVE:
+        # Only clear when ALL probes drop through the lower band. This is
+        # symmetric with the "any-probe crosses" trigger: we hold active
+        # until every trigger has receded, preventing flap when one probe
+        # clears but another is still hot.
+        clear_point = threshold - hysteresis
+        any_still_hot = (
+            mem_frac >= clear_point
+            or disp_frac >= clear_point
+            or urgent_frac >= clear_point
+        )
+        if not any_still_hot:
+            return BackpressureSnapshot(
+                state=STATE_CLEAR,
+                changed=True,
+                triggering_probes=[],
+                **common_kwargs,
+            )
+        return BackpressureSnapshot(
+            state=STATE_ACTIVE,
+            changed=False,
+            triggering_probes=triggering,
+            **common_kwargs,
+        )
+
+    # current_state == "clear" (or unknown → treat as clear)
+    if triggering:
+        return BackpressureSnapshot(
+            state=STATE_ACTIVE,
+            changed=True,
+            triggering_probes=triggering,
+            **common_kwargs,
+        )
+    return BackpressureSnapshot(
+        state=STATE_CLEAR,
+        changed=False,
+        triggering_probes=[],
+        **common_kwargs,
     )
 
 
@@ -313,31 +396,54 @@ class BackpressureBroadcaster:
 def nodes_from_probe_cache(
     probe_cache: Dict[str, Any],
     dispatcher_health_red: Optional[Dict[str, bool]] = None,
+    urgent_state_red: Optional[Dict[str, bool]] = None,
 ) -> List[NodeStress]:
     """Convert the HRV gate's per-hostname probe cache into NodeStress.
 
     Args:
       probe_cache: ``{hostname: NodeProbeSnapshot-like}`` — the gate's
         internal cache. We duck-type: any object with ``swap_pct`` and
-        ``ts`` attributes works.
+        ``ts`` attributes works. If the snapshot also carries an
+        ``interval_class`` attribute (per-node HRV digest), the "urgent"
+        signal is derived from it automatically; callers can still
+        override via the ``urgent_state_red`` map.
       dispatcher_health_red: optional ``{hostname: bool}`` from a systemd
         watcher. When absent, dispatcher_health is treated as green (only
-        memory_pressure feeds the RED signal).
+        memory_pressure + urgent_state feed the RED signal).
+      urgent_state_red: optional ``{hostname: bool}`` for the third
+        trigger from t_5d0beb8f (``hrv.status.digest.interval_class ==
+        'urgent'`` on that node). When absent AND the probe object does
+        not expose ``interval_class``, the trigger is treated as green.
+        When the cluster only has a *global* HRV digest (common today),
+        callers should broadcast the same boolean to every hostname in
+        the cache.
 
-    This keeps the bridge symmetric with the spec's two RED conditions
-    (memory_pressure, kanban_dispatcher_health) and avoids re-inventing
-    probe caching in the broadcaster.
+    Keeps the bridge symmetric with the spec's three RED conditions
+    (memory_pressure, kanban_dispatcher_health, hrv_urgent_state) and
+    avoids re-inventing probe caching in the broadcaster.
     """
     dhr = dispatcher_health_red or {}
+    usr = urgent_state_red or {}
     out: List[NodeStress] = []
     for hostname, probe in probe_cache.items():
         swap = getattr(probe, "swap_pct", None)
         mem_red = swap is not None and swap >= 90.0
+
+        # Prefer explicit override, then derive from probe.interval_class
+        # if the snapshot carries it. Case-insensitive on the value so
+        # producers that vary ('Urgent' vs 'urgent') still match.
+        if hostname in usr:
+            urgent_red = bool(usr[hostname])
+        else:
+            ic = getattr(probe, "interval_class", None)
+            urgent_red = isinstance(ic, str) and ic.strip().lower() == "urgent"
+
         out.append(
             NodeStress(
                 hostname=hostname,
                 memory_pressure_red=bool(mem_red),
                 dispatcher_health_red=bool(dhr.get(hostname, False)),
+                urgent_state_red=urgent_red,
                 ts=getattr(probe, "ts", None),
             )
         )

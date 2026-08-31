@@ -41,10 +41,10 @@ def test_compute_all_green_stays_clear():
 
 
 def test_compute_half_red_at_default_threshold_goes_active():
-    # 2/3 red = 0.667 >= 0.5 threshold
+    # 2/3 RED on memory_pressure = 0.667 >= 0.5 threshold (per-probe)
     nodes = [
-        NodeStress("h1", True, False),  # memory pressure RED
-        NodeStress("h2", False, True),  # dispatcher_health RED
+        NodeStress("h1", True, False),   # memory pressure RED
+        NodeStress("h2", True, False),   # memory pressure RED
         NodeStress("h3", False, False),
     ]
     snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
@@ -53,6 +53,7 @@ def test_compute_half_red_at_default_threshold_goes_active():
     assert snap.red_nodes == ["h1", "h2"]
     assert 0.66 < snap.stress_fraction < 0.67
     assert snap.total_nodes == 3
+    assert snap.triggering_probes == ["memory_pressure"]
 
 
 def test_compute_exact_threshold_goes_active():
@@ -373,16 +374,17 @@ async def test_acceptance_scenario_2_of_3_red_then_recover():
     assert bus.kv[(KV_BUCKET_BACKPRESSURE, KV_KEY_CURRENT)]["state"] == "clear"
     assert len(bus.published) == 0
 
-    # Step 2: 2/3 RED → active
+    # Step 2: 2/3 RED on the same probe → per-probe fraction 0.667 → active
     await b.tick(
         [
-            NodeStress("h1", True, False),  # memory
-            NodeStress("h2", False, True),  # dispatcher
+            NodeStress("h1", True, False),   # memory RED
+            NodeStress("h2", True, False),   # memory RED
             NodeStress("h3", False, False),
         ]
     )
     assert bus.published[-1][1]["state"] == "active"
     assert set(bus.published[-1][1]["red_nodes"]) == {"h1", "h2"}
+    assert bus.published[-1][1]["triggering_probes"] == ["memory_pressure"]
     assert b.state == STATE_ACTIVE
 
     # Step 3: recovery — nodes back to green
@@ -396,3 +398,182 @@ async def test_acceptance_scenario_2_of_3_red_then_recover():
     assert bus.published[-1][1]["state"] == "clear"
     assert b.state == STATE_CLEAR
     assert [p[1]["state"] for p in bus.published] == ["active", "clear"]
+
+
+# ── t_5d0beb8f: urgent_state trigger + per-probe threshold semantics ─────────
+
+
+def test_urgent_state_trigger_alone_fires_active():
+    """Third RED condition from t_5d0beb8f: >50% of nodes have interval_class=urgent.
+
+    All three nodes green on memory/dispatcher; 2/3 nodes RED on urgent → fires.
+    """
+    nodes = [
+        NodeStress("h1", False, False, True),   # urgent
+        NodeStress("h2", False, False, True),   # urgent
+        NodeStress("h3", False, False, False),
+    ]
+    snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
+    assert snap.state == STATE_ACTIVE
+    assert snap.changed is True
+    assert snap.triggering_probes == ["hrv_urgent_state"]
+    assert snap.memory_pressure_fraction == 0.0
+    assert snap.dispatcher_health_fraction == 0.0
+    assert abs(snap.urgent_state_fraction - 2 / 3) < 1e-9
+
+
+def test_per_probe_threshold_split_stays_clear():
+    """40% mem RED + 40% disp RED (disjoint) → neither probe crosses 50%.
+
+    Old union-fold would fire at 0.8; new per-probe semantics correctly
+    stays clear because no single probe crosses threshold. This is the
+    key semantic distinction from t_95d86e0c's original module.
+    """
+    nodes = [
+        NodeStress("h1", True, False, False),   # mem only
+        NodeStress("h2", True, False, False),   # mem only
+        NodeStress("h3", False, True, False),   # disp only
+        NodeStress("h4", False, True, False),   # disp only
+        NodeStress("h5", False, False, False),
+    ]
+    snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
+    assert snap.state == STATE_CLEAR
+    assert snap.changed is False
+    assert snap.triggering_probes == []
+    # Per-probe visibility still surfaced in the snapshot (for observability)
+    assert abs(snap.memory_pressure_fraction - 0.4) < 1e-9
+    assert abs(snap.dispatcher_health_fraction - 0.4) < 1e-9
+    # But stress_fraction = max = 0.4, still below 0.5
+    assert abs(snap.stress_fraction - 0.4) < 1e-9
+
+
+def test_multiple_probes_over_threshold_lists_all_triggers():
+    """Three probes all RED on 2/3 nodes → all three listed in triggering_probes."""
+    nodes = [
+        NodeStress("h1", True, True, True),
+        NodeStress("h2", True, True, True),
+        NodeStress("h3", False, False, False),
+    ]
+    snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
+    assert snap.state == STATE_ACTIVE
+    # Order is deterministic: memory, dispatcher, urgent
+    assert snap.triggering_probes == [
+        "memory_pressure",
+        "kanban_dispatcher_health",
+        "hrv_urgent_state",
+    ]
+
+
+def test_urgent_hysteresis_holds_active_until_all_probes_drop():
+    """Active on urgent alone; mem/disp both 0. Urgent drops to 0.4 (in deadband)
+    → must stay active (>= threshold - hysteresis)."""
+    nodes = [
+        NodeStress("h1", False, False, True),   # urgent
+        NodeStress("h2", False, False, True),   # urgent
+        NodeStress("h3", False, False, False),
+        NodeStress("h4", False, False, False),
+        NodeStress("h5", False, False, False),
+    ]
+    # 2/5 = 0.4 == clear_point → in deadband, stay active
+    snap = compute_backpressure(nodes, current_state=STATE_ACTIVE)
+    assert snap.state == STATE_ACTIVE
+    assert snap.changed is False
+
+
+def test_all_probes_clear_transitions_from_active():
+    """Active on any trigger; all probes drop to 0 → clears."""
+    nodes = [NodeStress(f"h{i}", False, False, False) for i in range(5)]
+    snap = compute_backpressure(nodes, current_state=STATE_ACTIVE)
+    assert snap.state == STATE_CLEAR
+    assert snap.changed is True
+    assert snap.triggering_probes == []
+
+
+def test_payload_includes_probe_fractions_when_active():
+    """Payload contract (t_5d0beb8f AC: 'enough context for subscribers')."""
+    nodes = [
+        NodeStress("h1", False, False, True),
+        NodeStress("h2", False, False, True),
+        NodeStress("h3", False, False, False),
+    ]
+    snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
+    payload = snap.to_payload()
+    assert payload["state"] == "active"
+    assert payload["triggering_probes"] == ["hrv_urgent_state"]
+    assert payload["probe_fractions"] == {
+        "memory_pressure": 0.0,
+        "kanban_dispatcher_health": 0.0,
+        "hrv_urgent_state": 0.6667,
+    }
+    assert payload["total_nodes"] == 3
+    assert "ts" in payload
+
+
+def test_payload_clear_state_is_minimal():
+    """Clear payload stays minimal (state + ts) for cheap subscribers."""
+    nodes = [NodeStress("h1", False, False, False)]
+    snap = compute_backpressure(nodes, current_state=STATE_CLEAR)
+    payload = snap.to_payload()
+    assert payload == {"state": "clear", "ts": payload["ts"]}
+
+
+def test_nodes_from_probe_cache_derives_urgent_from_interval_class():
+    """The bridge picks up interval_class from the probe snapshot when present."""
+    from types import SimpleNamespace
+
+    probe_cache = {
+        "hermes2": SimpleNamespace(swap_pct=10.0, ts="2026-08-31T19:00:00Z",
+                                    interval_class="urgent"),
+        "hermes1": SimpleNamespace(swap_pct=10.0, ts="2026-08-31T19:00:00Z",
+                                    interval_class="calm"),
+    }
+    stresses = nodes_from_probe_cache(probe_cache)
+    by_host = {s.hostname: s for s in stresses}
+    assert by_host["hermes2"].urgent_state_red is True
+    assert by_host["hermes1"].urgent_state_red is False
+    # Case insensitivity + trimming
+    probe_cache["h3"] = SimpleNamespace(swap_pct=10.0, ts="x",
+                                         interval_class=" Urgent  ")
+    stresses = nodes_from_probe_cache(probe_cache)
+    assert {s.hostname: s.urgent_state_red for s in stresses}["h3"] is True
+
+
+def test_nodes_from_probe_cache_explicit_urgent_override_wins():
+    """Explicit urgent_state_red map overrides any interval_class inference."""
+    from types import SimpleNamespace
+
+    probe_cache = {
+        "h1": SimpleNamespace(swap_pct=None, ts=None, interval_class="urgent"),
+        "h2": SimpleNamespace(swap_pct=None, ts=None, interval_class="calm"),
+    }
+    override = {"h1": False, "h2": True}
+    stresses = nodes_from_probe_cache(probe_cache, urgent_state_red=override)
+    by = {s.hostname: s.urgent_state_red for s in stresses}
+    assert by == {"h1": False, "h2": True}
+
+
+def test_nodes_from_probe_cache_global_urgent_broadcast_pattern():
+    """When only a cluster-wide HRV digest exists, callers broadcast to all
+    hostnames. Verifies the >50% trigger fires cleanly under this pattern."""
+    from types import SimpleNamespace
+
+    probe_cache = {
+        f"h{i}": SimpleNamespace(swap_pct=10.0, ts="x", interval_class=None)
+        for i in range(3)
+    }
+    # Global urgent signal broadcast to every hostname
+    global_urgent = True
+    override = {h: global_urgent for h in probe_cache}
+    stresses = nodes_from_probe_cache(probe_cache, urgent_state_red=override)
+    snap = compute_backpressure(stresses, current_state=STATE_CLEAR)
+    assert snap.state == STATE_ACTIVE
+    assert snap.triggering_probes == ["hrv_urgent_state"]
+    assert snap.urgent_state_fraction == 1.0
+
+
+def test_is_red_or_folds_all_three_conditions():
+    """Any of three probes RED → is_red True (used for red_nodes list)."""
+    assert NodeStress("h", memory_pressure_red=True).is_red is True
+    assert NodeStress("h", dispatcher_health_red=True).is_red is True
+    assert NodeStress("h", urgent_state_red=True).is_red is True
+    assert NodeStress("h").is_red is False
