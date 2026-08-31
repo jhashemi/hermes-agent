@@ -24,13 +24,48 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Bedrock TPM saturation threshold used by condition-3 (bedrock_rate_limit_saturation).
+# Also used to clamp condition-5 (min_resources_overflow) so that a node with TPM
+# between this threshold and the task's declared reservation isn't rejected by
+# condition-5 while being accepted by condition-3. See starvation-edge fix in
+# t_d18420a6 / review comment on t_55fb6cb6.
+BEDROCK_TPM_SATURATION_THRESHOLD = 1000
+
+# OOM scan window: how far back to look for OOM kills. Condition 1b spec: last 5 minutes.
+OOM_SCAN_WINDOW_SECONDS = 300
+
+# Subprocess timeout for external probes (journalctl / systemctl / dmesg).
+# Kept short so a hung journal never blocks dispatcher decisions — on timeout
+# the probe reports UNKNOWN and the gate fails open.
+_SUBPROC_TIMEOUT_SECONDS = 3.0
+
+# Systemd unit name the gate checks for condition-2 (kanban_dispatcher_health).
+# Overridable via env HRV_DISPATCHER_UNIT_NAME. When the unit isn't installed
+# on the host, `systemctl is-active` returns "inactive" for unknown units on
+# some systemd versions and "unknown" on others — we treat both as UNKNOWN →
+# fail-open so a host without a dedicated dispatcher unit isn't universally
+# rejected.
+_DEFAULT_DISPATCHER_UNIT_NAME = "hermes-kanban-dispatcher.service"
+
+# systemctl states that count as "dispatcher unhealthy" for condition-2.
+# 'activating' = starting/reloading (transient); 'failed' = crashed;
+# 'deactivating' = shutting down (also don't want new work).
+_DISPATCHER_UNHEALTHY_STATES = frozenset({"activating", "failed", "deactivating"})
+
+# systemctl states that mean "no answer" (host doesn't have the unit installed
+# or systemctl is unavailable) — treat as UNKNOWN → fail-open.
+_DISPATCHER_UNKNOWN_STATES = frozenset({"unknown", "inactive"})
 
 
 @dataclass
@@ -200,28 +235,211 @@ class HRVNodeGate:
         return None
     
     def _check_memory_pressure(self, probe: Optional[NodeProbeSnapshot]) -> bool:
-        """Reject if probe is RED: swap_pct >= 90% or OOM kill in last 5min."""
-        if probe is None or probe.is_stale(self.max_probe_age_seconds):
-            # Stale/missing → fail-open (don't reject)
-            return False
-        
-        # Check swap pressure
-        if probe.swap_pct is not None and probe.swap_pct >= 90.0:
-            return True
-        
-        # Note: OOM kill detection would typically come from a separate probe
-        # (e.g., kernel log tail or systemd journal query). For now, this is
-        # a placeholder for future integration.
-        
-        return False
-    
-    def _check_dispatcher_health(self, node_hostname: str) -> bool:
-        """Reject if dispatcher is activating or crashed in last 10min.
-        
-        Typically checked via systemctl status kanban-dispatcher@<node>.service.
-        For now, returns False (placeholder for systemd integration).
+        """Reject if probe is RED: swap_pct >= 90% or OOM kill in last 5min.
+
+        Sub-conditions:
+        1a) swap_pct >= 90.0 (requires a fresh probe snapshot).
+        1b) OOM kill detected in kernel log within the last
+            ``OOM_SCAN_WINDOW_SECONDS`` seconds — probed via journalctl and, on
+            failure, dmesg. Independent of probe freshness because it queries
+            local kernel state; still fails open on any error.
         """
-        # TODO: integrate with systemd.dbus / systemctl query
+        # 1a: swap pressure — only when the KV probe is fresh
+        if probe is not None and not probe.is_stale(self.max_probe_age_seconds):
+            if probe.swap_pct is not None and probe.swap_pct >= 90.0:
+                return True
+
+        # 1b: OOM kill in last 5min — local kernel probe, no dependency on KV
+        if self._oom_kill_within_window():
+            return True
+
+        return False
+
+    def _oom_kill_within_window(
+        self, window_seconds: int = OOM_SCAN_WINDOW_SECONDS
+    ) -> bool:
+        """True iff a kernel OOM kill was recorded in the last ``window_seconds``.
+
+        Strategy:
+        - Primary: ``journalctl -k --since '<N> seconds ago' --no-pager -q``
+          filtered for OOM markers (``Out of memory``, ``oom-kill``,
+          ``Killed process``, ``invoked oom-killer``).
+        - Fallback: ``dmesg -T`` (or ``dmesg``) parsed the same way. The dmesg
+          ring buffer isn't time-bounded, so we time-filter on the fly using
+          the ``-T`` timestamp when available; when it isn't, dmesg is skipped
+          rather than risk stale false-positives from an unrelated old OOM.
+
+        On any subprocess error / timeout / permission denied, returns False
+        (UNKNOWN → fail-open, consistent with the gate's stale-probe policy).
+        """
+        # Primary path: journalctl (systemd-journal). Preferred because it has
+        # a native time filter, so a very old OOM never leaks through.
+        journal_result = self._probe_oom_journal(window_seconds)
+        if journal_result is not None:
+            return journal_result
+
+        # Fallback: dmesg -T (human-readable timestamps). Skipped when -T isn't
+        # supported, because untimed dmesg lines can be years old.
+        dmesg_result = self._probe_oom_dmesg(window_seconds)
+        if dmesg_result is not None:
+            return dmesg_result
+
+        # No probe returned a definitive answer → UNKNOWN → fail-open.
+        return False
+
+    @staticmethod
+    def _line_matches_oom(line: str) -> bool:
+        """True if a kernel log line looks like an OOM-killer event.
+
+        Matches (case-insensitive) any of the canonical Linux OOM markers:
+        - "Out of memory" (kernel headline)
+        - "oom-kill" (cgroup OOM killer)
+        - "invoked oom-killer" (process invoking OOM)
+        - "Killed process <pid>" (kernel kill notification)
+        """
+        low = line.lower()
+        return (
+            "out of memory" in low
+            or "oom-kill" in low
+            or "invoked oom-killer" in low
+            or "killed process" in low
+        )
+
+    def _probe_oom_journal(self, window_seconds: int) -> Optional[bool]:
+        """Query journalctl for OOM kills. Returns True/False on success, None on error."""
+        if shutil.which("journalctl") is None:
+            return None
+        try:
+            proc = subprocess.run(
+                [
+                    "journalctl",
+                    "-k",
+                    "--since",
+                    f"{window_seconds} seconds ago",
+                    "--no-pager",
+                    "-q",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROC_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.debug(f"[hrv-node-gate] journalctl OOM probe failed: {exc}")
+            return None
+
+        # journalctl returns 0 on success (even when no matches). Non-zero →
+        # unusable (permission denied, journal corrupt, etc.).
+        if proc.returncode != 0:
+            logger.debug(
+                f"[hrv-node-gate] journalctl OOM probe rc={proc.returncode}: "
+                f"{proc.stderr.strip()[:200]}"
+            )
+            return None
+
+        for line in proc.stdout.splitlines():
+            if self._line_matches_oom(line):
+                logger.info(f"[hrv-node-gate] OOM kill detected in journal: {line.strip()[:200]}")
+                return True
+        return False
+
+    def _probe_oom_dmesg(self, window_seconds: int) -> Optional[bool]:
+        """Query dmesg -T for OOM kills. Returns True/False on success, None on error.
+
+        Requires ``-T`` (human-readable timestamps) so we can time-filter. When
+        ``-T`` isn't available or dmesg is unreadable, returns None.
+        """
+        if shutil.which("dmesg") is None:
+            return None
+        try:
+            proc = subprocess.run(
+                ["dmesg", "-T", "--nopager"],
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROC_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.debug(f"[hrv-node-gate] dmesg OOM probe failed: {exc}")
+            return None
+
+        if proc.returncode != 0:
+            # dmesg without CAP_SYSLOG returns EPERM; treat as UNKNOWN.
+            logger.debug(
+                f"[hrv-node-gate] dmesg OOM probe rc={proc.returncode}: "
+                f"{proc.stderr.strip()[:200]}"
+            )
+            return None
+
+        cutoff = time.time() - window_seconds
+        # dmesg -T format: "[Mon Aug 31 12:34:56 2026] kernel: Out of memory: ..."
+        ts_re = re.compile(r"^\[([A-Za-z]{3} [A-Za-z]{3} [ \d]\d [\d:]+ \d{4})\]\s*(.*)$")
+        for raw in proc.stdout.splitlines():
+            m = ts_re.match(raw)
+            if not m:
+                # Timestamp missing → can't safely time-bound; skip.
+                continue
+            ts_str, rest = m.group(1), m.group(2)
+            try:
+                # strptime with locale-independent %b/%a — Python's default locale
+                # on Ubuntu is C, matching dmesg's English output.
+                struct = time.strptime(ts_str, "%a %b %d %H:%M:%S %Y")
+                event_ts = time.mktime(struct)
+            except (ValueError, OverflowError):
+                continue
+            if event_ts < cutoff:
+                continue
+            if self._line_matches_oom(rest):
+                logger.info(f"[hrv-node-gate] OOM kill detected in dmesg: {rest.strip()[:200]}")
+                return True
+        return False
+
+    def _check_dispatcher_health(self, node_hostname: str) -> bool:
+        """Reject if kanban dispatcher systemd unit is unhealthy on this host.
+
+        Queries ``systemctl is-active <unit>`` and rejects when the reported
+        state is one of ``_DISPATCHER_UNHEALTHY_STATES`` (activating / failed /
+        deactivating). When the unit doesn't exist on the host, systemctl
+        can't be run, or the call times out, returns False (UNKNOWN →
+        fail-open, consistent with the gate's overall policy).
+
+        Unit name overridable via env ``HRV_DISPATCHER_UNIT_NAME``. Note that
+        the check is local to the machine running the gate — cross-node
+        systemd status would require SSH or a remote probe, out of scope for
+        this pass. In practice the gate runs on the dispatcher host itself.
+        """
+        unit_name = os.environ.get(
+            "HRV_DISPATCHER_UNIT_NAME", _DEFAULT_DISPATCHER_UNIT_NAME
+        )
+        if shutil.which("systemctl") is None:
+            return False  # No systemd → UNKNOWN → fail-open
+
+        try:
+            proc = subprocess.run(
+                ["systemctl", "is-active", unit_name],
+                capture_output=True,
+                text=True,
+                timeout=_SUBPROC_TIMEOUT_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.debug(
+                f"[hrv-node-gate] systemctl is-active {unit_name} failed: {exc}"
+            )
+            return False
+
+        # `systemctl is-active` exits 0 for active, non-zero otherwise. The
+        # state string comes from stdout regardless of exit code.
+        state = (proc.stdout or "").strip().lower()
+        if not state:
+            return False  # No answer → UNKNOWN → fail-open
+
+        if state in _DISPATCHER_UNHEALTHY_STATES:
+            logger.info(
+                f"[hrv-node-gate] dispatcher unit {unit_name} unhealthy: state={state}"
+            )
+            return True
+
+        # 'active', 'reloading', 'inactive', 'unknown' → don't reject.
+        # ('inactive' + 'unknown' specifically UNKNOWN → fail-open; other
+        # healthy states just pass.)
         return False
     
     def _check_bedrock_rate_limit(
@@ -231,11 +449,14 @@ class HRVNodeGate:
         if probe is None or probe.is_stale(self.max_probe_age_seconds):
             # Stale/missing → fail-open
             return False
-        
-        # Conservative threshold: reject if < 1000 TPM remaining
-        if probe.bedrock_tpm_remaining is not None and probe.bedrock_tpm_remaining < 1000:
+
+        # Conservative threshold: reject if remaining below saturation floor.
+        if (
+            probe.bedrock_tpm_remaining is not None
+            and probe.bedrock_tpm_remaining < BEDROCK_TPM_SATURATION_THRESHOLD
+        ):
             return True
-        
+
         return False
     
     def _check_hrv_urgency(self, task_priority: Optional[int]) -> bool:
@@ -280,12 +501,31 @@ class HRVNodeGate:
             if probe.load_1m > required_cpu_cores + 0.5:
                 return True
         
-        # Bedrock TPM reservation: check against bedrock_tpm_remaining
+        # Bedrock TPM reservation: check against bedrock_tpm_remaining.
+        #
+        # Starvation-edge fix (t_d18420a6, review comment on t_55fb6cb6):
+        # DEFAULT_MIN_RESOURCES.bedrock_tpm_reservation is 10000, but the
+        # condition-3 saturation reject threshold is BEDROCK_TPM_SATURATION_THRESHOLD
+        # (1000). A node publishing bedrock_tpm_remaining in
+        # (SATURATION_THRESHOLD, DEFAULT_RESERVATION) would previously reject
+        # every DEFAULT-declared task via condition-5 while passing condition-3
+        # — dispatch starvation while the model is provably healthy.
+        #
+        # We resolve this by clamping the effective condition-5 threshold to
+        # the saturation floor: condition-5 only rejects when the node's
+        # remaining TPM is BELOW BOTH the task's reservation AND the
+        # saturation floor. That is, condition-5 will never reject a node
+        # that condition-3 has already accepted. A caller that genuinely
+        # needs a stricter cutoff can raise BEDROCK_TPM_SATURATION_THRESHOLD
+        # rather than smuggling it in via task-level reservations.
         required_tpm = task_min_resources.get("bedrock_tpm_reservation", 10000)
-        if (probe.bedrock_tpm_remaining is not None and
-            probe.bedrock_tpm_remaining < required_tpm):
+        effective_required_tpm = min(required_tpm, BEDROCK_TPM_SATURATION_THRESHOLD)
+        if (
+            probe.bedrock_tpm_remaining is not None
+            and probe.bedrock_tpm_remaining < effective_required_tpm
+        ):
             return True
-        
+
         return False
     
     def emit_rejection_metric(

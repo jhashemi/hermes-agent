@@ -205,21 +205,59 @@ class TestMinResources:
         assert result == "min_resources_overflow"
     
     def test_insufficient_bedrock_tpm_rejected(self):
-        """Node with insufficient Bedrock TPM reservation should be rejected."""
+        """Node with TPM remaining below the saturation floor is rejected.
+
+        Starvation-edge fix (t_d18420a6): condition-5's TPM check is clamped
+        to BEDROCK_TPM_SATURATION_THRESHOLD (1000). A node with TPM remaining
+        below the saturation floor is rejected regardless of the task's
+        declared reservation, because condition-3 would also reject.
+        """
         gate = HRVNodeGate()
         probe = NodeProbeSnapshot(
             hostname="hermes2",
-            bedrock_tpm_remaining=8000,
+            bedrock_tpm_remaining=500,  # below the 1000 saturation floor
             ts=get_now_ts(),
         )
         gate.set_node_probe_snapshot("hermes2", probe)
-        
+
         task_min_resources = {"bedrock_tpm_reservation": 10000}
         result = gate.evaluate_node(
             "task1", "hermes2", "claude-haiku",
             task_min_resources=task_min_resources
         )
-        assert result == "min_resources_overflow"
+        # condition-3 rejects first with its own reason; either reason is a valid
+        # "insufficient TPM" outcome and both are acceptable for this assertion.
+        assert result in ("min_resources_overflow", "bedrock_rate_limit_saturation[claude-haiku]")
+
+    def test_tpm_above_saturation_but_below_reservation_passes(self):
+        """Starvation-edge fix: TPM in (saturation, reservation) must NOT be rejected.
+
+        Before the fix, a node publishing bedrock_tpm_remaining in
+        (BEDROCK_TPM_SATURATION_THRESHOLD, task.bedrock_tpm_reservation) would
+        pass condition-3 but be rejected by condition-5 — starving DEFAULT
+        tasks on a healthy node. This regression test locks in the clamp.
+        """
+        from hermes_cli.hrv_node_gate import BEDROCK_TPM_SATURATION_THRESHOLD
+
+        gate = HRVNodeGate()
+        # 8000 TPM: comfortably above the 1000 saturation floor, but well below
+        # the 10000 default reservation. Pre-fix this was rejected; post-fix
+        # it must pass.
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            bedrock_tpm_remaining=8000,
+            mem_gb_available=8.0,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+        assert 8000 > BEDROCK_TPM_SATURATION_THRESHOLD  # sanity check on constants
+
+        task_min_resources = {"bedrock_tpm_reservation": 10000, "mem_gb": 0.5}
+        result = gate.evaluate_node(
+            "task1", "hermes2", "claude-haiku",
+            task_min_resources=task_min_resources
+        )
+        assert result is None
     
     def test_no_min_resources_passes(self):
         """Node with no min_resources requirement should pass."""
@@ -366,6 +404,235 @@ class TestMetricEmission:
         
         gate.emit_rejection_metric("task1", "hermes2", result, metrics_fn=capture_metric)
         assert metrics_called == ["memory_pressure"]
+
+
+class TestOOMDetection:
+    """Test OOM-kill sub-condition of memory_pressure (condition 1b)."""
+
+    def test_no_oom_kill_passes(self, monkeypatch):
+        """No OOM markers in kernel log → don't reject."""
+        gate = HRVNodeGate()
+        # Both probes report clean output
+        monkeypatch.setattr(
+            gate, "_probe_oom_journal", lambda window: False
+        )
+        monkeypatch.setattr(
+            gate, "_probe_oom_dmesg", lambda window: False
+        )
+        assert gate._oom_kill_within_window() is False
+
+    def test_oom_kill_from_journal_rejects(self, monkeypatch):
+        """journalctl reports an OOM kill → memory_pressure."""
+        gate = HRVNodeGate()
+        monkeypatch.setattr(
+            gate, "_probe_oom_journal", lambda window: True
+        )
+        # Should short-circuit before dmesg; assertion sentinel:
+        monkeypatch.setattr(
+            gate, "_probe_oom_dmesg",
+            lambda window: (_ for _ in ()).throw(AssertionError("dmesg should not run"))
+        )
+
+        # Fresh probe with healthy swap; OOM alone should trigger rejection.
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=10.0,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "memory_pressure"
+
+    def test_oom_kill_falls_through_to_dmesg(self, monkeypatch):
+        """journalctl returns None (unusable) → dmesg queried; dmesg True → reject."""
+        gate = HRVNodeGate()
+        monkeypatch.setattr(gate, "_probe_oom_journal", lambda window: None)
+        monkeypatch.setattr(gate, "_probe_oom_dmesg", lambda window: True)
+
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=10.0,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "memory_pressure"
+
+    def test_both_probes_unusable_fails_open(self, monkeypatch):
+        """Both journalctl and dmesg unusable → UNKNOWN → don't reject."""
+        gate = HRVNodeGate()
+        monkeypatch.setattr(gate, "_probe_oom_journal", lambda window: None)
+        monkeypatch.setattr(gate, "_probe_oom_dmesg", lambda window: None)
+
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=10.0,
+            ts=get_now_ts(),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result is None
+
+    def test_oom_rejects_even_with_stale_kv_probe(self, monkeypatch):
+        """OOM kill probes local kernel state; not dependent on KV probe freshness."""
+        gate = HRVNodeGate(max_probe_age_seconds=60)
+        monkeypatch.setattr(gate, "_probe_oom_journal", lambda window: True)
+
+        # Stale KV probe would fail-open on swap, but OOM sub-check is
+        # independent and must still fire.
+        probe = NodeProbeSnapshot(
+            hostname="hermes2",
+            swap_pct=10.0,
+            ts=get_old_ts(90),
+        )
+        gate.set_node_probe_snapshot("hermes2", probe)
+
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "memory_pressure"
+
+    def test_line_matches_oom_recognizes_canonical_markers(self):
+        """OOM line matcher recognizes the standard kernel markers."""
+        gate = HRVNodeGate()
+        # Positive cases (real kernel log samples, redacted)
+        assert gate._line_matches_oom("Out of memory: Killed process 1234 (python)")
+        assert gate._line_matches_oom("[oom-kill]:constraint=CONSTRAINT_MEMCG,...")
+        assert gate._line_matches_oom("python invoked oom-killer: gfp_mask=0x...")
+        assert gate._line_matches_oom("Killed process 5678 (bash) total-vm:12345kB")
+        # Case-insensitive
+        assert gate._line_matches_oom("OUT OF MEMORY: killed")
+        # Negative cases
+        assert not gate._line_matches_oom("systemd[1]: Started something.service")
+        assert not gate._line_matches_oom("kernel: TCP: eth0: link is up")
+        assert not gate._line_matches_oom("")
+
+
+class TestDispatcherHealth:
+    """Test kanban_dispatcher_health condition (condition 2)."""
+
+    def _fake_subprocess_run(self, returncode: int, stdout: str, stderr: str = ""):
+        """Build a fake subprocess.run replacement returning fixed output."""
+        class FakeCompletedProcess:
+            def __init__(self):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        def fake_run(cmd, **kwargs):
+            return FakeCompletedProcess()
+        return fake_run
+
+    def test_dispatcher_active_passes(self, monkeypatch):
+        """systemctl reports 'active' → don't reject."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            self._fake_subprocess_run(0, "active\n"),
+        )
+        # shutil.which must return truthy
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is False
+
+    def test_dispatcher_activating_rejects(self, monkeypatch):
+        """systemctl reports 'activating' → reject (kanban_dispatcher_health)."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            self._fake_subprocess_run(3, "activating\n"),
+        )
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is True
+
+        # And it flows through evaluate_node with the right reason
+        result = gate.evaluate_node("task1", "hermes2", "claude-haiku")
+        assert result == "kanban_dispatcher_health"
+
+    def test_dispatcher_failed_rejects(self, monkeypatch):
+        """systemctl reports 'failed' → reject."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            self._fake_subprocess_run(3, "failed\n"),
+        )
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is True
+
+    def test_dispatcher_deactivating_rejects(self, monkeypatch):
+        """systemctl reports 'deactivating' → reject (unit shutting down)."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            self._fake_subprocess_run(3, "deactivating\n"),
+        )
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is True
+
+    def test_dispatcher_inactive_fails_open(self, monkeypatch):
+        """systemctl reports 'inactive' (unit not installed) → UNKNOWN → don't reject."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(
+            mod.subprocess, "run",
+            self._fake_subprocess_run(3, "inactive\n"),
+        )
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is False
+
+    def test_dispatcher_no_systemctl_fails_open(self, monkeypatch):
+        """No systemctl binary on host → UNKNOWN → don't reject."""
+        import hermes_cli.hrv_node_gate as mod
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: None)
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is False
+
+    def test_dispatcher_subprocess_timeout_fails_open(self, monkeypatch):
+        """systemctl times out → UNKNOWN → don't reject (fail-open)."""
+        import hermes_cli.hrv_node_gate as mod
+
+        def raising_run(*args, **kwargs):
+            raise mod.subprocess.TimeoutExpired(cmd="systemctl", timeout=3)
+
+        monkeypatch.setattr(mod.subprocess, "run", raising_run)
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+
+        gate = HRVNodeGate()
+        assert gate._check_dispatcher_health("hermes2") is False
+
+    def test_dispatcher_env_override(self, monkeypatch):
+        """HRV_DISPATCHER_UNIT_NAME env var overrides the unit name."""
+        import hermes_cli.hrv_node_gate as mod
+
+        captured_cmd = {}
+
+        def capturing_run(cmd, **kwargs):
+            captured_cmd["cmd"] = cmd
+
+            class FakeCompletedProcess:
+                returncode = 0
+                stdout = "active\n"
+                stderr = ""
+
+            return FakeCompletedProcess()
+
+        monkeypatch.setattr(mod.subprocess, "run", capturing_run)
+        monkeypatch.setattr(mod.shutil, "which", lambda cmd: "/usr/bin/systemctl")
+        monkeypatch.setenv("HRV_DISPATCHER_UNIT_NAME", "my-custom-dispatcher.service")
+
+        gate = HRVNodeGate()
+        gate._check_dispatcher_health("hermes2")
+        assert "my-custom-dispatcher.service" in captured_cmd["cmd"]
 
 
 if __name__ == "__main__":
