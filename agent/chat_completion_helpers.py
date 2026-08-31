@@ -1859,6 +1859,21 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             # host the same way determine_api_mode() and _detect_api_mode_for_url()
             # do on the primary path. (#32243, #49247)
             fb_api_mode = "anthropic_messages"
+        elif (
+            fb_provider in {"kimi", "kimi-coding", "kimi-for-coding", "moonshot"}
+            or (
+                base_url_hostname(fb_base_url) == "api.kimi.com"
+                and "/coding" in fb_base_url.lower()
+            )
+        ):
+            # Kimi's /coding surface is Anthropic-Messages-only:
+            # POST /coding/v1/messages returns 200, POST /coding/chat/completions
+            # returns 404 (verified live 2026-08-31, 119 fallback 404s that day
+            # vs 1047 primary-path successes on the same wire). host_mandated_api_mode()
+            # in hermes_cli/providers.py enforces this on the primary path; the
+            # inline api_mode ladder here has to mirror it so fallback-to-kimi
+            # doesn't build a plain OpenAI client. (t_25f06a77)
+            fb_api_mode = "anthropic_messages"
         elif _fb_is_azure:
             # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
             # support the Responses API. Stay on chat_completions.

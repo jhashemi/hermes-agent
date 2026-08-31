@@ -231,6 +231,137 @@ class TestFallbackChainAdvancement:
         assert agent.api_mode == "chat_completions"
         assert agent.client is not None
 
+    def test_kimi_coding_fallback_uses_the_messages_wire(self):
+        """Kimi's api.kimi.com/coding surface is Anthropic-Messages-only.
+
+        Before the fix (t_25f06a77), a fallback entry {provider: kimi-coding,
+        model: kimi-k3} activated with api_mode=chat_completions, so the
+        fallback POSTed /coding/chat/completions → permanent 404 (verified
+        live 2026-08-31: 119 fallback 404s that day vs 1047 primary-path 200s
+        on the same wire). host_mandated_api_mode() enforces this on the
+        primary path via determine_api_mode(); this test pins that the inline
+        api_mode ladder in try_activate_fallback mirrors it.
+        """
+        kimi_base = "https://api.kimi.com/coding"
+        fbs = [{"provider": "kimi-coding", "model": "kimi-k3", "base_url": kimi_base}]
+        agent = _make_agent(fallback_model=fbs)
+        rebuilt = {"count": 0}
+
+        def _fake_build(api_key, base_url, timeout=None, **kwargs):
+            rebuilt["count"] += 1
+            rebuilt["api_key"] = api_key
+            rebuilt["base_url"] = base_url
+            return MagicMock(name="kimi-anthropic-client")
+
+        with (
+            patch(
+                "agent.chat_completion_helpers._fallback_entry_unavailable_without_network",
+                return_value=None,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url=kimi_base, api_key="kimi-key"),
+                    "kimi-k3",
+                ),
+            ),
+            patch(
+                "hermes_cli.model_normalize.normalize_model_for_provider",
+                side_effect=lambda m, p: m,
+            ),
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                side_effect=_fake_build,
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.api_mode == "anthropic_messages"
+        assert agent.provider == "kimi-coding"
+        assert agent.model == "kimi-k3"
+        assert agent.client is None
+        assert rebuilt["count"] == 1
+        assert rebuilt["api_key"] == "kimi-key"
+        assert rebuilt["base_url"] == kimi_base
+        assert agent._anthropic_client is not None
+
+    def test_kimi_host_mandate_triggers_regardless_of_provider_name(self):
+        """A custom-provider entry whose base_url is api.kimi.com/coding but
+        whose ``provider`` field is an operator-chosen name (e.g. ``kimi-fb``)
+        must still get anthropic_messages via the host-mandate branch.
+        """
+        kimi_base = "https://api.kimi.com/coding"
+        fbs = [{"provider": "kimi-fb", "model": "kimi-k3", "base_url": kimi_base}]
+        agent = _make_agent(fallback_model=fbs)
+        rebuilt = {"count": 0}
+
+        def _fake_build(api_key, base_url, timeout=None, **kwargs):
+            rebuilt["count"] += 1
+            return MagicMock(name="kimi-anthropic-client")
+
+        with (
+            patch(
+                "agent.chat_completion_helpers._fallback_entry_unavailable_without_network",
+                return_value=None,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url=kimi_base, api_key="kimi-key"),
+                    "kimi-k3",
+                ),
+            ),
+            patch(
+                "hermes_cli.model_normalize.normalize_model_for_provider",
+                side_effect=lambda m, p: m,
+            ),
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                side_effect=_fake_build,
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.api_mode == "anthropic_messages"
+        assert rebuilt["count"] == 1
+        assert agent.client is None
+
+    def test_moonshot_provider_alias_uses_the_messages_wire(self):
+        """The ``moonshot`` provider name (Kimi's parent brand) also routes
+        to Anthropic Messages.  Even without an api.kimi.com host, treat the
+        provider name as the mandate signal so an operator misconfiguration
+        (e.g. moonshot pointed at a proxy) still lands on the correct wire.
+        """
+        moonshot_base = "https://proxy.example/kimi"
+        fbs = [{"provider": "moonshot", "model": "moonshot-v1", "base_url": moonshot_base}]
+        agent = _make_agent(fallback_model=fbs)
+        with (
+            patch(
+                "agent.chat_completion_helpers._fallback_entry_unavailable_without_network",
+                return_value=None,
+            ),
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(
+                    _mock_client(base_url=moonshot_base, api_key="ms-key"),
+                    "moonshot-v1",
+                ),
+            ),
+            patch(
+                "hermes_cli.model_normalize.normalize_model_for_provider",
+                side_effect=lambda m, p: m,
+            ),
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                return_value=MagicMock(name="ms-anthropic-client"),
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.api_mode == "anthropic_messages"
+        assert agent.provider == "moonshot"
+        assert agent.client is None
+
 
 # ── Pool-rotation vs fallback gating (#11314) ────────────────────────────
 
