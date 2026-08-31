@@ -332,6 +332,49 @@ _WRITE_OPS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Per-op kwarg-name translation: SQLite outer signature → DuckDB adapter
+# signature. The outer dispatcher speaks the historical SQLite kwarg names
+# (``claimer=``) while the DuckDB adapter uses the underlying column name
+# (``lock=``). Without this rename ``_filtered_kwargs`` silently drops
+# ``claimer`` and the adapter call blows up on a required-keyword
+# ``TypeError`` (``heartbeat_claim`` — required ``lock``) or silently loses
+# the claimer identity in the mirror (``claim_task`` — ``lock`` defaults to
+# ``_claimer_id()``, so the mirror row lands under the WRONG lock and every
+# subsequent heartbeat mirror then no-ops on a stale-lock check).
+#
+# Map key is the adapter op name (``adapter_op_name`` in ``_WRITE_OPS``);
+# value is ``{outer_kwarg: adapter_kwarg}``. Renames happen before
+# ``_filtered_kwargs`` so unknown outer kwargs still get dropped for ops
+# that don't need translation.
+_MIRROR_KWARG_RENAMES: dict[str, dict[str, str]] = {
+    "claim_task":      {"claimer": "lock"},
+    "heartbeat_claim": {"claimer": "lock"},
+}
+
+
+def _rename_kwargs(op_name: str, kwargs: dict) -> dict:
+    """Apply per-op SQLite→DuckDB kwarg renames.
+
+    Only renames keys present in the input; values are preserved as-is.
+    A collision (both source and destination present) prefers the
+    already-present destination — callers cannot both pass ``claimer``
+    and ``lock`` for the same call today, but the defensive choice keeps
+    an explicit ``lock=`` winning if some future call site starts using
+    the canonical name directly.
+    """
+    rename = _MIRROR_KWARG_RENAMES.get(op_name)
+    if not rename:
+        return kwargs
+    out = dict(kwargs)
+    for src, dst in rename.items():
+        if src in out and dst not in out:
+            out[dst] = out.pop(src)
+        elif src in out:
+            # Destination already set — drop the source alias.
+            out.pop(src, None)
+    return out
+
+
 def _make_mirror_wrapper(
     original: Callable,
     adapter_op_name: str,
@@ -367,6 +410,11 @@ def _make_mirror_wrapper(
             mirror_kwargs = dict(kwargs)
             if id_passthrough_kw and result is not None:
                 mirror_kwargs[id_passthrough_kw] = result
+            # Translate SQLite outer kwarg names to DuckDB adapter names
+            # BEFORE the signature filter, otherwise the filter silently
+            # drops still-valid values (t_192a3e6b: ``heartbeat_claim``
+            # required ``lock=`` after the ``claimer=`` was thrown away).
+            mirror_kwargs = _rename_kwargs(adapter_op_name, mirror_kwargs)
             mirror_kwargs = _filtered_kwargs(adapter_fn, mirror_kwargs)
             try:
                 adapter_fn(duck, *args, **mirror_kwargs)
