@@ -1913,6 +1913,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- case) falls through to the dispatcher-level ``kanban.failure_limit``
     -- config and then ``DEFAULT_FAILURE_LIMIT``.
     max_retries          INTEGER,
+    -- Denormalised effective failure limit at the moment the breaker
+    -- LAST tripped. Written by ``_record_task_failure`` when it flips the
+    -- task to ``blocked`` (source values come from the same resolution
+    -- order — per-task ``max_retries`` > dispatcher ``failure_limit`` >
+    -- ``DEFAULT_FAILURE_LIMIT`` — that produced the trip). ``recompute_ready``
+    -- consults this row-local limit FIRST so a bare ``recompute_ready(conn)``
+    -- call from ``complete_task`` / ``unblock_task`` / ``delete_task`` /
+    -- ``archive_task`` / ``specify_triage_task`` / ``decompose_triage_task``
+    -- can never release a quarantined row on a stale caller-side default
+    -- (RETRY-4 one-wayness quarantine escape, task t_97c4bd5c). Cleared
+    -- back to NULL on explicit ``unblock_task`` (fresh retry budget per
+    -- RETRY-5) and on ``_clear_failure_counter`` (successful completion).
+    -- NULL on legacy rows and on any row that never tripped — those keep
+    -- the pre-existing behaviour (fall through to caller-supplied /
+    -- default failure_limit).
+    trip_effective_limit INTEGER,
     -- When 1, the dispatched worker runs in a Ralph-style goal loop: an
     -- auxiliary judge re-evaluates the worker's response against the
     -- card title/body after each turn and feeds a continuation prompt
@@ -3389,6 +3405,23 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         # which is the correct default (they keep the global behaviour
         # they were getting before the column existed).
         _add_column_if_missing(conn, "tasks", "max_retries", "max_retries INTEGER")
+
+    if "trip_effective_limit" not in cols:
+        # Denormalised trip limit written by ``_record_task_failure`` when
+        # the breaker fires. ``recompute_ready`` consults this row-local
+        # value first so bare (no-``failure_limit``) callers can never
+        # release a row that tripped under a lower per-task or
+        # dispatcher-side limit — closes the RETRY-4 quarantine-escape
+        # sharp edge documented in ``dispatch-idempotency-retry-contracts.md``
+        # §7.1/§7.2 and pinned by
+        # ``tests/contracts/test_idempotency_retry_contracts.py::
+        # TestRETRY4TerminalQuarantine::test_limit_disagreement_boundary_condition``.
+        # NULL on legacy rows and on any row that never tripped — the
+        # gate falls through to the caller-supplied / default limit,
+        # preserving pre-existing behaviour for never-failed tasks.
+        _add_column_if_missing(
+            conn, "tasks", "trip_effective_limit", "trip_effective_limit INTEGER",
+        )
 
     if "model_override" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN model_override TEXT")
@@ -6012,21 +6045,30 @@ def recompute_ready(
        counter would reset on every recovery cycle and the circuit
        breaker could never trip (#35072).
 
-    The effective failure limit resolves in the same order as the
-    circuit breaker in ``_record_task_failure`` so the two never
-    disagree about when a task is permanently blocked:
+    The effective failure limit resolves in this order (task
+    t_97c4bd5c — closes the quarantine-escape sharp edge that let a
+    bare ``recompute_ready(conn)`` from an unrelated
+    ``complete_task`` / ``unblock_task`` / ``delete_task`` /
+    ``archive_task`` / ``specify_triage_task`` /
+    ``decompose_triage_task`` re-promote a row that had tripped under
+    a lower per-task or dispatcher-side limit):
 
-      1. per-task ``max_retries`` if set
-      2. caller-supplied ``failure_limit`` (the dispatcher passes the
+      1. row's own ``trip_effective_limit`` — the effective limit that
+         was in force when ``_record_task_failure`` last tripped the
+         breaker. Denormalised onto the row so quarantine one-wayness
+         doesn't depend on the caller passing the right ``failure_limit``.
+      2. per-task ``max_retries`` if set (never-tripped rows only)
+      3. caller-supplied ``failure_limit`` (the dispatcher passes the
          ``kanban.failure_limit`` config value through ``dispatch_once``)
-      3. ``DEFAULT_FAILURE_LIMIT``
+      4. ``DEFAULT_FAILURE_LIMIT``
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries, block_kind "
+            "SELECT id, status, consecutive_failures, max_retries, "
+            "trip_effective_limit, block_kind "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
@@ -6093,12 +6135,31 @@ def recompute_ready(
                     # exhausted → block → …  The counter must also
                     # be preserved so the breaker can accumulate
                     # across recovery cycles.
+                    #
+                    # Effective-limit resolution (t_97c4bd5c): the
+                    # row's own ``trip_effective_limit`` — written by
+                    # ``_record_task_failure`` at trip time — wins
+                    # over both the per-task override and the
+                    # caller-supplied default. This makes quarantine
+                    # one-wayness independent of the caller: a bare
+                    # ``recompute_ready(conn)`` from an unrelated
+                    # complete/unblock/delete/archive/decompose call
+                    # can no longer release a row that tripped under
+                    # a lower limit.
                     failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
+                    trip_limit = (
+                        row["trip_effective_limit"]
+                        if "trip_effective_limit" in row.keys()
+                        else None
                     )
+                    if trip_limit is not None:
+                        effective_limit = int(trip_limit)
+                    else:
+                        task_limit = row["max_retries"]
+                        effective_limit = (
+                            int(task_limit) if task_limit is not None
+                            else int(failure_limit)
+                        )
                     if failures >= effective_limit:
                         continue
                     conn.execute(
@@ -8523,10 +8584,15 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # successful completion (see ``complete_task``). ``consecutive_failures``
         # (the *dispatcher* spawn/crash/timeout counter — a different signal) is
         # still reset here, which is correct: a deliberate unblock is a fresh
-        # start for the dispatcher's retry budget.
+        # start for the dispatcher's retry budget. Same rationale for
+        # ``trip_effective_limit`` (task t_97c4bd5c): the row's denormalised
+        # trip limit is a snapshot of the LAST trip — an explicit unblock is
+        # a fresh retry budget (RETRY-5), so it must be cleared or the row
+        # would carry the stale ceiling into its next trip evaluation.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, last_failure_error = NULL, "
+            "trip_effective_limit = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (new_status, task_id),
         )
@@ -10638,9 +10704,10 @@ def _record_task_failure(
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
-                    "consecutive_failures = ?, last_failure_error = ? "
+                    "consecutive_failures = ?, last_failure_error = ?, "
+                    "trip_effective_limit = ? "
                     "WHERE id = ? AND status IN ('running', 'ready')",
-                    (failures, error[:500], task_id),
+                    (failures, error[:500], int(effective_limit), task_id),
                 )
             else:
                 # Timeout/crash path: task is already at ``ready``
@@ -10648,9 +10715,10 @@ def _record_task_failure(
                 # counter fields.
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
-                    "consecutive_failures = ?, last_failure_error = ? "
+                    "consecutive_failures = ?, last_failure_error = ?, "
+                    "trip_effective_limit = ? "
                     "WHERE id = ? AND status IN ('ready', 'running')",
-                    (failures, error[:500], task_id),
+                    (failures, error[:500], int(effective_limit), task_id),
                 )
             run_id = None
             if end_run:
@@ -10802,11 +10870,18 @@ def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
     a successful spawn proves the worker could start but says nothing
     about whether the run will succeed, so we need to let timeouts and
     crashes accumulate across spawn boundaries.
+
+    Also clears ``trip_effective_limit`` (task t_97c4bd5c): the row's
+    denormalised trip limit is a per-trip snapshot; a successful
+    completion means no trip is currently in force, so the ceiling
+    must not stick around and gate a future ``recompute_ready`` pass
+    against a stale value.
     """
     with write_txn(conn):
         conn.execute(
             "UPDATE tasks SET consecutive_failures = 0, "
-            "last_failure_error = NULL WHERE id = ?",
+            "last_failure_error = NULL, trip_effective_limit = NULL "
+            "WHERE id = ?",
             (task_id,),
         )
 
