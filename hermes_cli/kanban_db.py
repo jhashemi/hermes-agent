@@ -3463,6 +3463,22 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             conn, "tasks", "worker_node", "worker_node TEXT"
         )
 
+    if "trip_effective_limit" not in cols:
+        # RETRY-4 one-wayness (t_97c4bd5c): the row-local record of the
+        # effective failure limit that actually fired the circuit
+        # breaker. Stamped by ``_record_task_failure`` at trip time;
+        # ``recompute_ready`` consults it FIRST so the release decision
+        # is a property of the row, not of whatever caller-supplied
+        # ``failure_limit`` happens to be in scope (a bare
+        # ``recompute_ready(conn)`` from an unrelated completion /
+        # unblock / archive / delete / triage side-effect must not
+        # release a row that quarantined under a lower limit). NULL on
+        # legacy rows = never tripped, or tripped pre-column (those
+        # keep the pre-column caller-limit behavior).
+        _add_column_if_missing(
+            conn, "tasks", "trip_effective_limit", "trip_effective_limit INTEGER"
+        )
+
     if "peer_review_assignee" not in cols:
         # FIX-5 (t_b56c4ca7): peer-review routing primitive. NULL on
         # legacy rows == the task never opted into peer review, which
@@ -6026,7 +6042,8 @@ def recompute_ready(
     promoted = 0
     with write_txn(conn):
         todo_rows = conn.execute(
-            "SELECT id, status, consecutive_failures, max_retries, block_kind "
+            "SELECT id, status, consecutive_failures, max_retries, block_kind, "
+            "       trip_effective_limit "
             "FROM tasks WHERE status IN ('todo', 'blocked')"
         ).fetchall()
         for row in todo_rows:
@@ -6093,14 +6110,33 @@ def recompute_ready(
                     # exhausted → block → …  The counter must also
                     # be preserved so the breaker can accumulate
                     # across recovery cycles.
+                    #
+                    # RETRY-4 (t_97c4bd5c): consult the ROW-LOCAL trip
+                    # ceiling first. The row records the effective
+                    # limit that actually fired the breaker at trip
+                    # time; a bare recompute_ready() with a higher
+                    # caller-supplied (or default) limit must not
+                    # release it. Fall back to the max_retries /
+                    # caller-limit resolution only when the row was
+                    # never stamped (pre-column rows, or blocked
+                    # without a trip).
                     failures = int(row["consecutive_failures"] or 0)
-                    task_limit = row["max_retries"]
-                    effective_limit = (
-                        int(task_limit) if task_limit is not None
-                        else int(failure_limit)
+                    trip_limit = (
+                        row["trip_effective_limit"]
+                        if "trip_effective_limit" in row.keys()
+                        else None
                     )
-                    if failures >= effective_limit:
-                        continue
+                    if trip_limit is not None:
+                        if failures >= int(trip_limit):
+                            continue
+                    else:
+                        task_limit = row["max_retries"]
+                        effective_limit = (
+                            int(task_limit) if task_limit is not None
+                            else int(failure_limit)
+                        )
+                        if failures >= effective_limit:
+                            continue
                     conn.execute(
                         "UPDATE tasks SET status = 'ready' "
                         "WHERE id = ? AND status = 'blocked'",
@@ -6442,7 +6478,14 @@ def release_stale_claims(
     ).fetchall()
     for row in stale:
         lock = row["claim_lock"] or ""
-        host_local = lock.startswith(host_prefix)
+        # Host-local identities: either the claimer host prefix
+        # (``host:pid``, vanilla ``claim_task``) or the cluster node
+        # prefix (``{LOCAL_NODE}:{profile}:{task}`` — the canonical
+        # pattern used by cluster dispatch and the EAP contract suite).
+        # Both resolve to this host, so both get pid-liveness extension.
+        host_local = (
+            lock.startswith(host_prefix) or lock.startswith(f"{_local_node}:")
+        )
         hb = row["last_heartbeat_at"]
         wn = row["worker_node"] if "worker_node" in row.keys() else None
         remote_node = bool(wn and wn != _local_node)
@@ -8526,7 +8569,8 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         # start for the dispatcher's retry budget.
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
-            "consecutive_failures = 0, last_failure_error = NULL "
+            "consecutive_failures = 0, last_failure_error = NULL, "
+            "trip_effective_limit = NULL "
             "WHERE id = ? AND status IN ('blocked', 'scheduled')",
             (new_status, task_id),
         )
@@ -9888,11 +9932,12 @@ def enforce_max_runtime(
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
+    _local_node = _local_node_id()
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.worker_node "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
@@ -9900,8 +9945,26 @@ def enforce_max_runtime(
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
     for row in rows:
+        # Cluster gate (same contract as detect_crashed_workers /
+        # release_stale_claims): a row spawned on another node belongs
+        # to that host — its pid is not visible here, and "timing it
+        # out" from the wrong node would falsely reclaim a healthy
+        # remote worker every tick. NULL worker_node means local
+        # (single-host boards, pre-migration default) and still hits
+        # the checks below.
+        wn = row["worker_node"] if "worker_node" in row.keys() else None
+        if wn and wn != _local_node:
+            continue
         lock = row["claim_lock"] or ""
-        if not lock.startswith(host_prefix):
+        # Host-local claims come with either the claimer host prefix
+        # (``host:pid``, vanilla ``claim_task``) or the cluster node
+        # prefix (``{LOCAL_NODE}:{profile}:{task}`` — the canonical
+        # pattern used by cluster dispatch and the EAP contract suite).
+        # Both identities resolve to this host, so both are enforceable.
+        if not (
+            lock.startswith(host_prefix)
+            or lock.startswith(f"{_local_node}:")
+        ):
             continue
         # Runtime is per attempt, not lifetime-of-task. ``tasks.started_at``
         # intentionally records the first time a task ever started, so retries
@@ -10632,15 +10695,21 @@ def _record_task_failure(
             limit_source = "dispatcher"
 
         if force_trip or failures >= effective_limit:
-            # Trip the breaker.
+            # Trip the breaker. Also denormalise the effective limit onto
+            # the row (RETRY-4, t_97c4bd5c): ``recompute_ready`` consults
+            # this row-local ceiling FIRST so the release decision is a
+            # property of the row, not of whatever caller-supplied
+            # ``failure_limit`` is in scope when an unrelated bare
+            # ``recompute_ready(conn)`` fires later.
             if release_claim:
                 # Spawn path: still running, also clear claim state.
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', claim_lock = NULL, "
                     "claim_expires = NULL, worker_pid = NULL, "
+                    "trip_effective_limit = ?, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('running', 'ready')",
-                    (failures, error[:500], task_id),
+                    (effective_limit, failures, error[:500], task_id),
                 )
             else:
                 # Timeout/crash path: task is already at ``ready``
@@ -10648,9 +10717,10 @@ def _record_task_failure(
                 # counter fields.
                 conn.execute(
                     "UPDATE tasks SET status = 'blocked', "
+                    "trip_effective_limit = ?, "
                     "consecutive_failures = ?, last_failure_error = ? "
                     "WHERE id = ? AND status IN ('ready', 'running')",
-                    (failures, error[:500], task_id),
+                    (effective_limit, failures, error[:500], task_id),
                 )
             run_id = None
             if end_run:
