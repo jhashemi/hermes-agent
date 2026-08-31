@@ -694,3 +694,274 @@ def test_unblock_task_clears_stall_escalation(kanban_home):
     kb.unblock_task(conn, task_id)
     assert sw._kb._has_outstanding_governance_gate(conn, task_id) is False
     assert _status(conn, task_id) == "ready"
+
+
+# ---------------------------------------------------------------------------
+# t_847892e6 — block_kind preservation across escalation.
+#
+# The Layer 2 fix (t_d5c662fb) emitted the ``blocked`` event but still
+# unconditionally wrote ``block_kind='needs_input'`` into the row. That
+# clobbered any pre-existing typed ``block_kind`` — most importantly
+# ``'dependency'`` (the exact predicate the VFE-DISPATCH-01 guard in
+# ``recompute_ready`` reads to skip a designed-wait task). This block
+# of tests pins the preservation contract:
+#
+#   * If the row has NO typed ``block_kind`` (NULL / empty / unknown),
+#     the watchdog defaults to ``'needs_input'`` (legacy behavior).
+#   * If the row already has a typed ``block_kind`` (any of the four
+#     :data:`sw._TYPED_BLOCK_KINDS`), the watchdog PRESERVES it and
+#     records the escalation in the event log only. The emitted
+#     ``blocked`` event carries ``kind`` = the preserved value and
+#     ``preserved_block_kind: True`` for audit.
+# ---------------------------------------------------------------------------
+
+
+def _set_block_kind(conn, task_id: str, block_kind) -> None:
+    """Set ``tasks.block_kind`` directly, bypassing block_task().
+
+    block_task() has status-transition side-effects we don't want; we
+    just need to seed the column so we can test the watchdog's
+    preservation logic in isolation.
+    """
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE tasks SET block_kind = ? WHERE id = ?",
+            (block_kind, task_id),
+        )
+
+
+@pytest.mark.parametrize("typed_kind", ["dependency", "needs_input", "capability", "transient"])
+def test_typed_block_kind_is_preserved_on_escalation(kanban_home, typed_kind):
+    """Every value in :data:`sw._TYPED_BLOCK_KINDS` must be preserved
+    across a watchdog escalation. Regression for t_847892e6: the
+    historical UPDATE always wrote ``'needs_input'``, wiping out
+    ``block_kind='dependency'`` and defeating the VFE-DISPATCH-01
+    guard predicate that ``recompute_ready`` uses.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = f"t_preserve_{typed_kind}"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _set_block_kind(conn, task_id, typed_kind)
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+    # Row moved to blocked but block_kind is preserved.
+    row = conn.execute(
+        "SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["status"] == "blocked"
+    assert row["block_kind"] == typed_kind, (
+        f"watchdog clobbered pre-existing block_kind={typed_kind!r} "
+        f"(got {row['block_kind']!r}); preservation regression from t_847892e6"
+    )
+
+    # Blocked event carries the preserved value and the audit flag.
+    blocked_evts = [e for e in _events(conn, task_id) if e["kind"] == "blocked"]
+    assert len(blocked_evts) == 1
+    payload = blocked_evts[0]["payload"]
+    assert payload["kind"] == typed_kind
+    assert payload["preserved_block_kind"] is True
+    assert payload["prev_block_kind"] == typed_kind
+    assert payload["source"] == "stall_watchdog"
+
+
+def test_null_block_kind_defaults_to_needs_input(kanban_home):
+    """Legacy / un-typed row (``block_kind IS NULL``) still defaults to
+    ``'needs_input'`` so ``_has_outstanding_governance_gate`` fires.
+    This is the pre-t_847892e6 behavior, preserved for backward
+    compatibility.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_null_bk_defaults"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    # No _set_block_kind call — column stays NULL.
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+    row = conn.execute(
+        "SELECT block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["block_kind"] == "needs_input"
+
+    blocked_evts = [e for e in _events(conn, task_id) if e["kind"] == "blocked"]
+    payload = blocked_evts[0]["payload"]
+    assert payload["kind"] == "needs_input"
+    assert payload["preserved_block_kind"] is False
+    assert payload["prev_block_kind"] is None
+
+
+def test_unknown_block_kind_string_defaults_to_needs_input(kanban_home):
+    """A garbage ``block_kind`` value (not in :data:`_TYPED_BLOCK_KINDS`)
+    is treated as un-typed and overwritten with ``'needs_input'``.
+    Guards against a stale / mistyped column value being preserved by
+    accident.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_bogus_bk_defaults"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _set_block_kind(conn, task_id, "not_a_real_kind")
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+    row = conn.execute(
+        "SELECT block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["block_kind"] == "needs_input"
+
+    blocked_evts = [e for e in _events(conn, task_id) if e["kind"] == "blocked"]
+    payload = blocked_evts[0]["payload"]
+    assert payload["preserved_block_kind"] is False
+    # prev_block_kind still captured for audit even when not preserved.
+    assert payload["prev_block_kind"] == "not_a_real_kind"
+
+
+def test_empty_block_kind_defaults_to_needs_input(kanban_home):
+    """Empty-string ``block_kind`` (should never happen but let's be
+    defensive) is treated as absent. Same defense-in-depth reasoning
+    as the empty-string check in _is_typed_dependency_wait — a bad row
+    doesn't confer preservation.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_empty_bk_defaults"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _set_block_kind(conn, task_id, "")
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+    row = conn.execute(
+        "SELECT block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["block_kind"] == "needs_input"
+
+
+def test_preserved_dependency_still_makes_sticky_block(kanban_home):
+    """When ``block_kind='dependency'`` is preserved, ``recompute_ready``
+    still MUST NOT re-promote the row — the emitted ``blocked`` event
+    is what ``_has_sticky_block`` reads, and it does NOT depend on the
+    ``kind`` being in ``_GOVERNANCE_BLOCK_KINDS``. This is the full
+    end-to-end regression: preserving ``'dependency'`` gives us the
+    VFE-DISPATCH-01 guard AND the sticky-block guard together.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_dep_sticky_e2e"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _set_block_kind(conn, task_id, "dependency")
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    sw.sweep_once(conn, now=now)
+    assert _status(conn, task_id) == "blocked"
+
+    # block_kind kept dependency — DISPATCH-01 guard predicate intact.
+    row = conn.execute(
+        "SELECT block_kind FROM tasks WHERE id = ?", (task_id,)
+    ).fetchone()
+    assert row["block_kind"] == "dependency"
+
+    # recompute_ready must NOT re-promote. The sticky-block predicate
+    # scans blocked/unblocked events regardless of kind, so it fires
+    # even though 'dependency' is not in _GOVERNANCE_BLOCK_KINDS.
+    kb.recompute_ready(conn)
+    assert _status(conn, task_id) == "blocked", (
+        "recompute_ready re-promoted a row whose block_kind='dependency' "
+        "was preserved by the watchdog; sticky-block predicate did not fire"
+    )
+    assert sw._kb._has_sticky_block(conn, task_id) is True
+
+
+def test_is_typed_block_kind_helper():
+    """Unit test for the :func:`_is_typed_block_kind` helper's edge
+    cases. Belongs here rather than a separate unit test file — the
+    helper's contract is tightly coupled to escalation preservation.
+    """
+    # All four typed kinds are recognized.
+    for kind in sw._TYPED_BLOCK_KINDS:
+        assert sw._is_typed_block_kind(kind) is True
+
+    # Non-typed inputs all reject.
+    for value in [None, "", "  ", "unknown", "DEPENDENCY", "dependency ", 42, True]:
+        assert sw._is_typed_block_kind(value) is False, (
+            f"value={value!r} unexpectedly counted as typed"
+        )
+
+
+def test_stall_escalated_payload_records_block_kind(kanban_home):
+    """The ``stall_escalated`` audit event carries both the effective
+    and prior ``block_kind`` so an operator can reconstruct what
+    happened without re-reading the row. Sanity check on the audit
+    payload we added in t_847892e6.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_stall_evt_payload_dep"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _set_block_kind(conn, task_id, "dependency")
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    sw.sweep_once(conn, now=now)
+    stall_evts = [e for e in _events(conn, task_id) if e["kind"] == "stall_escalated"]
+    assert len(stall_evts) == 1
+    payload = stall_evts[0]["payload"]
+    assert payload["block_kind"] == "dependency"
+    assert payload["prev_block_kind"] == "dependency"
+
+
+def test_stall_escalated_payload_records_prev_block_kind_when_none(kanban_home):
+    """Complement of the previous test: when there was no prior typed
+    block_kind, both fields still exist on the payload for uniform
+    downstream parsing — ``block_kind`` is ``'needs_input'``,
+    ``prev_block_kind`` is ``None``.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_stall_evt_payload_none"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    # No block_kind set — column is NULL.
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    sw.sweep_once(conn, now=now)
+    stall_evts = [e for e in _events(conn, task_id) if e["kind"] == "stall_escalated"]
+    assert len(stall_evts) == 1
+    payload = stall_evts[0]["payload"]
+    assert payload["block_kind"] == "needs_input"
+    assert payload["prev_block_kind"] is None

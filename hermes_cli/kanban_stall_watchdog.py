@@ -114,6 +114,26 @@ _TYPED_DEPENDENCY_WAIT_FIELDS: frozenset[str] = frozenset({
     "waiting_for_condition",
 })
 
+# Typed values of the ``tasks.block_kind`` column (mirrors
+# :data:`kanban_db.VALID_BLOCK_KINDS`). Kept here as a defensive local
+# copy — kanban_db is a heavy import and this module is loaded on the
+# gateway hot path, so we duplicate the four-element frozenset rather
+# than reach across for it. If ``kanban_db.VALID_BLOCK_KINDS`` gains a
+# new kind, mirror it here.
+#
+# Used by the block-kind PRESERVATION path in :func:`_escalate_one`
+# (t_847892e6): if the row already carries any of these before
+# escalation, the watchdog leaves ``block_kind`` alone rather than
+# clobbering it with ``'needs_input'``. That preserves the
+# VFE-DISPATCH-01 guard predicate (``block_kind='dependency'``) and
+# whatever a manual ``block_task(kind=...)`` call previously set.
+_TYPED_BLOCK_KINDS: frozenset[str] = frozenset({
+    "dependency",
+    "needs_input",
+    "capability",
+    "transient",
+})
+
 # Statuses we're willing to auto-escalate. running/blocked/triage/done
 # are all off-limits — a running task has a live worker (blocking it
 # would kill in-flight work), and the other three are already surfaced
@@ -284,6 +304,26 @@ def _is_typed_dependency_wait(event_payload_json: Optional[str]) -> bool:
     return False
 
 
+def _is_typed_block_kind(value: Optional[str]) -> bool:
+    """True when ``value`` is one of :data:`_TYPED_BLOCK_KINDS`.
+
+    Called from :func:`_escalate_one` (t_847892e6) to decide whether
+    to PRESERVE a pre-existing ``block_kind`` column instead of
+    overwriting it with ``'needs_input'``. Any non-empty string that
+    matches the typed set (``dependency`` / ``needs_input`` /
+    ``capability`` / ``transient``) is preserved; NULL, empty, and
+    unknown strings fall through to the ``'needs_input'`` default.
+
+    Trimmed strings are checked case-sensitively because
+    ``VALID_BLOCK_KINDS`` in ``kanban_db`` enforces the same
+    lowercase form on write; a leading/trailing space is a bad row
+    we don't want to inherit.
+    """
+    if not isinstance(value, str):
+        return False
+    return value in _TYPED_BLOCK_KINDS
+
+
 def _already_escalated(
     conn: sqlite3.Connection, task_id: str, since_event_id: int
 ) -> bool:
@@ -387,11 +427,20 @@ def _escalate_one(
         # moved this task to running/blocked/etc. between the scan and
         # here. We refuse to escalate anything that isn't still in the
         # exact status we captured. Belt-and-braces.
+        #
+        # ``block_kind`` is read here so we can PRESERVE a pre-existing
+        # typed value (t_847892e6). Historical defect: the UPDATE below
+        # unconditionally wrote ``block_kind='needs_input'``, clobbering
+        # ``block_kind='dependency'`` — the exact predicate the
+        # VFE-DISPATCH-01 guard in ``recompute_ready`` (kanban_db.py
+        # :6066-6071) reads. Losing it defeated the dispatcher-skip
+        # path that keeps designed-wait tickets zero-burn.
         row = conn.execute(
-            "SELECT status FROM tasks WHERE id = ?", (task_id,)
+            "SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)
         ).fetchone()
         if row is None or row["status"] != prev_status:
             return None
+        existing_block_kind = row["block_kind"]
 
         # Idempotency re-check inside the txn: another sweep worker
         # (unlikely — gateway holds the singleton dispatcher lock —
@@ -417,15 +466,31 @@ def _escalate_one(
         # because that primitive requires the task to be in
         # ``running``/``ready`` (see kanban_db.block_task) and rejects
         # ``todo``. Escalating from ``todo`` is a first-class part of
-        # this feature, so we do the UPDATE directly. block_recurrences
-        # / block_kind columns are populated exactly like a manual
-        # ``kanban_block(kind='needs_input')`` call so the loop-breaker
-        # in ``block_task`` continues to see this state next cycle.
+        # this feature, so we do the UPDATE directly.
+        #
+        # BLOCK-KIND PRESERVATION (t_847892e6):
+        # If the row already carries a typed ``block_kind`` (any value
+        # in :data:`VALID_BLOCK_KINDS` — set by a prior
+        # ``block_task(kind=...)`` call, most importantly
+        # ``'dependency'`` which drives the VFE-DISPATCH-01 guard), we
+        # PRESERVE it. The watchdog's job here is to record the stall
+        # in the event log (via the ``stall_escalated`` +  ``blocked``
+        # events emitted below) — not to overwrite a predicate that
+        # downstream code is already using. If ``block_kind`` was NULL
+        # or empty (legacy / un-typed row), we default to
+        # ``'needs_input'`` so ``_has_outstanding_governance_gate``
+        # still sees a governance-kind block. The blocked event's
+        # ``kind`` field mirrors the effective ``block_kind`` so
+        # audit tools stay consistent.
+        preserved = _is_typed_block_kind(existing_block_kind)
+        effective_block_kind = (
+            existing_block_kind if preserved else "needs_input"
+        )
         cur = conn.execute(
             """
             UPDATE tasks
                SET status            = 'blocked',
-                   block_kind        = 'needs_input',
+                   block_kind        = ?,
                    block_recurrences = COALESCE(block_recurrences, 0),
                    claim_lock        = NULL,
                    claim_expires     = NULL,
@@ -433,7 +498,7 @@ def _escalate_one(
              WHERE id = ?
                AND status = ?
             """,
-            (task_id, prev_status),
+            (effective_block_kind, task_id, prev_status),
         )
         if cur.rowcount != 1:
             # Lost the race between the pre-check and the UPDATE. Roll
@@ -449,6 +514,11 @@ def _escalate_one(
             "prev_status": prev_status,
             "age_s": age_s,
             "sweep_run": sweep_run_iso,
+            # Audit both the effective and preserved value so an
+            # operator can tell at a glance whether the escalation
+            # ran on top of a typed pre-existing block.
+            "block_kind": effective_block_kind,
+            "prev_block_kind": existing_block_kind,
         }
         _append_event(conn, task_id, "stall_escalated", payload)
 
@@ -466,21 +536,27 @@ def _escalate_one(
         # an ``unblocked`` event) can clear it, matching the semantics
         # a manual :func:`block_task` call would produce.
         #
-        # ``kind='needs_input'`` mirrors the ``block_kind`` column we
-        # just wrote and lands the payload in
-        # :data:`_GOVERNANCE_BLOCK_KINDS` so
-        # :func:`_has_outstanding_governance_gate` fires. ``source``
-        # lets dashboards / audit tools distinguish watchdog
-        # escalations from manual operator blocks.
+        # ``kind`` mirrors the ``block_kind`` column we just wrote
+        # (which may be ``'dependency'`` if we preserved a typed
+        # value — see t_847892e6). Whether or not it's a
+        # governance-kind block, the event alone is enough to make
+        # :func:`_has_sticky_block` fire, so ``recompute_ready``
+        # cannot silently undo the escalation. ``source`` lets
+        # dashboards / audit tools distinguish watchdog escalations
+        # from manual operator blocks. ``preserved_block_kind`` is a
+        # boolean audit hint: True when a pre-existing typed
+        # ``block_kind`` was left alone.
         _append_event(
             conn, task_id, "blocked",
             {
-                "kind": "needs_input",
+                "kind": effective_block_kind,
                 "source": "stall_watchdog",
                 "reason": reason,
                 "trigger_kind": trigger_kind,
                 "trigger_event_id": trigger_event_id,
                 "prev_status": prev_status,
+                "preserved_block_kind": preserved,
+                "prev_block_kind": existing_block_kind,
             },
         )
 
