@@ -234,12 +234,17 @@ def test_kill_switch_unreachable_path_fail_safe(tmp_path):
 
 
 def test_dod_3_amber_blocks_high_memory_only():
-    """MANDATED TDD 3: AMBER is graceful, not a cliff."""
+    """MANDATED TDD 3: AMBER is graceful, not a cliff.
+
+    Uses the canonical ``mem_gb`` key (matches
+    :data:`hermes_cli.kanban_db.DEFAULT_MIN_RESOURCES`). Legacy ``memory_gb``
+    coverage lives in :func:`test_task_high_memory_classification_edges`.
+    """
     high_mem_task = {
         "id": "t_high",
-        "min_resources": {"memory_gb": HIGH_MEMORY_GB_THRESHOLD + 0.5},
+        "min_resources": {"mem_gb": HIGH_MEMORY_GB_THRESHOLD + 0.5},
     }
-    ordinary_task = {"id": "t_ord", "min_resources": {"memory_gb": 0.5}}
+    ordinary_task = {"id": "t_ord", "min_resources": {"mem_gb": 0.5}}
     unspecified_task = {"id": "t_unspec"}
     explicit_high = {"id": "t_expl", "high_memory": True}
 
@@ -262,12 +267,114 @@ def test_dod_3_amber_blocks_high_memory_only():
 
 
 def test_task_high_memory_classification_edges():
-    assert task_is_high_memory({"min_resources": {"memory_gb": HIGH_MEMORY_GB_THRESHOLD}}) is True
-    assert task_is_high_memory({"min_resources": {"memory_gb": HIGH_MEMORY_GB_THRESHOLD - 0.01}}) is False
-    assert task_is_high_memory({"min_resources": {"memory_gb": "not-a-number"}}) is False
+    # Canonical ``mem_gb`` key.
+    assert task_is_high_memory({"min_resources": {"mem_gb": HIGH_MEMORY_GB_THRESHOLD}}) is True
+    assert task_is_high_memory({"min_resources": {"mem_gb": HIGH_MEMORY_GB_THRESHOLD - 0.01}}) is False
+    assert task_is_high_memory({"min_resources": {"mem_gb": "not-a-number"}}) is False
     assert task_is_high_memory({}) is False
     assert task_is_high_memory({"high_memory": True}) is True
-    assert task_is_high_memory({"high_memory": False, "min_resources": {"memory_gb": 999}}) is True
+    assert task_is_high_memory({"high_memory": False, "min_resources": {"mem_gb": 999}}) is True
+
+    # Legacy ``memory_gb`` spelling still classifies correctly (fallback).
+    # New callers must not rely on this — see t_ad7e65f9.
+    assert task_is_high_memory({"min_resources": {"memory_gb": HIGH_MEMORY_GB_THRESHOLD}}) is True
+    assert task_is_high_memory({"min_resources": {"memory_gb": HIGH_MEMORY_GB_THRESHOLD - 0.01}}) is False
+    # Canonical wins over legacy when both present (drop-and-migrate contract):
+    # the canonical value is authoritative; a lingering legacy field is ignored.
+    assert (
+        task_is_high_memory(
+            {"min_resources": {"mem_gb": 0.5, "memory_gb": HIGH_MEMORY_GB_THRESHOLD + 999}}
+        )
+        is False
+    )
+
+
+def test_task_is_high_memory_walks_real_get_task_min_resources_payload(tmp_path, monkeypatch):
+    """MANDATED (t_ad7e65f9): walk a REAL ``get_task_min_resources()`` payload
+    through :func:`task_is_high_memory`.
+
+    This is the regression test the AMBER gate was missing: prior to
+    t_ad7e65f9, DB-sourced tasks (which use the canonical ``mem_gb`` key)
+    silently classified as ordinary because the classifier was reading
+    ``memory_gb``. We exercise the real kanban_db ingest path — create a
+    task with a real body/front-matter, read it back via the real
+    ``get_task_min_resources()``, then feed the payload straight into the
+    classifier.
+    """
+    from hermes_cli import kanban_db as kb
+
+    # Isolate: run against a throwaway kanban home so we don't touch the
+    # host's board DB.
+    monkeypatch.setenv("HERMES_KANBAN_HOME", str(tmp_path))
+
+    conn = kb.connect()
+    try:
+        # 1. HIGH-memory task via YAML front-matter (canonical schema).
+        high_body = (
+            "---\n"
+            "min_resources:\n"
+            f"  mem_gb: {HIGH_MEMORY_GB_THRESHOLD + 2.0}\n"
+            "  cpu_cores: 2\n"
+            "---\n"
+            "Body content that consumes lots of memory.\n"
+        )
+        high_id = kb.create_task(
+            conn,
+            title="high-mem task",
+            body=high_body,
+            assignee="jeff_dean",
+        )
+
+        # 2. Ordinary task with a modest declaration.
+        ord_body = (
+            "---\n"
+            "min_resources:\n"
+            "  mem_gb: 0.5\n"
+            "---\n"
+            "Small task.\n"
+        )
+        ord_id = kb.create_task(
+            conn,
+            title="ordinary task",
+            body=ord_body,
+            assignee="jeff_dean",
+        )
+
+        # 3. Task with no declaration — get_task_min_resources returns
+        #    DEFAULT_MIN_RESOURCES (mem_gb=0.5).
+        bare_id = kb.create_task(
+            conn,
+            title="no min_resources",
+            body="Nothing declared.",
+            assignee="jeff_dean",
+        )
+
+        high_mr = kb.get_task_min_resources(conn, high_id)
+        ord_mr = kb.get_task_min_resources(conn, ord_id)
+        bare_mr = kb.get_task_min_resources(conn, bare_id)
+    finally:
+        conn.close()
+
+    # Sanity-check: the payload carries the canonical key. If this ever
+    # regresses (schema rename), the assertion below fires first — a much
+    # clearer signal than an AMBER under-block leaking to prod.
+    assert "mem_gb" in high_mr and "mem_gb" in ord_mr and "mem_gb" in bare_mr, (
+        "get_task_min_resources() no longer emits 'mem_gb'; classifier fix "
+        "in task_is_high_memory needs to be revisited."
+    )
+
+    # Feed the real payloads through the classifier.
+    assert task_is_high_memory({"id": high_id, "min_resources": high_mr}) is True, (
+        "DB-sourced high-memory task must classify high-memory. If this "
+        "fails, the AMBER gate is silently under-blocking again."
+    )
+    assert task_is_high_memory({"id": ord_id, "min_resources": ord_mr}) is False
+    assert task_is_high_memory({"id": bare_id, "min_resources": bare_mr}) is False
+
+    # And route them through the amber gate for good measure.
+    assert amber_blocks_task(STATE_AMBER, {"min_resources": high_mr}) is True
+    assert amber_blocks_task(STATE_AMBER, {"min_resources": ord_mr}) is False
+    assert amber_blocks_task(STATE_AMBER, {"min_resources": bare_mr}) is False
 
 
 # ── Armed-token assertion ─────────────────────────────────────────────────────

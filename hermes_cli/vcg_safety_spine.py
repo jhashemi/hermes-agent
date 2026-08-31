@@ -82,8 +82,16 @@ STATE_GREEN = "green"
 STATE_AMBER = "amber"
 STATE_RED = "red"
 
-# High-resource task hint: consult ``task["min_resources"]["memory_gb"]`` or a
+# High-resource task hint: consult ``task["min_resources"]["mem_gb"]`` or a
 # ``high_memory`` flag on the task metadata.
+#
+# NOTE (t_ad7e65f9): the canonical key is ``mem_gb`` — it matches
+# :data:`hermes_cli.kanban_db.SUPPORTED_MIN_RESOURCE_KEYS` (shipped by
+# t_ce60f550) which is what ``get_task_min_resources()`` returns, and it is
+# what the sibling HRV node gate reads (see ``hrv_node_gate.py`` line ~269).
+# The legacy ``memory_gb`` spelling is accepted only as a fallback so that
+# an in-flight hand-authored task dict from before the schema landed still
+# classifies correctly. New callers MUST emit ``mem_gb``.
 HIGH_MEMORY_GB_THRESHOLD = 4.0
 
 
@@ -311,14 +319,28 @@ def task_is_high_memory(task: dict) -> bool:
     Priority:
 
     1. Explicit ``task["high_memory"] is True``.
-    2. ``task["min_resources"]["memory_gb"]`` >= threshold.
-    3. Otherwise, treat as ordinary (non-high-memory).
+    2. ``task["min_resources"]["mem_gb"]`` >= threshold (CANONICAL key —
+       matches ``hermes_cli.kanban_db.DEFAULT_MIN_RESOURCES`` and what
+       ``get_task_min_resources()`` returns).
+    3. ``task["min_resources"]["memory_gb"]`` >= threshold (LEGACY spelling,
+       accepted only for pre-schema hand-authored dicts; new callers MUST
+       emit ``mem_gb``).
+    4. Otherwise, treat as ordinary (non-high-memory).
+
+    Fix history: t_ad7e65f9 — original implementation only read
+    ``memory_gb``, so DB-sourced tasks (which carry ``mem_gb`` via the
+    ``min_resources`` column) never classified high-memory and the AMBER
+    gate silently under-blocked.
     """
     if task.get("high_memory") is True:
         return True
     mr = task.get("min_resources") or {}
+    # Canonical key first; legacy ``memory_gb`` only if ``mem_gb`` is absent.
+    raw = mr.get("mem_gb")
+    if raw is None:
+        raw = mr.get("memory_gb")
     try:
-        mem_gb = float(mr.get("memory_gb") or 0)
+        mem_gb = float(raw or 0)
     except (TypeError, ValueError):
         mem_gb = 0.0
     return mem_gb >= HIGH_MEMORY_GB_THRESHOLD
