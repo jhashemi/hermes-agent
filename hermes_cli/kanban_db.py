@@ -584,6 +584,122 @@ def _fire_kanban_write_op(
     )
 
 
+def _collect_pre_dispatch_veto(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    node_hostname: Optional[str],
+    model_name: str,
+    priority: Optional[int],
+    min_resources: Optional[dict],
+    board: Optional[str],
+    assignee: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """Fire the ``kanban_task_pre_dispatch`` pre-hook and collect any veto.
+
+    ADR-006b P3 row 2 (t_172dc2b3) — pre-spawn veto seam that lets a policy
+    plugin (``vfe-hrv-node-gate``) reject a remote node between claim and
+    spawn WITHOUT reaching back into kernel internals. Mirrors the shape of
+    ``_collect_completing_veto`` exactly:
+
+    Returns
+    -------
+    (reason, source) : tuple[Optional[str], Optional[str]]
+        ``(None, None)`` when no callback vetoed (green-light path).
+        ``(reason, source)`` when at least one callback returned
+        ``{"veto": True, "reason": "..."}``. When multiple callbacks veto,
+        their reasons are joined with '; ' and ``source`` is a comma-joined
+        list of the reporting callback labels.
+
+    Semantics:
+
+    * A callback returning a non-dict, a dict without ``veto: True``, or
+      ``None`` is an abstention. Only a dict with truthy ``veto`` counts.
+    * The ``invoke_hook`` machinery already swallows exceptions per
+      callback (fail-open) — a raising callback cannot block dispatch.
+      This preserves the pre-extraction ``check_node_gate`` fail-open
+      contract (a red probe pipeline is worse than a missing one).
+    * When lifecycle dispatch is itself unreachable (import error,
+      registry missing), we fail open with ``(None, None)`` so dispatch
+      stays resilient to plugin infrastructure faults. The kernel gate
+      was always advisory; the seam MUST NOT be more restrictive.
+
+    Kwargs forwarded to the plugin (Demis amendment A1, binding):
+
+    * ``task_id`` (framing)
+    * ``node_hostname`` — target node from the router; the plugin's
+      responsibility to short-circuit on ``None`` (local dispatch).
+      The dispatcher does not gate the call on local vs remote so the
+      plugin sees every eligible task and can log/telemetry local runs
+      if it chooses.
+    * ``model_name`` — LLM model override on the task, or ``""``.
+    * ``priority`` — task priority (integer or ``None``).
+    * ``min_resources`` — parsed ``min_resources`` dict or ``None``.
+    * ``board`` — active board slug.
+    * ``assignee`` — task assignee (for observability/log lines only).
+
+    The plugin has NO mid-dispatch SQLite handle of its own — the kwargs
+    above must be sufficient. If a future policy needs another column,
+    add it here (additive-only) and grow the plugin behavior contract.
+    """
+    try:
+        from hermes_cli.lifecycle import invoke_hook
+        from hermes_cli.profiles import get_active_profile_name
+        # Mirror the FIX-11 lazy discovery pattern used by
+        # ``_collect_completing_veto`` — worker/gateway subprocesses may not
+        # have run ``discover_plugins()`` at startup, silently dropping every
+        # callback. Idempotent force-false discovery here closes that window
+        # at the exact seam without changing semantics for already-discovered
+        # callers. Any discovery exception is swallowed so a broken plugin
+        # registry cannot wedge dispatch (fail-open).
+        try:
+            from hermes_cli.plugins import discover_plugins as _discover_plugins
+            _discover_plugins(force=False)
+        except Exception as _disc_exc:
+            _log.debug(
+                "kanban_task_pre_dispatch lazy discover_plugins failed: %s",
+                _disc_exc,
+            )
+        try:
+            profile_name = get_active_profile_name()
+        except Exception:
+            profile_name = "default"
+        results = invoke_hook(
+            "kanban_task_pre_dispatch",
+            task_id=task_id,
+            node_hostname=node_hostname,
+            model_name=model_name,
+            priority=priority,
+            min_resources=min_resources,
+            board=board,
+            assignee=assignee,
+            profile_name=profile_name,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log.debug("kanban_task_pre_dispatch dispatch failed: %s", exc)
+        return None, None
+
+    reasons: list[str] = []
+    sources: list[str] = []
+    for entry in results or []:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("veto"):
+            continue
+        reason = str(entry.get("reason", "")).strip()
+        if not reason:
+            reason = "pre-dispatch vetoed (no reason provided)"
+        source = str(entry.get("source", "")).strip() or None
+        reasons.append(reason)
+        if source:
+            sources.append(source)
+    if not reasons:
+        return None, None
+    combined_reason = "; ".join(reasons)
+    combined_source = ",".join(sources) if sources else None
+    return combined_reason, combined_source
+
+
 def _collect_completing_veto(
     conn: sqlite3.Connection,
     task_id: str,
@@ -11857,40 +11973,64 @@ def _dispatch_once_locked(
                     "spawning locally", claimed.id, exc,
                 )
                 target_node = None
-        # Nervous-system gate (ADR-006b Phase 2 / t_88eadaa8): if the router
-        # selected a REMOTE node, consult the HRV probe state for that node
-        # before spawning. RED probes (high memory pressure, unhealthy
-        # kanban dispatcher, Bedrock TPM exhaustion, urgent nervous-system
-        # digest with non-P0 task, or a min_resources overflow) cause the
-        # task's claim to be released back to ``ready`` this tick so a
-        # healthier node can pick it up next tick. The gate is a safety
-        # sieve, not a hard dependency — any failure inside the gate
-        # (missing module, stale probes, exception) is fail-open by design
-        # via check_node_gate itself. Local dispatch (target_node is None)
-        # skips the gate entirely: local has no remote probe to consult.
+        # Pre-dispatch veto seam (ADR-006b P3 row 2 / t_172dc2b3): if the
+        # router selected a REMOTE node, fire ``kanban_task_pre_dispatch``
+        # so any registered policy plugin can veto the spawn. The kernel
+        # keeps ONLY the primitive: transactional claim release + audit
+        # event + result-entry — POLICY (which conditions trigger a
+        # rejection, telemetry metrics, probe state) lives in the plugin
+        # (``vfe-hrv-node-gate`` at land time).
+        #
+        # Fail-open contract preserved by ``_collect_pre_dispatch_veto``:
+        # any callback exception, discovery failure, or lifecycle-import
+        # error returns ``(None, None)`` so dispatch proceeds. Local
+        # dispatch (``target_node is None``) skips the seam entirely —
+        # local has no remote probe to consult and the pre-extraction
+        # code path was identical (``check_node_gate`` short-circuited on
+        # ``node_hostname is None``).
+        #
+        # Kwargs are fixed at the seam (Demis amendment A1) so the plugin
+        # never re-opens the SQLite conn mid-dispatch:
+        # ``task_id, node_hostname, model_name, priority, min_resources,
+        # board, assignee``. ``min_resources`` is parsed here (JSON on
+        # disk) so every consumer sees a dict/None uniformly.
         gate_rejection: Optional[str] = None
+        gate_source: Optional[str] = None
         if target_node is not None:
+            _task_priority: Optional[int] = None
+            _task_min_resources: Optional[dict] = None
             try:
-                from hermes_cli.hrv_node_gate_integration import check_node_gate
-                gate_rejection = check_node_gate(
-                    conn,
-                    claimed.id,
-                    target_node,
-                    claimed.model_override or "",
-                )
-            except Exception as exc:
-                # Fail-open: any failure loading or invoking the gate must
-                # not halt dispatch. A red probe pipeline is worse than a
-                # missing one.
-                logger.warning(
-                    "[dispatch] HRV node gate check failed for task=%s "
-                    "node=%s: %s; spawning anyway (fail-open)",
-                    claimed.id, target_node, exc,
-                )
-                gate_rejection = None
+                row = conn.execute(
+                    "SELECT priority, min_resources FROM tasks WHERE id = ?",
+                    (claimed.id,),
+                ).fetchone()
+                if row is not None:
+                    _task_priority = row["priority"]
+                    _min_res_json = row["min_resources"]
+                    if _min_res_json:
+                        try:
+                            import json as _json
+                            _task_min_resources = _json.loads(_min_res_json)
+                        except Exception:
+                            _task_min_resources = None
+            except Exception:
+                # Row fetch shouldn't ever fail — the task is already
+                # claimed at this point — but be defensive: fail-open.
+                _task_priority = None
+                _task_min_resources = None
+            gate_rejection, gate_source = _collect_pre_dispatch_veto(
+                conn,
+                claimed.id,
+                node_hostname=target_node,
+                model_name=claimed.model_override or "",
+                priority=_task_priority,
+                min_resources=_task_min_resources,
+                board=board,
+                assignee=claimed.assignee,
+            )
         if gate_rejection is not None:
-            # Release the claim without counting a failure — this is not a
-            # task problem, it's a node health problem.
+            # Kernel primitive: transactional claim release + audit event.
+            # NOT a task failure — do not increment ``consecutive_failures``.
             try:
                 with write_txn(conn):
                     conn.execute(
@@ -11906,12 +12046,13 @@ def _dispatch_once_locked(
                             "node": target_node,
                             "reason": gate_rejection,
                             "task_id": claimed.id,
+                            **({"source": gate_source} if gate_source else {}),
                         },
                     )
             except Exception:
                 logger.debug(
-                    "kanban dispatch: failed to release claim after gate "
-                    "rejection for %s", claimed.id, exc_info=True,
+                    "kanban dispatch: failed to release claim after "
+                    "pre-dispatch veto for %s", claimed.id, exc_info=True,
                 )
             result.skipped_node_rejected.append(
                 (claimed.id, target_node, gate_rejection)
