@@ -26,34 +26,28 @@ from typing import Any, Dict, Optional
 
 import requests
 
-# OTel instrumentation — zero-impact import (fails silently if SDK/module unavailable)
 try:
-    _PLATFORM_SRC = Path("/home/ubuntu/executive_agents_platform/src")
-    if _PLATFORM_SRC.exists() and str(_PLATFORM_SRC) not in sys.path:
-        sys.path.insert(0, str(_PLATFORM_SRC))
-    from voice.otel_tracer import record_session_start as _otel_session_start, record_session_end as _otel_session_end
-    _OTEL_AVAILABLE = True
+    from .jetstream_bridge import (
+        derive_room,
+        get_bridge,
+        get_or_start_bridge,
+        get_room_fsm,
+        publish_gateway_delta,
+    )
 except ImportError:
-    _OTEL_AVAILABLE = False
-
-    def _otel_session_start(*a, **kw):  # type: ignore[misc]
-        pass
-
-    def _otel_session_end(*a, **kw):  # type: ignore[misc]
-        pass
-
-from .jetstream_bridge import (
-    derive_room,
-    get_bridge,
-    get_or_start_bridge,
-    get_room_fsm,
-    publish_gateway_delta,
-)
+    # When imported as a top-level module (e.g. in tests), use absolute import
+    from jetstream_bridge import (
+        derive_room,
+        get_bridge,
+        get_or_start_bridge,
+        get_room_fsm,
+        publish_gateway_delta,
+    )
 
 logger = logging.getLogger("voice_agents_plugin")
 
-# Bridge service URL
-VOICE_BRIDGE_URL = "http://localhost:8193"
+# Bridge service URL (env-overridable for cluster / multi-host topology)
+VOICE_BRIDGE_URL = os.environ.get("VOICE_BRIDGE_URL", "http://localhost:8193")
 
 # Add executive agents platform to path
 PLATFORM_DIR = Path("/home/ubuntu/executive_agents_platform")
@@ -211,12 +205,17 @@ def _resolve_agent_id(raw: str) -> str:
 # Bridge HTTP helpers (sync, called from sync hook)
 # ============================================================================
 
-def _bridge_load(user_id: str, agent_id: str) -> Optional[Dict]:
+def _bridge_load(user_id: str, agent_id: str, chat_id: str = "", platform: str = "") -> Optional[Dict]:
     """Call /load to create a bridge session."""
     try:
         resp = requests.post(
             f"{VOICE_BRIDGE_URL}/load",
-            json={"user_id": user_id, "agent_id": agent_id},
+            json={
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "platform": platform,
+            },
             timeout=15,
         )
         return resp.json() if resp.status_code == 200 else None
@@ -226,16 +225,28 @@ def _bridge_load(user_id: str, agent_id: str) -> Optional[Dict]:
 
 
 def _bridge_query(user_id: str, query: str, synthesize: bool = False) -> Optional[Dict]:
-    """Call /query for LLM response, optionally with TTS synthesis."""
+    """Call /chat for LLM response, optionally with TTS synthesis.
+
+    Note: hits /chat (LLM+memory+TTS), NOT /query (memory-only retrieval).
+    Returned dict normalizes the LLM text under both ``response`` and
+    ``llm_response`` keys so callers can use either name.
+    """
     try:
         resp = requests.post(
-            f"{VOICE_BRIDGE_URL}/query",
-            json={"user_id": user_id, "query": query, "synthesize": synthesize},
+            f"{VOICE_BRIDGE_URL}/chat",
+            json={"user_id": user_id, "message": query, "synthesize": synthesize},
             timeout=60,
         )
-        return resp.json() if resp.status_code == 200 else None
+        if resp.status_code != 200:
+            logger.warning("[voice-agents] /chat returned %s: %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        # Normalize keys: bridge returns "response", legacy callers expect "llm_response"
+        if "response" in data and "llm_response" not in data:
+            data["llm_response"] = data["response"]
+        return data
     except Exception as e:
-        logger.warning("[voice-agents] Bridge /query error: %s", e)
+        logger.warning("[voice-agents] Bridge /chat error: %s", e)
         return None
 
 
@@ -284,9 +295,15 @@ def _send_reply_async(gateway: Any, event: Any, text: str, audio_path: Optional[
             if not adapter:
                 logger.error("[voice-agents] No adapter for platform %s", platform)
                 return
-            # Send text response
+            # Send text response — use _send_with_retry from BasePlatformAdapter
+            # so transient connection errors (idle keep-alive drops, etc.) are
+            # retried with backoff. This is adapter-agnostic — works for every
+            # platform that inherits from BasePlatformAdapter.
             if text:
-                await adapter.send(chat_id, text)
+                send_method = getattr(adapter, "_send_with_retry", None) or adapter.send
+                result = await send_method(chat_id, text)
+                if not getattr(result, "success", True):
+                    logger.warning("[voice-agents] adapter send failed: %s", getattr(result, "error", "?"))
             # Send audio as voice note if available
             if audio_path and os.path.exists(audio_path):
                 if hasattr(adapter, "send_voice"):
@@ -341,8 +358,15 @@ def _handle_load_agent(text: str, event: Any, gateway: Any) -> Optional[Dict]:
     user_id = getattr(event.source, "user_id", "")
     chat_id = getattr(event.source, "chat_id", "") or ""
 
-    # Call bridge /load
-    bridge_resp = _bridge_load(user_id, agent_id)
+    # Extract platform from event source (e.g. "telegram", "whatsapp")
+    platform = getattr(event.source, "platform", "")
+    if hasattr(platform, "value"):  # enum case
+        platform = platform.value
+    if not isinstance(platform, str):
+        platform = str(platform) if platform else ""
+
+    # Call bridge /load — pass chat_id + platform for pre-activation context bridging
+    bridge_resp = _bridge_load(user_id, agent_id, chat_id=chat_id, platform=platform)
     if not bridge_resp or bridge_resp.get("status") != "ok":
         err = bridge_resp.get("message", "unknown error") if bridge_resp else "bridge unreachable"
         return {"action": "rewrite", "text": f"❌ Failed to connect to {agent_id}: {err}"}
@@ -355,13 +379,6 @@ def _handle_load_agent(text: str, event: Any, gateway: Any) -> Optional[Dict]:
         chat_id=chat_id,
     )
     _sessions[user_id] = session
-
-    # OTel: emit session.start span for gateway-initiated sessions
-    _otel_session_start(
-        session_id=session.session_id,
-        agent_name=agent_id,
-        room=bridge_resp.get("room_name", ""),
-    )
 
     voice_uuid = bridge_resp.get("voice_uuid", "")
     voice_status = "🎙️ Voice ready" if voice_uuid else "📝 Text only"
@@ -418,13 +435,6 @@ def _handle_disconnect(event: Any) -> Optional[Dict]:
 
     if not session:
         return {"action": "rewrite", "text": "ℹ️ No voice agent connected.\n\nType /voice-agents to see available agents."}
-
-    # OTel: emit session.end span for gateway-disconnected sessions
-    _otel_session_end(
-        session_id=session.session_id,
-        agent_name=session.agent_id,
-        reason="gateway_disconnect",
-    )
 
     _bridge_disconnect(user_id)
     return {"action": "rewrite", "text": f"✅ Disconnected from {session.agent_id}.\n\nType /voice-agents to connect to a different agent."}
@@ -712,28 +722,21 @@ async def _start_voice_out_subscriber(gateway: Any) -> None:
 def _schedule_subscriber(gateway: Any) -> None:
     try:
         loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_start_voice_out_subscriber(gateway))
+        else:
+            # Defer: try via a thread (the gateway will create its own loop)
+            def _runner() -> None:
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    new_loop.run_until_complete(_start_voice_out_subscriber(gateway))
+                except Exception as exc:
+                    logger.debug("[voice-agents] subscriber thread error: %s", exc)
+
+            threading.Thread(target=_runner, daemon=True).start()
     except RuntimeError:
-        return
-    if loop.is_closed():
-        return
-
-    def _launch() -> None:
-        asyncio.ensure_future(_start_voice_out_subscriber(gateway))
-
-    if loop.is_running():
-        _launch()
-    else:
-        # Defer until the loop actually runs. The old fallback spawned a
-        # daemon thread with its own event loop — that loop was never
-        # closed, and run_until_complete() returned right after the
-        # subscribe() call, so the subscription was dead the moment the
-        # thread exited AND its NATS tasks leaked ("Task was destroyed
-        # but it is pending!" at teardown, hermes1 2026-08). call_soon on
-        # the real loop preserves the feature with no orphaned loop.
-        try:
-            loop.call_soon(_launch)
-        except RuntimeError:
-            pass
+        pass
 
 
 # ============================================================================
