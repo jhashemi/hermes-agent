@@ -62,6 +62,7 @@ from typing import Iterator, Optional
 from hermes_cli import kanban_db as _kb
 from hermes_cli.kanban_db import (
     _append_event,
+    _dependency_waiting_for_satisfied,
     write_txn,
 )
 
@@ -171,6 +172,7 @@ def _iter_candidate_tasks(
         SELECT
             t.id           AS task_id,
             t.status       AS status,
+            t.block_kind   AS block_kind,
             t.created_at   AS task_created_at,
             e.id           AS event_id,
             e.kind         AS event_kind,
@@ -194,12 +196,43 @@ def _iter_candidate_tasks(
     )
     params: list = list(_TRIGGER_KINDS) + [window_cutoff] + list(_ESCALATABLE_STATUSES) + [age_cutoff]
     for row in conn.execute(sql, params).fetchall():
+        task_id = row["task_id"]
+        event_kind = str(row["event_kind"])
+        block_kind = row["block_kind"] if "block_kind" in row.keys() else None
+
+        # t_6e2342f2 — dep-block guard. ``block_task(kind='dependency')``
+        # LEGITIMATELY parks tasks in ``status='todo'`` with
+        # ``block_kind='dependency'`` and emits a ``dependency_wait``
+        # event on every retry — that's not a stall, that's the
+        # DISPATCH-01 wait working as designed. Skip candidates whose
+        # latest trigger is ``dependency_wait`` when the same predicate
+        # ``recompute_ready`` uses to gate promotion
+        # (:func:`_dependency_waiting_for_satisfied`) reports the
+        # ``waiting_for`` peer is NOT yet satisfied. Only escalate when
+        # the guard says the wait is satisfiable — i.e. the peer HAS
+        # reached ``done``/``archived`` (or is unresolvable), which
+        # means the task truly is stuck.
+        if event_kind == "dependency_wait" and (
+            block_kind == "dependency" or row["status"] == "todo"
+        ):
+            try:
+                satisfied = _dependency_waiting_for_satisfied(conn, task_id)
+            except sqlite3.Error:
+                # If the guard itself errors, defer to the old behavior
+                # (escalate) rather than silently ignore a genuine stall.
+                satisfied = True
+            if not satisfied:
+                # Legitimate dependency wait — skip. The dispatcher's
+                # DISPATCH-01 guard will re-promote this task the tick
+                # after its peer reaches ``done``.
+                continue
+
         yield {
-            "task_id": row["task_id"],
+            "task_id": task_id,
             "status": row["status"],
             "task_created_at": int(row["task_created_at"] or 0),
             "event_id": int(row["event_id"] or 0),
-            "event_kind": str(row["event_kind"]),
+            "event_kind": event_kind,
             "event_created_at": int(row["event_created_at"] or 0),
             "event_payload": row["event_payload"],
         }
@@ -281,7 +314,18 @@ def _escalate_one(
     trigger_created_at = candidate["event_created_at"]
     task_created_at = candidate["task_created_at"]
     reason = _extract_reason(candidate.get("event_payload"))
-    age_s = max(0, now - task_created_at)
+    # t_6e2342f2 — for dependency_wait triggers on parked-in-``todo``
+    # tasks, report time-since-latest-block instead of time-since-row-
+    # creation. A dep-block re-fires each dispatcher tick, so
+    # ``tasks.created_at`` is misleading (the audit comment on the
+    # original bug read "738 min in todo" for a block that was 6 min
+    # old). For all other trigger kinds, keep the old semantics so
+    # ``claim_rejected`` on an old-and-stale ticket still surfaces the
+    # true row age operators expect to see.
+    if trigger_kind == "dependency_wait" and trigger_created_at > 0:
+        age_s = max(0, now - trigger_created_at)
+    else:
+        age_s = max(0, now - task_created_at)
 
     if dry_run:
         return EscalationReport(

@@ -422,3 +422,230 @@ def test_dependency_wait_trigger_is_recognised(kanban_home):
     result = sw.sweep_once(conn, now=now)
     assert result.escalated_count == 1
     assert result.escalated[0].trigger_kind == "dependency_wait"
+
+
+# ---------------------------------------------------------------------------
+# t_6e2342f2 — dependency-block-aware escalation.
+#
+# The stall-watchdog previously escalated any ``todo`` task with a recent
+# ``dependency_wait`` event, using ``tasks.created_at`` for the age check.
+# But ``block_task(kind='dependency')`` LEGITIMATELY parks tasks in ``todo``
+# (with ``block_kind='dependency'``) until the waited-on peer transitions
+# to ``done``/``archived``. Those tasks are not stalled — they're correctly
+# gated — and the sweep must leave them alone. The observed failure was a
+# ROOM-NS-GOV parent claimed → re-blocked → auto-promoted → re-claimed 4×
+# in ~2h while its unsatisfied dependency's assignee had not responded.
+# ---------------------------------------------------------------------------
+
+
+def _make_dep_blocked_task(
+    conn,
+    *,
+    task_id: str,
+    waiting_for: str,
+    task_created_at: int,
+    wait_event_at: int,
+) -> int:
+    """Fabricate a dependency-blocked task in ``todo`` with a
+    ``dependency_wait`` event payload pointing at ``waiting_for``.
+
+    Mirrors what ``block_task(kind='dependency', waiting_for=...)``
+    produces: status=todo, block_kind='dependency', task_events row of
+    kind=dependency_wait with ``{"waiting_for": <id>, "kind": "dependency"}``.
+    """
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, "
+            "block_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, "dep-blocked", "b", "backend-eng", "todo",
+             "dependency", task_created_at),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (
+                task_id,
+                "dependency_wait",
+                json.dumps({
+                    "reason": "waiting on peer",
+                    "kind": "dependency",
+                    "waiting_for": waiting_for,
+                }),
+                wait_event_at,
+            ),
+        )
+        row = conn.execute(
+            "SELECT id FROM task_events WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return int(row["id"])
+
+
+def test_dep_blocked_task_with_unsatisfied_peer_is_not_escalated(kanban_home):
+    """Regression for t_6e2342f2: an old ``todo`` task carrying a
+    ``dependency_wait`` payload whose ``waiting_for`` peer is still
+    running (i.e. NOT ``done``/``archived``) must be left in ``todo``.
+
+    Before the fix, the sweep saw the fresh ``dependency_wait`` event
+    inside the 1h window plus the 12h+ ``created_at`` and auto-flipped
+    the task to ``blocked``/``needs_input`` — the exact loop the bug
+    report describes on t_c239044c.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    peer_id = "t_peer"
+    task_id = "t_dep_blocked"
+
+    # The peer task the dependency is waiting on. It's ``running`` —
+    # the dependency is genuinely unsatisfied.
+    _make_ticket(conn, task_id=peer_id, status="running", created_at=now - 3600)
+
+    # The dependency-blocked task itself. Created 12h ago (well past
+    # ``min_age_s``); block landed 6 min ago (well inside the recent
+    # window). This is the exact shape of t_c239044c at 18:38 UTC.
+    _make_dep_blocked_task(
+        conn,
+        task_id=task_id,
+        waiting_for=peer_id,
+        task_created_at=now - 43200,   # 12h ago
+        wait_event_at=now - 360,       # 6 min ago
+    )
+
+    result = sw.sweep_once(conn, now=now)
+
+    # Zero escalations — the sweep must recognise this as a legitimate
+    # dependency wait, not a stall.
+    assert result.escalated_count == 0, (
+        "dep-blocked task with unsatisfied peer must not be escalated"
+    )
+    # Task stays in todo with its dependency block intact.
+    row = conn.execute(
+        "SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,),
+    ).fetchone()
+    assert row["status"] == "todo"
+    assert row["block_kind"] == "dependency"
+    # No stall_escalated event emitted.
+    stall_evts = [e for e in _events(conn, task_id) if e["kind"] == "stall_escalated"]
+    assert stall_evts == []
+
+
+def test_dep_blocked_task_with_done_peer_is_still_escalatable(kanban_home):
+    """Complement to the above: if the ``waiting_for`` peer HAS reached
+    ``done`` but the task is still stuck in ``todo`` (dispatcher hasn't
+    re-promoted for some reason), that IS a real stall and the sweep
+    should escalate as before.
+
+    This guarantees the fix doesn't over-broadly silence the sweep on
+    dep-blocked tasks — it only silences the ones with a still-open
+    ``waiting_for``.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    peer_id = "t_peer_done"
+    task_id = "t_dep_stuck"
+
+    _make_ticket(conn, task_id=peer_id, status="done", created_at=now - 3600)
+    _make_dep_blocked_task(
+        conn,
+        task_id=task_id,
+        waiting_for=peer_id,
+        task_created_at=now - 43200,
+        wait_event_at=now - 360,
+    )
+
+    result = sw.sweep_once(conn, now=now)
+
+    # Peer is done — the block is stale — this task really is stuck.
+    assert result.escalated_count == 1
+    assert result.escalated[0].task_id == task_id
+    assert _status(conn, task_id) == "blocked"
+
+
+def test_dep_blocked_task_with_missing_peer_falls_through(kanban_home):
+    """When ``waiting_for`` points at a task that no longer exists,
+    ``_dependency_waiting_for_satisfied`` returns True (fall through
+    so operator can unblock manually). The sweep is allowed to
+    escalate — this task IS abandoned and needs a human to look."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_dep_orphaned"
+
+    _make_dep_blocked_task(
+        conn,
+        task_id=task_id,
+        waiting_for="t_ghost_never_created",
+        task_created_at=now - 43200,
+        wait_event_at=now - 360,
+    )
+
+    result = sw.sweep_once(conn, now=now)
+
+    # Waiting_for points at nothing — legit escalation candidate.
+    assert result.escalated_count == 1
+    assert _status(conn, task_id) == "blocked"
+
+
+def test_dep_blocked_task_with_no_waiting_for_falls_through(kanban_home):
+    """Legacy / racy shape: a ``dependency_wait`` payload with no
+    ``waiting_for`` field. ``_dependency_waiting_for_satisfied`` returns
+    True in this case (see its docstring: "legacy dependency blocks
+    with no ``waiting_for`` on the event payload return True"). The
+    sweep must still be allowed to escalate — this is a data-integrity
+    edge case that operators need to see.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_dep_legacy"
+
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, "
+            "block_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task_id, "dep-legacy", "b", "backend-eng", "todo",
+             "dependency", now - 43200),
+        )
+        conn.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (task_id, "dependency_wait",
+             json.dumps({"reason": "legacy"}),
+             now - 360),
+        )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+
+def test_dep_blocked_age_uses_wait_event_time_not_row_creation(kanban_home):
+    """When a dependency-blocked task IS legitimately escalated (its
+    peer is done but the task is still parked), the reported ``age_s``
+    should reflect time-since-latest-dependency_wait rather than
+    time-since-task-creation.
+
+    In the bug report the audit comment read "738 min in todo" even
+    though the block was 6 min old — misleading operators. Reporting
+    the ACTUAL block age keeps the audit trail truthful.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    peer_id = "t_peer_done_2"
+    task_id = "t_dep_stuck_age"
+
+    _make_ticket(conn, task_id=peer_id, status="done", created_at=now - 3600)
+    _make_dep_blocked_task(
+        conn,
+        task_id=task_id,
+        waiting_for=peer_id,
+        task_created_at=now - 43200,   # 12h old row
+        wait_event_at=now - 600,       # dep block re-fired 10 min ago
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+    # The reported age should reflect the dependency_wait event age
+    # (10 min = 600s), not the row age (12h = 43200s).
+    assert result.escalated[0].age_s == 600, (
+        f"dependency-block escalation must use wait-event age, "
+        f"got {result.escalated[0].age_s}s (expected 600s)"
+    )
