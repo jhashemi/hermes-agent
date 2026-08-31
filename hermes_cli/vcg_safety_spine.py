@@ -17,9 +17,10 @@ broker cannot mask them:
 
 2. **NATS liveness via direct TCP probe**
    - Open a real ``socket.create_connection`` to ``127.0.0.1:4222`` (or
-     configured host/port) every 30 s. NATS accepts TCP immediately on a
-     healthy port; a refused connection or 30-second connect timeout is
-     definitive proof the broker is down.
+     configured host/port) every 30 s (``NATS_PROBE_INTERVAL_S``). NATS
+     accepts TCP immediately on a healthy port; a refused connection or a
+     3-second connect timeout (``NATS_PROBE_TIMEOUT_S``) is definitive
+     proof the broker is down.
    - On sustained failure we enter *safe mode*: routing decisions still
      compute locally but no NATS publishes fire, and the transition is
      logged to a local file (``/tmp/vcg_dispatch_safe_mode.log`` by
