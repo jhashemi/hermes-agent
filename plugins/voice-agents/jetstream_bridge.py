@@ -15,13 +15,16 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("voice_agents_plugin.jetstream")
 
-NATS_URL = "nats://localhost:4222"
+# NATS endpoint (env-overridable for cluster / multi-host topology — mirrors
+# VOICE_BRIDGE_URL in voice_agents_plugin).
+NATS_URL = os.environ.get("VOICE_NATS_URL", "nats://localhost:4222")
 STREAM_NAME = "VOICE_BRIDGE"
 SUBJECTS = ["voice_bridge.>"]
 

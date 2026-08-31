@@ -1,44 +1,22 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "executive-voice-agents"
-version = "1.0.0"
-description = "Executive voice agent platform for Hermes Gateway with 8 memory systems"
-readme = "README.md"
-license = {text = "MIT"}
+name = "voice-agents-plugin"
+version = "0.2.0"
+description = "Executive Voice Agents plugin for Hermes Gateway (dispatch hooks, jetstream bridge)"
 requires-python = ">=3.10"
-authors = [
-    {name = "Hermes Agent"},
-]
 
-dependencies = [
-    "pyyaml>=6.0",
-]
+# CANONICAL SOURCE: this tracked tree (executive_agents_platform/plugins/voice-agents).
+# ~/.hermes/plugins/voice-agents is a consumption point (symlinks to these
+# files), never a source of truth.
+#
+# Two co-importing top-level modules live at the plugin root:
+# voice_agents_plugin does `from jetstream_bridge import ...` when imported
+# as a top-level module (its designed test-consumption mode), so BOTH must be
+# declared or the editable install is broken. The generic-named `agents/`
+# package is deliberately NOT installed (shadow risk).
 
-[project.optional-dependencies]
-voice = [
-    "resemble>=0.3",
-    "deepgram-sdk>=3.0",
-]
-dev = [
-    "pytest>=7.0",
-    "pytest-asyncio>=0.21",
-]
-
-[project.entry-points."hermes.plugins"]
-voice-agents = "voice_agents_plugin:on_load"
-
-[tool.setuptools.packages.find]
-include = ["loader*"]
-
-[tool.setuptools.package-data]
-"*" = ["*.yaml", "*.json"]
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-
-[project.urls]
-Homepage = "https://github.com/nousresearch/executive-voice-agents"
+[tool.setuptools]
+py-modules = ["voice_agents_plugin", "jetstream_bridge"]

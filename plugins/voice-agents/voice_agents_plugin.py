@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -46,13 +47,95 @@ except ImportError:
 
 logger = logging.getLogger("voice_agents_plugin")
 
+# ---------------------------------------------------------------------------
+# Identity collapse — one registry per process, whichever identity loads first
+#
+# This module is importable under two names: `agents.voice_agents_plugin`
+# (gateway plugin loading) and `voice_agents_plugin` (editable install /
+# tests). Module-level singletons (_registry, _sessions) would otherwise be
+# duplicated per identity — two registries, two session maps, split-brain
+# (adversarial review 2026-08-31, P2). Aliasing both names to the first-
+# loaded module object in sys.modules collapses them into one.
+# ---------------------------------------------------------------------------
+_self = sys.modules[__name__]
+sys.modules.setdefault("agents.voice_agents_plugin", _self)
+sys.modules.setdefault("voice_agents_plugin", _self)
+logger.debug("[voice-agents] identity alias registered from %s", __name__)
+
 # Bridge service URL (env-overridable for cluster / multi-host topology)
 VOICE_BRIDGE_URL = os.environ.get("VOICE_BRIDGE_URL", "http://localhost:8193")
 
-# Add executive agents platform to path
-PLATFORM_DIR = Path("/home/ubuntu/executive_agents_platform")
-if PLATFORM_DIR.exists() and str(PLATFORM_DIR) not in sys.path:
+
+# Locate the executive-agents-platform tree (registry agents dir + optional
+# OTel tracer). Order: EAP_SRC/EAP_ROOT env override (cluster / worktree
+# friendly) → documented default. Existence-checked; falls back to the
+# literal default path when the override does not exist.
+def _resolve_platform_root() -> Path:
+    override = os.environ.get("EAP_SRC") or os.environ.get("EAP_ROOT")
+    if override:
+        p = Path(override)
+        if p.exists():
+            return p
+    default = Path("/home/ubuntu/executive_agents_platform")
+    return default if default.exists() else default
+
+
+PLATFORM_DIR = _resolve_platform_root()
+if str(PLATFORM_DIR) not in sys.path:
     sys.path.insert(0, str(PLATFORM_DIR))
+# EAP keeps importable packages under src/ (pytest.ini pythonpath = . src);
+# mirror that here so `from voice.otel_tracer import ...` resolves outside pytest.
+_platform_src = PLATFORM_DIR / "src"
+if _platform_src.exists() and str(_platform_src) not in sys.path:
+    sys.path.insert(0, str(_platform_src))
+
+# ---------------------------------------------------------------------------
+# OTel session observability — restored from the hermes-agent fork variant,
+# hardened twice over:
+#   1. collector health probe BEFORE importing the tracer — otel_tracer.py
+#      installs an OTLP exporter + background batch worker at import time;
+#      importing it with no collector running leaves a worker spamming
+#      "Failed to export ... Connection refused" forever. If nothing listens
+#      on the OTLP endpoints we skip the import and use silent no-ops.
+#   2. existence-checked import, no hardcoded dependency — a missing tracer
+#      or a down collector must never break dispatch.
+# ---------------------------------------------------------------------------
+def _collector_reachable() -> bool:
+    import socket
+    from urllib.parse import urlparse
+
+    for env_key, default in (
+        ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:4317"),
+        ("OTEL_EXPORTER_OTLP_HTTP_ENDPOINT", "http://127.0.0.1:4318"),
+    ):
+        raw = os.environ.get(env_key, default)
+        try:
+            parsed = urlparse(raw if "//" in raw else f"http://{raw}")
+            with socket.create_connection(
+                (parsed.hostname or "127.0.0.1", parsed.port or 4317), timeout=0.25
+            ):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+_OTEL_AVAILABLE = False
+if _collector_reachable():
+    try:
+        from voice.otel_tracer import (  # type: ignore
+            record_session_end as _otel_session_end,
+            record_session_start as _otel_session_start,
+        )
+        _OTEL_AVAILABLE = True
+    except Exception:
+        _OTEL_AVAILABLE = False
+if not _OTEL_AVAILABLE:
+    def _otel_session_start(*a, **kw):  # type: ignore[misc]
+        pass
+
+    def _otel_session_end(*a, **kw):  # type: ignore[misc]
+        pass
 
 
 # Agent ID aliases: short name -> bridge agent_id (underscore format)
@@ -88,6 +171,7 @@ class VoiceAgentSession:
         self.agent_id = agent_id
         self.session_id = session_id
         self.chat_id = chat_id
+        self._ts = time.monotonic()  # start stamp for OTel session duration
 
 
 class VoiceAgentRegistry:
@@ -159,6 +243,24 @@ class VoiceAgentRegistry:
 
 _registry: Optional[VoiceAgentRegistry] = None
 _sessions: Dict[str, VoiceAgentSession] = {}
+
+# ---------------------------------------------------------------------------
+# Cross-identity state adoption — completes the identity collapse at the top
+# of this file. setdefault() reserves the opposite name when THIS module
+# loads first; if the opposite identity loaded FIRST instead, adopt its state
+# objects here (shared references, not copies) so there is exactly one
+# registry/session map per process regardless of import order.
+# ---------------------------------------------------------------------------
+_opp_name = (
+    "voice_agents_plugin"
+    if __name__ == "agents.voice_agents_plugin"
+    else "agents.voice_agents_plugin"
+)
+_opp_mod = sys.modules.get(_opp_name)
+if _opp_mod is not None and _opp_mod is not sys.modules[__name__]:
+    _registry = getattr(_opp_mod, "_registry", None)
+    _sessions = getattr(_opp_mod, "_sessions", {})
+    logger.debug("[voice-agents] adopted state from pre-existing %s", _opp_name)
 
 
 def _get_registry() -> VoiceAgentRegistry:
@@ -380,6 +482,16 @@ def _handle_load_agent(text: str, event: Any, gateway: Any) -> Optional[Dict]:
     )
     _sessions[user_id] = session
 
+    # OTel session-start span (no-op when tracer unavailable / collector down)
+    try:
+        _otel_session_start(
+            session_id=session.session_id or f"{user_id}:{agent_id}",
+            agent_name=agent_id,
+            participant_count=1,
+        )
+    except Exception:  # pragma: no cover - observability must never fail dispatch
+        pass
+
     voice_uuid = bridge_resp.get("voice_uuid", "")
     voice_status = "🎙️ Voice ready" if voice_uuid else "📝 Text only"
 
@@ -435,6 +547,16 @@ def _handle_disconnect(event: Any) -> Optional[Dict]:
 
     if not session:
         return {"action": "rewrite", "text": "ℹ️ No voice agent connected.\n\nType /voice-agents to see available agents."}
+
+    # OTel session-end span with measured duration (no-op when unavailable)
+    try:
+        _otel_session_end(
+            session_id=session.session_id or f"{user_id}:{session.agent_id}",
+            agent_name=session.agent_id,
+            duration_ms=(time.monotonic() - getattr(session, "_ts", time.monotonic())) * 1000.0,
+        )
+    except Exception:  # pragma: no cover - observability must never fail dispatch
+        pass
 
     _bridge_disconnect(user_id)
     return {"action": "rewrite", "text": f"✅ Disconnected from {session.agent_id}.\n\nType /voice-agents to connect to a different agent."}
