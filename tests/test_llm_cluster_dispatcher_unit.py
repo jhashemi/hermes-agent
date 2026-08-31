@@ -1221,3 +1221,266 @@ class TestEvaluateNode:
             result2 = lcd.evaluate_node(node2, {}, {})
         
         assert result1 == result2, "Identical nodes should receive identical decisions"
+
+
+# ---------------------------------------------------------------------------
+# AMBER memory_state gate — t_0c067ccf call-site proof
+# ---------------------------------------------------------------------------
+#
+# Companion to t_ad7e65f9 (spine key-mismatch fix). This class proves the
+# dispatcher CALLS amber_blocks_task() from both routing paths:
+#
+#   * fallback_proportional (deterministic path taken when the LLM is down /
+#     dry-run / disabled)
+#   * validate_llm_decisions (accepts/rejects the LLM's picks)
+#
+# Prior to this task the symbol was imported into the module scope but never
+# invoked; the AMBER band was dead in the live path (fail-open direction:
+# graceful memory pressure blocked nothing).
+#
+# Acceptance matrix per t_0c067ccf body:
+#   AMBER: blocks tasks with mem_gb >= 4.0 or high_memory=True only.
+#          Ordinary tasks still route.
+#   RED:   blocks ALL tasks (delegated to the pre-existing hard gate; this
+#          class asserts the AMBER helper's own return, which reject even
+#          ordinary tasks on RED as a defensive second-tap).
+#   GREEN: zero overhead — helper returns None immediately after
+#          classifying the state.
+
+
+class TestAmberGateCallSites:
+    """Proves _check_memory_amber_gate is invoked from both routing paths
+    with the correct semantics (t_0c067ccf, wiring the dead import from F1-A).
+    """
+
+    @staticmethod
+    def _high_mem_task(tid="t_high"):
+        return {
+            "id": tid,
+            "title": "high-mem",
+            "assignee": "werner_vogels",
+            "priority": 50.0,
+            "body": "",
+            "workspace_kind": "scratch",
+            "min_resources": {"mem_gb": 8.0, "cpu_cores": 1,
+                              "bedrock_tpm_reservation": 10000},
+        }
+
+    @staticmethod
+    def _ordinary_task(tid="t_ord"):
+        return {
+            "id": tid,
+            "title": "ordinary",
+            "assignee": "werner_vogels",
+            "priority": 50.0,
+            "body": "",
+            "workspace_kind": "scratch",
+            "min_resources": {"mem_gb": 0.5, "cpu_cores": 1,
+                              "bedrock_tpm_reservation": 10000},
+        }
+
+    @staticmethod
+    def _high_memory_flag_task(tid="t_flag"):
+        # Legacy path: no min_resources, just the explicit flag.
+        return {
+            "id": tid,
+            "title": "high-flag",
+            "assignee": "werner_vogels",
+            "priority": 50.0,
+            "body": "",
+            "workspace_kind": "scratch",
+            "high_memory": True,
+        }
+
+    # --- classifier direct assertions ---------------------------------------
+
+    def test_classify_green_when_no_state_signal(self):
+        assert lcd._classify_node_memory_state({}) == "green"
+
+    def test_classify_amber_from_swap_pct_band(self):
+        # Explicitly probe the band boundary: AMBER threshold defaults to 75.
+        state = {"swap_pct": lcd.SWAP_PCT_AMBER_THRESHOLD}
+        assert lcd._classify_node_memory_state(state) == "amber"
+        state_below = {"swap_pct": lcd.SWAP_PCT_AMBER_THRESHOLD - 0.01}
+        assert lcd._classify_node_memory_state(state_below) == "green"
+
+    def test_classify_red_from_swap_pct_band(self):
+        state = {"swap_pct": lcd.SWAP_PCT_RED_THRESHOLD + 0.01}
+        assert lcd._classify_node_memory_state(state) == "red"
+
+    def test_classify_explicit_state_string_wins_over_swap_pct(self):
+        # Explicit signal from a producer should override the raw band.
+        state = {"memory_state": "amber", "swap_pct": 0.0}
+        assert lcd._classify_node_memory_state(state) == "amber"
+
+    # --- helper _check_memory_amber_gate semantics --------------------------
+
+    def test_amber_helper_blocks_high_mem_task(self):
+        node = make_telemetry()
+        task = self._high_mem_task()
+        result = lcd._check_memory_amber_gate(
+            node, task, {"memory_state": "amber"}
+        )
+        assert result is not None
+        probe_name, reason = result
+        assert probe_name == "memory_amber"
+        assert "AMBER" in reason and task["id"] in reason
+
+    def test_amber_helper_admits_ordinary_task(self):
+        node = make_telemetry()
+        result = lcd._check_memory_amber_gate(
+            node, self._ordinary_task(), {"memory_state": "amber"}
+        )
+        assert result is None, (
+            "AMBER should let ordinary (<4 GiB) tasks route — graceful, "
+            "not cliff. Rejecting them would be a regression."
+        )
+
+    def test_amber_helper_blocks_high_memory_flag_task(self):
+        node = make_telemetry()
+        result = lcd._check_memory_amber_gate(
+            node, self._high_memory_flag_task(), {"memory_state": "amber"}
+        )
+        assert result is not None, (
+            "AMBER must honor explicit high_memory=True even when "
+            "min_resources is absent."
+        )
+
+    def test_amber_helper_zero_overhead_on_green(self):
+        # GREEN state — helper returns None fast, no spine consultation. This
+        # is the zero-overhead acceptance criterion. We enforce it by
+        # observing that amber_blocks_task is NOT called when the node is
+        # GREEN (early return before the spine call).
+        node = make_telemetry()
+        with mock.patch.object(lcd, "amber_blocks_task") as spine_call:
+            result = lcd._check_memory_amber_gate(
+                node, self._high_mem_task(), {"swap_pct": 0.0}
+            )
+        assert result is None
+        assert spine_call.call_count == 0, (
+            "GREEN classification must short-circuit BEFORE consulting the "
+            "safety spine — zero overhead is a hard requirement."
+        )
+
+    def test_amber_helper_fail_open_when_spine_unavailable(self):
+        node = make_telemetry()
+        # Simulate ImportError fallback path: amber_blocks_task is None.
+        with mock.patch.object(lcd, "amber_blocks_task", None):
+            result = lcd._check_memory_amber_gate(
+                node, self._high_mem_task(), {"memory_state": "amber"}
+            )
+        assert result is None, (
+            "Missing safety spine must fail open — a broken producer "
+            "must not halt dispatch."
+        )
+
+    def test_amber_helper_disabled_when_master_switch_off(self, monkeypatch):
+        node = make_telemetry()
+        monkeypatch.setattr(lcd, "NERVOUS_SYSTEM_GATES_ENABLED", False)
+        result = lcd._check_memory_amber_gate(
+            node, self._high_mem_task(), {"memory_state": "amber"}
+        )
+        assert result is None
+
+    # --- CALL-SITE proof: fallback_proportional -----------------------------
+
+    def test_fallback_proportional_calls_amber_gate_for_each_node(self):
+        """The dead import is now live: fallback_proportional MUST invoke
+        _check_memory_amber_gate for every eligible node before picking one.
+        """
+        nodes = {
+            "hermes1": make_telemetry(node_id="hermes1"),
+            "hermes2": make_telemetry(node_id="hermes2"),
+        }
+        registry = make_registry()
+        tasks = [self._high_mem_task()]
+
+        # Both nodes report GREEN — we only care that the gate is consulted.
+        probe_states = {"hermes1": {"swap_pct": 0.0},
+                        "hermes2": {"swap_pct": 0.0}}
+
+        with mock.patch.object(
+            lcd, "_check_memory_amber_gate", wraps=lcd._check_memory_amber_gate
+        ) as spy:
+            decisions = lcd.fallback_proportional(
+                tasks, nodes, registry, probe_states=probe_states
+            )
+
+        # Call site MUST have fired once per eligible node for the single task.
+        assert spy.call_count == len(nodes), (
+            f"Expected {len(nodes)} amber-gate consultations "
+            f"(one per eligible node), got {spy.call_count}. "
+            f"The AMBER call site regressed to dead code."
+        )
+        # Sanity: task still routes (both nodes GREEN).
+        assert len(decisions) == 1
+        assert decisions[0].task_id == "t_high"
+
+    def test_fallback_proportional_amber_rejects_high_mem_only(self):
+        """End-to-end: AMBER node blocks the high-mem task, admits the
+        ordinary task, on the same tick. This is the graceful-band semantic.
+        """
+        nodes = {"hermes1": make_telemetry(node_id="hermes1")}
+        registry = make_registry()
+        tasks = [self._high_mem_task("t_h"), self._ordinary_task("t_o")]
+        # Only node is AMBER.
+        probe_states = {"hermes1": {"memory_state": "amber"}}
+
+        decisions = lcd.fallback_proportional(
+            tasks, nodes, registry, probe_states=probe_states
+        )
+        assigned = {d.task_id for d in decisions}
+        assert "t_o" in assigned, (
+            "Ordinary task must still route on AMBER — graceful band."
+        )
+        assert "t_h" not in assigned, (
+            "High-mem task must be rejected on AMBER — this is the whole "
+            "point of the wiring."
+        )
+
+    def test_fallback_proportional_green_admits_high_mem(self):
+        """Regression guard: on a GREEN cluster the wiring must not change
+        the pre-existing routing outcome for high-mem tasks.
+        """
+        nodes = {"hermes1": make_telemetry(node_id="hermes1")}
+        registry = make_registry()
+        tasks = [self._high_mem_task("t_h")]
+        probe_states = {"hermes1": {"swap_pct": 0.0}}
+
+        decisions = lcd.fallback_proportional(
+            tasks, nodes, registry, probe_states=probe_states
+        )
+        assert len(decisions) == 1 and decisions[0].task_id == "t_h"
+
+    # --- CALL-SITE proof: validate_llm_decisions ----------------------------
+
+    def test_validate_llm_decisions_calls_amber_gate(self):
+        """The LLM path must ALSO consult the AMBER gate so the LLM can't
+        route around the graceful band by picking an AMBER node itself.
+        """
+        nodes = {"hermes1": make_telemetry(node_id="hermes1")}
+        tasks = [self._high_mem_task("t_h")]
+        raw = [{
+            "task_id": "t_h",
+            "target_node": "hermes1",
+            "assigned_agent": "werner_vogels",
+            "welfare_score": 0.9,
+            "reasoning": "test",
+        }]
+        # AMBER — the LLM's pick must be dropped.
+        probe_states = {"hermes1": {"memory_state": "amber"}}
+
+        with mock.patch.object(
+            lcd, "_check_memory_amber_gate", wraps=lcd._check_memory_amber_gate
+        ) as spy:
+            validated = lcd.validate_llm_decisions(
+                raw, tasks, nodes, probe_states=probe_states,
+            )
+
+        assert spy.call_count >= 1, (
+            "AMBER call site missing from validate_llm_decisions path."
+        )
+        assert validated == [], (
+            "LLM picked an AMBER node for a high-mem task; validator must "
+            "have dropped it."
+        )
