@@ -299,10 +299,16 @@ def test_wrapper_translates_claimer_to_lock_for_claim_task(sqlite_conn, caplog):
 def test_wrapper_regression_reproduces_pre_fix_typeerror_without_rename(
     sqlite_conn, caplog
 ):
-    """Belt-and-braces: with the rename map emptied, the same call path
-    must once again produce the exact TypeError logged in the bug
-    ticket. This proves the rename is what fixes the bug (not some
-    incidental change elsewhere).
+    """Belt-and-braces: with both the rename map AND the fallback map
+    emptied, the same call path must once again produce the exact
+    TypeError logged in the bug ticket. This proves the translation +
+    fallback pipeline is what fixes the bug (not some incidental change
+    elsewhere).
+
+    Note: patching only ``_MIRROR_KWARG_RENAMES`` is no longer sufficient
+    to reproduce the original failure — the t_67e20953 fallback layer
+    would fill in ``lock`` via ``_fill_missing_kwargs``. Both maps must be
+    emptied to recover the original broken state.
     """
     adapter = _RecordingAdapter()
     wrapped = dw._make_mirror_wrapper(
@@ -311,10 +317,12 @@ def test_wrapper_regression_reproduces_pre_fix_typeerror_without_rename(
         id_passthrough_kw="",
     )
 
-    empty_map: dict[str, dict[str, str]] = {}
+    empty_renames: dict[str, dict[str, str]] = {}
+    empty_fallbacks: dict[str, dict[str, Any]] = {}
     with patch.object(dw, "mirror_enabled", return_value=True), \
          patch.object(dw, "_load_facade", return_value=(MagicMock(), adapter)), \
-         patch.object(dw, "_MIRROR_KWARG_RENAMES", empty_map):
+         patch.object(dw, "_MIRROR_KWARG_RENAMES", empty_renames), \
+         patch.object(dw, "_MIRROR_KWARG_FALLBACKS", empty_fallbacks):
         with caplog.at_level(logging.DEBUG, logger=dw.logger.name):
             result = wrapped(
                 sqlite_conn,
@@ -339,3 +347,115 @@ def test_wrapper_regression_reproduces_pre_fix_typeerror_without_rename(
 
     # Adapter was NOT successfully called.
     assert adapter.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Tests for t_67e20953: missing-lock fallback when claimer omitted entirely
+# --------------------------------------------------------------------------- #
+
+
+def test_fill_missing_kwargs_supplies_lock_for_heartbeat_claim():
+    """_fill_missing_kwargs must supply ``lock=<host:pid>`` when the op
+    is ``heartbeat_claim`` and no ``lock`` (and no ``claimer``) is in
+    kwargs — the case where the SQLite caller omitted ``claimer=``
+    entirely, relying on the internal ``_claimer_id()`` default.
+    """
+    out = dw._fill_missing_kwargs("heartbeat_claim", {"ttl_seconds": 900})
+    assert "lock" in out
+    import os, socket
+    expected = f"{socket.gethostname()}:{os.getpid()}"
+    assert out["lock"] == expected
+    assert out["ttl_seconds"] == 900  # existing kwargs preserved
+
+
+def test_fill_missing_kwargs_does_not_overwrite_existing_lock():
+    """When ``lock`` is already present (set by ``_rename_kwargs``
+    translating an explicit ``claimer=``), the fallback must not
+    overwrite it.
+    """
+    explicit_lock = "hermes1:9999"
+    out = dw._fill_missing_kwargs(
+        "heartbeat_claim",
+        {"lock": explicit_lock, "ttl_seconds": 60},
+    )
+    assert out["lock"] == explicit_lock
+
+
+def test_fill_missing_kwargs_no_op_for_other_ops():
+    """Ops without an entry in ``_MIRROR_KWARG_FALLBACKS`` are returned
+    unchanged (identity).
+    """
+    inp = {"profile": "jeff_dean", "ttl_seconds": 300}
+    out = dw._fill_missing_kwargs("claim_task", inp)
+    assert out == inp
+    out2 = dw._fill_missing_kwargs("complete_task", {"task_id": "t_abc"})
+    assert out2 == {"task_id": "t_abc"}
+
+
+def test_fill_missing_kwargs_does_not_mutate_input():
+    """Helper must return a fresh dict; caller cannot observe aliasing."""
+    inp = {"ttl_seconds": 60}
+    out = dw._fill_missing_kwargs("heartbeat_claim", inp)
+    assert "lock" not in inp      # original untouched
+    assert "lock" in out
+    assert out is not inp
+
+
+def test_wrapper_no_claimer_kwarg_uses_fallback_lock_for_heartbeat_claim(
+    sqlite_conn, caplog
+):
+    """End-to-end regression for t_67e20953: when the SQLite caller omits
+    ``claimer=`` entirely (the most common real-world call path — the
+    gateway heartbeat loop never passes ``claimer=``), the wrapper must
+    still call the DuckDB adapter with a valid ``lock=<host:pid>`` and
+    NOT raise a TypeError.
+
+    Pre-fix: every gateway heartbeat fired a TypeError and logged an
+    ERROR every 60 seconds, creating an ERR-DRIVE-01 ticket storm.
+    """
+    adapter = _RecordingAdapter()
+
+    def _fake_hb_no_claimer(
+        conn,
+        task_id: str,
+        *,
+        ttl_seconds=None,
+        claimer=None,
+    ) -> bool:
+        # Real SQLite path resolves lock = claimer or _claimer_id()
+        return True
+
+    wrapped = dw._make_mirror_wrapper(
+        _fake_hb_no_claimer,
+        adapter_op_name="heartbeat_claim",
+        id_passthrough_kw="",
+    )
+
+    with patch.object(dw, "mirror_enabled", return_value=True), \
+         patch.object(dw, "_load_facade", return_value=(MagicMock(), adapter)):
+        with caplog.at_level(logging.DEBUG, logger=dw.logger.name):
+            result = wrapped(
+                sqlite_conn,
+                "t_abc123",
+                ttl_seconds=900,
+                # NOTE: no ``claimer=`` — the failing production call path
+            )
+
+    assert result is True
+
+    # Mirror must have been called exactly once with a valid lock.
+    assert len(adapter.calls) == 1
+    op, args, kwargs = adapter.calls[0]
+    assert op == "heartbeat_claim"
+    assert args == ("t_abc123",)
+    # lock must be a non-empty host:pid string
+    assert isinstance(kwargs["lock"], str)
+    assert ":" in kwargs["lock"]
+    assert kwargs["ttl_seconds"] == 900
+
+    # No ERROR logs — the TypeError must not propagate.
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors == [], (
+        "wrapper must not log ERROR after fix — got: "
+        + repr([r.getMessage() for r in errors])
+    )

@@ -413,6 +413,63 @@ def _rename_kwargs(op_name: str, kwargs: dict) -> dict:
     return out
 
 
+def _mirror_claimer_id() -> str:
+    """Return ``host:pid`` — same logic as ``kanban_db._claimer_id()``.
+
+    Duplicated here to avoid importing the private function from
+    ``hermes_cli.kanban_db`` (circular-import risk + private API).
+    Used as a fallback default for ``heartbeat_claim``'s required
+    ``lock=`` kwarg when the SQLite caller omits ``claimer=`` (taking
+    its own default of ``None → _claimer_id()`` internally).
+    """
+    import socket
+
+    try:
+        host = socket.gethostname() or "unknown"
+    except Exception:
+        host = "unknown"
+    return f"{host}:{os.getpid()}"
+
+
+# Per-op fallback factories for adapter-required kwargs that the SQLite
+# caller may omit (because SQLite resolves them internally as defaults).
+# Applied AFTER ``_rename_kwargs`` so translation wins over fallback.
+# Key: adapter_op_name; value: {kwarg_name: callable (no args → value)}.
+#
+# ``heartbeat_claim`` (t_67e20953): DuckDB adapter makes ``lock`` a
+# required keyword-only argument; SQLite's ``claimer`` param defaults to
+# ``None`` and resolves to ``_claimer_id()`` inside the function. When
+# the caller omits ``claimer=`` altogether ``_rename_kwargs`` has nothing
+# to translate and DuckDB gets called without ``lock=``, raising:
+#
+#   TypeError: heartbeat_claim() missing 1 required
+#              keyword-only argument: 'lock'
+#
+# The fix: if ``lock`` is still absent after renaming, fill it in with
+# the same ``host:pid`` the SQLite path would have used.
+_MIRROR_KWARG_FALLBACKS: dict[str, dict[str, Any]] = {
+    "heartbeat_claim": {"lock": _mirror_claimer_id},
+}
+
+
+def _fill_missing_kwargs(op_name: str, kwargs: dict) -> dict:
+    """Fill in any adapter-required kwargs omitted by the SQLite caller.
+
+    Runs AFTER ``_rename_kwargs`` so explicit translations win.  Only
+    fills keys that are absent; never overwrites an already-present
+    value.  Fallback values are produced by calling the zero-arg
+    callable stored in ``_MIRROR_KWARG_FALLBACKS``.
+    """
+    fallbacks = _MIRROR_KWARG_FALLBACKS.get(op_name)
+    if not fallbacks:
+        return kwargs
+    out = dict(kwargs)
+    for key, factory in fallbacks.items():
+        if key not in out:
+            out[key] = factory()
+    return out
+
+
 def _make_mirror_wrapper(
     original: Callable,
     adapter_op_name: str,
@@ -466,6 +523,12 @@ def _make_mirror_wrapper(
             # drops still-valid values (t_192a3e6b: ``heartbeat_claim``
             # required ``lock=`` after the ``claimer=`` was thrown away).
             mirror_kwargs = _rename_kwargs(adapter_op_name, mirror_kwargs)
+            # Fill in any adapter-required kwargs the SQLite caller omits
+            # (t_67e20953: ``heartbeat_claim`` requires ``lock=`` but
+            # SQLite callers may omit ``claimer=``, resolving it
+            # internally — the mirror wrapper must supply the same
+            # ``host:pid`` fallback before the filtered-kwargs gate).
+            mirror_kwargs = _fill_missing_kwargs(adapter_op_name, mirror_kwargs)
             mirror_kwargs = _filtered_kwargs(adapter_fn, mirror_kwargs)
             try:
                 adapter_fn(duck, *args, **mirror_kwargs)
