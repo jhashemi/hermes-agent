@@ -408,7 +408,16 @@ def test_missing_reason_payload_falls_back_to_unknown(kanban_home):
 def test_dependency_wait_trigger_is_recognised(kanban_home):
     """Both trigger kinds (``claim_rejected`` and ``dependency_wait``)
     must fire the escalation path. Guards the parity of the
-    ``_TRIGGER_KINDS`` list against future drift."""
+    ``_TRIGGER_KINDS`` list against future drift.
+
+    Note (t_d5c662fb): the escalation path now filters typed
+    ``dependency_wait`` events (those with ``waiting_for`` /
+    ``waiting_for_commit`` / ``waiting_for_event`` /
+    ``waiting_for_condition``). This test uses a BARE
+    ``dependency_wait`` (no typed field) so it still escalates —
+    matching the plain dispatcher-skip stall pattern this trigger was
+    added to catch.
+    """
     conn = _open(kanban_home)
     now = 1_800_000_000
     task_id = "t_depwait"
@@ -422,3 +431,266 @@ def test_dependency_wait_trigger_is_recognised(kanban_home):
     result = sw.sweep_once(conn, now=now)
     assert result.escalated_count == 1
     assert result.escalated[0].trigger_kind == "dependency_wait"
+
+
+# ---------------------------------------------------------------------------
+# t_d5c662fb: Layer 1 — typed dependency_wait is NEVER escalated.
+# ---------------------------------------------------------------------------
+
+
+def _append_typed_dependency_wait(
+    conn,
+    *,
+    task_id: str,
+    created_at: int,
+    waiting_for: str | None = None,
+    waiting_for_commit: str | None = None,
+    waiting_for_event: str | None = None,
+    waiting_for_condition: str | None = None,
+    reason: str = "waiting_on_parent",
+) -> int:
+    """Insert a ``dependency_wait`` event whose payload carries at
+    least one typed handoff field.
+
+    Mirrors the payload shape ``block_task(kind='dependency', ...)``
+    emits (see kanban_db.py around line 8145). We build the payload
+    here instead of calling ``block_task`` so we can control the
+    ``created_at`` — the sweep filter is age-window sensitive.
+    """
+    import json as _json
+
+    payload: dict = {"reason": reason, "kind": "dependency"}
+    if waiting_for is not None:
+        payload["waiting_for"] = waiting_for
+    if waiting_for_commit is not None:
+        payload["waiting_for_commit"] = waiting_for_commit
+    if waiting_for_event is not None:
+        payload["waiting_for_event"] = waiting_for_event
+    if waiting_for_condition is not None:
+        payload["waiting_for_condition"] = waiting_for_condition
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
+            "VALUES (?, NULL, ?, ?, ?)",
+            (task_id, "dependency_wait", _json.dumps(payload), created_at),
+        )
+        row = conn.execute(
+            "SELECT id FROM task_events WHERE task_id = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        return int(row["id"])
+
+
+@pytest.mark.parametrize(
+    "typed_field",
+    ["waiting_for", "waiting_for_commit", "waiting_for_event", "waiting_for_condition"],
+)
+def test_typed_dependency_wait_is_never_escalated(kanban_home, typed_field):
+    """Regression for t_d5c662fb: a ``dependency_wait`` event carrying
+    any one of the typed handoff fields represents a DESIGNED wait
+    with an auto-resume path in ``recompute_ready`` /
+    ``_dependency_waiting_for_satisfied``. The stall-watchdog must
+    NOT escalate it — doing so clobbers ``block_kind='dependency'``,
+    bypasses the VFE-DISPATCH-01 promotion guard, and creates an
+    infinite respawn loop that burns one full LLM worker run per
+    15-min sweep tick.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = f"t_typed_{typed_field}"
+
+    _make_ticket(conn, task_id=task_id, status="todo", created_at=now - 7200)
+    _append_typed_dependency_wait(
+        conn,
+        task_id=task_id,
+        created_at=now - 300,
+        **{typed_field: "t_target_that_never_completes"},
+    )
+
+    result = sw.sweep_once(conn, now=now)
+
+    # Escalation candidate was scanned then filtered out — NOT counted
+    # as considered. The invariant we care about is: no escalation
+    # writes, no status flip, and NO extra ``stall_escalated`` /
+    # ``blocked`` events emitted.
+    assert result.considered == 0
+    assert result.escalated_count == 0
+    assert _status(conn, task_id) == "todo"
+    stall_evts = [e for e in _events(conn, task_id) if e["kind"] == "stall_escalated"]
+    assert stall_evts == []
+    blocked_evts = [e for e in _events(conn, task_id) if e["kind"] == "blocked"]
+    assert blocked_evts == []
+
+
+def test_typed_dependency_wait_with_empty_string_still_escalates(kanban_home):
+    """Empty-string typed fields ("waiting_for": "") don't count as
+    typed — an accidental empty value should not confer exemption.
+    A bare ``dependency_wait`` payload still escalates.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_empty_typed"
+
+    _make_ticket(conn, task_id=task_id, status="todo", created_at=now - 7200)
+    _append_typed_dependency_wait(
+        conn,
+        task_id=task_id,
+        created_at=now - 300,
+        waiting_for="",  # empty string — treated as absent
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+    assert _status(conn, task_id) == "blocked"
+
+
+def test_mixed_typed_and_bare_dependency_wait(kanban_home):
+    """When two tickets are candidates in the same sweep — one with a
+    typed ``dependency_wait``, one with a bare ``dependency_wait`` —
+    only the bare one is escalated. Guards against overreach of the
+    Layer 1 filter (e.g. accidentally exempting the whole kind).
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+
+    _make_ticket(conn, task_id="t_typed", status="todo", created_at=now - 7200)
+    _append_typed_dependency_wait(
+        conn, task_id="t_typed", created_at=now - 300,
+        waiting_for="t_dependency_target",
+    )
+
+    _make_ticket(conn, task_id="t_bare", status="todo", created_at=now - 7200)
+    _append_trigger(
+        conn, task_id="t_bare", kind="dependency_wait",
+        created_at=now - 300, reason="dispatcher_skip_no_typed_field",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+
+    assert result.escalated_count == 1
+    assert result.escalated[0].task_id == "t_bare"
+    assert _status(conn, "t_typed") == "todo"
+    assert _status(conn, "t_bare") == "blocked"
+
+
+# ---------------------------------------------------------------------------
+# t_d5c662fb: Layer 2 — escalation emits a ``blocked`` event that makes
+# ``recompute_ready`` respect the stall block instead of silently
+# undoing it on the next tick.
+# ---------------------------------------------------------------------------
+
+
+def test_stall_escalation_emits_blocked_event(kanban_home):
+    """Regression for t_d5c662fb Layer 2: the escalation must emit a
+    ``blocked`` event alongside ``stall_escalated`` so downstream
+    predicates (``_has_sticky_block``, ``_has_outstanding_governance_gate``)
+    can see the block. Without this event, ``recompute_ready`` on the
+    next tick silently promotes the row back to ``ready`` because
+    parents-done + no-governance-gate + failure-count-ok evaluates
+    True, restarting the respawn loop.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_layer2_blocked_event"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+
+    evts = _events(conn, task_id)
+    blocked_evts = [e for e in evts if e["kind"] == "blocked"]
+    stall_evts = [e for e in evts if e["kind"] == "stall_escalated"]
+
+    # Exactly one blocked event, emitted in the same escalation txn.
+    assert len(blocked_evts) == 1
+    assert len(stall_evts) == 1
+
+    payload = blocked_evts[0]["payload"]
+    # ``kind`` must be a governance kind so
+    # ``_has_outstanding_governance_gate`` fires. ``source`` marks it
+    # as watchdog-emitted for downstream tools.
+    assert payload["kind"] == "needs_input"
+    assert payload["source"] == "stall_watchdog"
+    assert payload["prev_status"] == "ready"
+    assert payload["trigger_kind"] == "claim_rejected"
+
+    # Ordering matters for readability: stall_escalated first, then
+    # blocked. Both after the commented event.
+    kinds_in_order = [e["kind"] for e in evts]
+    assert kinds_in_order.index("stall_escalated") < kinds_in_order.index("blocked")
+
+
+def test_recompute_ready_respects_stall_escalation(kanban_home):
+    """End-to-end regression for the t_d5c662fb infinite-respawn loop:
+    after the stall-watchdog escalates a ticket, ``recompute_ready``
+    on the next tick MUST NOT silently promote it back to ``ready``.
+    Before the Layer 2 fix, the direct UPDATE flipped status to
+    ``blocked`` but emitted no ``blocked`` event —
+    ``_has_outstanding_governance_gate`` saw nothing, parents were
+    (trivially) done, and the row got re-promoted. Now the
+    watchdog-emitted ``blocked`` event carries a governance kind, so
+    the governance-gate predicate fires and blocks re-promotion until
+    an explicit ``unblock_task`` (which emits ``unblocked``) clears
+    it.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_loop_regression"
+
+    # Stall setup: old ticket, recent trigger, no parents.
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+    assert _status(conn, task_id) == "blocked"
+
+    # Simulate the recompute_ready call that runs after every complete /
+    # unblock / delete / archive path. Before Layer 2 this silently
+    # promoted the row back to ``ready`` and burned a fresh LLM run.
+    promoted = kb.recompute_ready(conn)  # returns count of promotions
+    # We don't assert exact count (other test rows may or may not
+    # exist), but the specific row must remain blocked.
+    assert _status(conn, task_id) == "blocked", (
+        f"recompute_ready promoted a watchdog-escalated task back to ready "
+        f"(promoted={promoted}); Layer 2 governance-gate emission failed"
+    )
+
+    # And the governance-gate predicate agrees.
+    assert sw._kb._has_outstanding_governance_gate(conn, task_id) is True
+
+
+def test_unblock_task_clears_stall_escalation(kanban_home):
+    """The exit path for a watchdog-escalated ticket is ``unblock_task``,
+    identical to any other governance-blocked ticket. Emitting
+    ``unblocked`` clears the governance-gate predicate and lets
+    ``recompute_ready`` promote again.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_unblock_after_stall"
+
+    _make_ticket(conn, task_id=task_id, status="ready", created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="claim_rejected",
+        created_at=now - 600, reason="parents_not_done",
+    )
+
+    sw.sweep_once(conn, now=now)
+    assert _status(conn, task_id) == "blocked"
+    assert sw._kb._has_outstanding_governance_gate(conn, task_id) is True
+
+    # Operator unblocks — kanban_db emits the ``unblocked`` event and
+    # flips the status to ready.
+    kb.unblock_task(conn, task_id)
+    assert sw._kb._has_outstanding_governance_gate(conn, task_id) is False
+    assert _status(conn, task_id) == "ready"

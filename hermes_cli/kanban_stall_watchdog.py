@@ -79,11 +79,40 @@ logger = logging.getLogger(__name__)
 # (unassigned, unknown_profile, per_profile_capped, assign_failed).
 # All three are trigger events for the stall-watchdog: a ticket that
 # keeps generating one of these without ever transitioning is stuck.
+#
+# CAVEAT — TYPED dependency_wait (t_d5c662fb, 2026-08-31):
+# ``dependency_wait`` events emitted by ``block_task(kind='dependency',
+# waiting_for=X)`` carry a typed handoff field (one of
+# :data:`_TYPED_DEPENDENCY_WAIT_FIELDS`). These represent DESIGNED waiting
+# — the auto-resume path in ``recompute_ready`` /
+# ``_dependency_waiting_for_satisfied`` fires when the awaited target
+# transitions to done — and MUST NOT be escalated. The watchdog's direct
+# UPDATE would clobber ``block_kind='dependency'`` → ``'needs_input'``,
+# which bypasses the VFE-DISPATCH-01 promotion guard and produces an
+# infinite respawn loop (documented on t_d5c662fb). Bare
+# ``dependency_wait`` events (no typed field — plain dispatcher skip)
+# stay triggerable so genuine stalls still surface. Filter happens
+# post-scan in :func:`_iter_candidate_tasks`, not by pruning
+# :data:`_TRIGGER_KINDS`, so the SQL stays cheap and the exemption is
+# payload-shape-based, not kind-based.
 _TRIGGER_KINDS: tuple[str, ...] = (
     "claim_rejected",
     "dependency_wait",
     "dispatch_skipped",
 )
+
+# Typed handoff fields on a ``dependency_wait`` payload. Presence of ANY
+# of these means the worker registered a machine-checkable predicate for
+# auto-resume — see ``block_task`` in kanban_db.py around line 8145 for
+# the payload construction, and ``_dependency_waiting_for_satisfied`` for
+# the auto-resume side. Kept as a module-level frozenset so tests and
+# operators can reference the exact list.
+_TYPED_DEPENDENCY_WAIT_FIELDS: frozenset[str] = frozenset({
+    "waiting_for",
+    "waiting_for_commit",
+    "waiting_for_event",
+    "waiting_for_condition",
+})
 
 # Statuses we're willing to auto-escalate. running/blocked/triage/done
 # are all off-limits — a running task has a live worker (blocking it
@@ -194,6 +223,20 @@ def _iter_candidate_tasks(
     )
     params: list = list(_TRIGGER_KINDS) + [window_cutoff] + list(_ESCALATABLE_STATUSES) + [age_cutoff]
     for row in conn.execute(sql, params).fetchall():
+        payload_raw = row["event_payload"]
+        # Layer 1 exemption (t_d5c662fb): a ``dependency_wait`` whose
+        # payload carries a typed handoff field is DESIGNED waiting with
+        # a machine-checkable auto-resume path. Escalating it would
+        # clobber ``block_kind='dependency'`` and produce a respawn
+        # loop. Skip these silently — the ``recompute_ready`` /
+        # ``_dependency_waiting_for_satisfied`` machinery will promote
+        # them when the awaited target finishes. Bare
+        # ``dependency_wait`` events (no typed field) still fall
+        # through and remain escalatable.
+        if row["event_kind"] == "dependency_wait" and _is_typed_dependency_wait(
+            payload_raw
+        ):
+            continue
         yield {
             "task_id": row["task_id"],
             "status": row["status"],
@@ -201,8 +244,44 @@ def _iter_candidate_tasks(
             "event_id": int(row["event_id"] or 0),
             "event_kind": str(row["event_kind"]),
             "event_created_at": int(row["event_created_at"] or 0),
-            "event_payload": row["event_payload"],
+            "event_payload": payload_raw,
         }
+
+
+def _is_typed_dependency_wait(event_payload_json: Optional[str]) -> bool:
+    """True when a ``dependency_wait`` event payload carries at least one
+    of :data:`_TYPED_DEPENDENCY_WAIT_FIELDS`.
+
+    Presence of any typed field means the worker registered a
+    machine-checkable predicate (target task id, commit hash, event
+    name, or free-form condition) that the auto-resume machinery in
+    :func:`kanban_db.recompute_ready` /
+    :func:`kanban_db._dependency_waiting_for_satisfied` will observe.
+    Escalating such a task is destructive: it clobbers
+    ``block_kind='dependency'`` and re-promotes to ``ready`` on the
+    next tick (see t_d5c662fb evidence). Empty-string values count as
+    absent so a worker that passes ``waiting_for=""`` accidentally
+    doesn't get free exemption.
+
+    Parses defensively — anything unparseable is treated as bare
+    (i.e. NOT typed, so the sweep can still fire). Best-effort mirrors
+    :func:`_extract_reason`.
+    """
+    if not event_payload_json:
+        return False
+    try:
+        import json as _json
+
+        obj = _json.loads(event_payload_json)
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(obj, dict):
+        return False
+    for field_name in _TYPED_DEPENDENCY_WAIT_FIELDS:
+        value = obj.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return True
+    return False
 
 
 def _already_escalated(
@@ -372,6 +451,38 @@ def _escalate_one(
             "sweep_run": sweep_run_iso,
         }
         _append_event(conn, task_id, "stall_escalated", payload)
+
+        # Layer 2 (t_d5c662fb): also emit a ``blocked`` event so
+        # downstream promotion guards can see this escalation. The
+        # historical bug: the direct UPDATE above flipped the row to
+        # ``blocked`` / ``block_kind='needs_input'`` but NEVER emitted
+        # the ``blocked`` event that :func:`_has_sticky_block` and
+        # :func:`_has_outstanding_governance_gate` scan for. Result:
+        # ``recompute_ready`` on the next tick saw a blocked row with
+        # no governance-gate evidence, parents were done, and it
+        # silently re-promoted to ``ready`` — restarting the LLM
+        # respawn loop. Emitting the event here makes the escalation
+        # STICKY: only an explicit :func:`unblock_task` (which emits
+        # an ``unblocked`` event) can clear it, matching the semantics
+        # a manual :func:`block_task` call would produce.
+        #
+        # ``kind='needs_input'`` mirrors the ``block_kind`` column we
+        # just wrote and lands the payload in
+        # :data:`_GOVERNANCE_BLOCK_KINDS` so
+        # :func:`_has_outstanding_governance_gate` fires. ``source``
+        # lets dashboards / audit tools distinguish watchdog
+        # escalations from manual operator blocks.
+        _append_event(
+            conn, task_id, "blocked",
+            {
+                "kind": "needs_input",
+                "source": "stall_watchdog",
+                "reason": reason,
+                "trigger_kind": trigger_kind,
+                "trigger_event_id": trigger_event_id,
+                "prev_status": prev_status,
+            },
+        )
 
     return EscalationReport(
         task_id=task_id,
