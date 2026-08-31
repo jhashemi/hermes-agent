@@ -18,12 +18,16 @@ We drive every one of the fourteen write ops in a single scenario and
 snapshot the ``op`` sequence so future kernel changes cannot silently
 add or drop a seam site.
 
-SQLite ↔ DuckDB row parity under dual-mode is separately covered by
-:mod:`tests.hermes_cli.test_kanban_dual_write_lock_contention` and
-:mod:`tests.hermes_cli.test_kanban_dual_write_per_op_conn`; those tests
-exercise the current dual-write shim (still live per Hamilton's
-ordering constraint) and will migrate to consuming this seam once the
-in-kernel shim is reverted (P2 step 7).
+SQLite ↔ DuckDB row parity under dual-mode is verified live on gateway
+hosts against the ``vfe-kanban-dual-write`` plugin's mirror (the named
+consumer of this seam); the plugin's own tests
+(``~/.hermes/plugins/vfe-kanban-dual-write/tests/test_mirror.py``)
+cover unit-level dispatch, id-passthrough, framing-collision renames,
+and the sqlite-mode short-circuit.  Prior to the P2 revert the
+in-kernel ``hermes_cli/kanban_dual_write`` shim carried
+``test_kanban_dual_write_lock_contention`` and
+``test_kanban_dual_write_per_op_conn``; both moved with the shim's
+behavior into the plugin's test suite.
 """
 
 from __future__ import annotations
