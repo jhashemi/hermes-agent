@@ -310,6 +310,44 @@ def _filtered_kwargs(fn: Callable, kwargs: dict) -> dict:
 # Wrapping the outer dispatcher's write ops
 # --------------------------------------------------------------------------- #
 
+# Per-op id-passthrough unwrap: some SQLite write ops return a rich
+# object rather than the bare primary key the mirror insert must bind.
+# ``claim_task`` (t_3f87ac16) returns the claimed ``Task`` dataclass;
+# its ``current_run_id`` is the freshly-minted run id that the DuckDB
+# ``task_runs`` insert must reuse to keep primary keys identical across
+# backends. Forwarding the whole object instead made DuckDB's binder
+# throw ``NotImplementedException: Unable to transform python value of
+# type '<class 'hermes_cli.kanban_db.Task'>'`` on every dual-mode claim
+# (71 ERROR tracebacks in errors.log on 2026-08-22, ERR-DRIVE-01 loop).
+_ID_PASSTHROUGH_UNWRAP: dict[str, str] = {
+    "claim_task": "current_run_id",
+}
+
+
+# Primitives DuckDB can bind directly. Anything else surviving the
+# unwrap stage is dropped (with a WARNING — no traceback, so it cannot
+# re-feed the ERR-DRIVE-01 triage probe) rather than forwarded to the
+# binder, which would throw the transform error again.
+_ID_PASSTHROUGH_BINDABLE = (str, int, float)
+
+
+def _mirror_id_for(op_name: str, result: Any) -> Optional[Any]:
+    """Reduce an op's SQLite return value to the mirror bind value.
+
+    Primitives pass through untouched (``create_task`` -> task id str,
+    ``add_comment`` -> row int). Ops listed in ``_ID_PASSTHROUGH_UNWRAP``
+    have their return value reduced via the named attribute
+    (``claim_task`` -> ``Task.current_run_id``). Any object that still
+    is not a bindable primitive is returned as-is so the caller's
+    bindability guard drops it with a WARNING instead of letting the
+    DuckDB binder throw the transform error.
+    """
+    attr = _ID_PASSTHROUGH_UNWRAP.get(op_name)
+    if attr is not None and not isinstance(result, _ID_PASSTHROUGH_BINDABLE):
+        return getattr(result, attr, None)
+    return result
+
+
 # Map: outer-fn-name -> adapter-fn-name (usually the same).
 # Callers pass task_id (or row_id / run_id) via SQLite return value so
 # the mirror insert lands the same primary-key value.
@@ -366,7 +404,20 @@ def _make_mirror_wrapper(
             # must reuse to keep IDs identical across backends.
             mirror_kwargs = dict(kwargs)
             if id_passthrough_kw and result is not None:
-                mirror_kwargs[id_passthrough_kw] = result
+                mirror_id = _mirror_id_for(adapter_op_name, result)
+                if isinstance(mirror_id, _ID_PASSTHROUGH_BINDABLE):
+                    mirror_kwargs[id_passthrough_kw] = mirror_id
+                else:
+                    # Never forward an unbindable object to the DuckDB
+                    # binder — that is the t_3f87ac16 failure mode. The
+                    # mirror op still runs (adapter mints its own id or
+                    # the op no-ops); we do not fail the SQLite result.
+                    logger.warning(
+                        "kanban dual-write: op %s returned %s; cannot "
+                        "bind it as %s= for the mirror (dropped)",
+                        adapter_op_name, type(result).__name__,
+                        id_passthrough_kw,
+                    )
             mirror_kwargs = _filtered_kwargs(adapter_fn, mirror_kwargs)
             try:
                 adapter_fn(duck, *args, **mirror_kwargs)
