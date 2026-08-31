@@ -1859,6 +1859,19 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             # host the same way determine_api_mode() and _detect_api_mode_for_url()
             # do on the primary path. (#32243, #49247)
             fb_api_mode = "anthropic_messages"
+        elif (
+            base_url_hostname(fb_base_url) == "api.kimi.com"
+            and "/coding" in fb_base_url.lower()
+        ):
+            # Kimi Code's api.kimi.com/coding endpoint speaks the Anthropic
+            # Messages wire (Claude Code's native request shape) — it does
+            # NOT serve the OpenAI /chat/completions shim. Posting the
+            # OpenAI wire there is a deterministic 404 and the retry loop
+            # burns the full attempt budget before advancing. Match the
+            # rule the primary path enforces in
+            # hermes_cli/runtime_provider._detect_api_mode_for_url().
+            # Same bug class as #32243/#49247 (missed host).
+            fb_api_mode = "anthropic_messages"
         elif _fb_is_azure:
             # Azure OpenAI serves gpt-5.x on /chat/completions — does NOT
             # support the Responses API. Stay on chat_completions.
