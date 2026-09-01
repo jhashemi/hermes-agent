@@ -16,11 +16,25 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 import uuid
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger("voice_agents_plugin.jetstream")
+
+# ---------------------------------------------------------------------------
+# Identity collapse (mirror of voice_agents_plugin.py) — this module is also
+# loadable under multiple names: `jetstream_bridge` (editable install / tests)
+# and `agents.jetstream_bridge` (if a gateway packaging ever provides the
+# parent `agents` package, the plugin's relative import resolves there).
+# Without aliasing, the relative-import fallback failing open would produce
+# TWO JetStreamBridge singletons (two NATS clients, split audit streams).
+# ---------------------------------------------------------------------------
+_self = sys.modules[__name__]
+sys.modules.setdefault("agents.jetstream_bridge", _self)
+sys.modules.setdefault("jetstream_bridge", _self)
+logger.debug("[voice-agents.jet] identity alias registered from %s", __name__)
 
 # NATS endpoint (env-overridable for cluster / multi-host topology — mirrors
 # VOICE_BRIDGE_URL in voice_agents_plugin).
@@ -240,9 +254,22 @@ def derive_room(agent_id: str, user_id: str) -> str:
 # Per-room FSM registry — NOTE: intentionally NOT the voice_agents_plugin
 # agent _registry/_sessions state (those live in voice_agents_plugin.py and are
 # identity-collapsed across import names). This one maps room name -> ModeFSM
-# for handoff state and has an entirely different key domain; kept separate
-# deliberately (dedupe reviewed 2026-08-31, D-006179 lineage).
+# for handoff state (a different key domain); kept separate deliberately
+# (dedupe reviewed 2026-08-31, D-006179 lineage).
+#
+# Bounded like _sessions: get_room_fsm() lazily CREATES one FSM per room ever
+# touched and nothing evicted them, so a long-lived gateway process grows this
+# dict without limit. Oldest-inserted rooms are dropped past the bound (dicts
+# preserve insertion order). VOICE_FSMS_MAX env, default 512.
 _room_fsm_registry: dict[str, Any] = {}
+_ROOM_FSM_MAX = int(os.environ.get("VOICE_FSMS_MAX", "512"))
+
+
+def _evict_room_fsms_locked() -> None:
+    while len(_room_fsm_registry) > _ROOM_FSM_MAX:
+        oldest = next(iter(_room_fsm_registry))
+        del _room_fsm_registry[oldest]
+        logger.debug("[voice-agents.jet] evicted FSM for room %s (bound=%d)", oldest, _ROOM_FSM_MAX)
 
 
 def get_or_start_bridge() -> JetStreamBridge:
@@ -295,11 +322,22 @@ def get_room_fsm(room: str):
     try:
         from voice_gateway_bridge import GatewayBridgeMode  # type: ignore
     except ImportError:
-        # Try absolute path injection (gateway plugins run with path set up)
+        # Try absolute path injection (gateway plugins run with path set up).
+        # Env-first (EAF_SRC/EAF_ROOT), then documented literal default —
+        # mirrors the AnalogTextInjector resolution in voice_agents_plugin.
         import sys as _sys
         from pathlib import Path as _Path
-        framework_src = _Path("/home/ubuntu/executive_agents_framework/src")
-        if framework_src.exists() and str(framework_src) not in _sys.path:
+        framework_src: "Optional[_Path]" = None
+        eaf_override = os.environ.get("EAF_SRC") or os.environ.get("EAF_ROOT")
+        if eaf_override:
+            candidate = _Path(eaf_override) / "src"
+            if candidate.exists():
+                framework_src = candidate
+        if framework_src is None:
+            literal = _Path("/home/ubuntu/executive_agents_framework/src")
+            if literal.exists():
+                framework_src = literal
+        if framework_src is not None and str(framework_src) not in _sys.path:
             _sys.path.insert(0, str(framework_src))
         try:
             from voice_gateway_bridge import GatewayBridgeMode  # type: ignore
@@ -312,6 +350,7 @@ def get_room_fsm(room: str):
 
     fsm = GatewayBridgeMode(on_transition=_on_transition)
     _room_fsm_registry[room] = fsm
+    _evict_room_fsms_locked()
     return fsm
 
 
