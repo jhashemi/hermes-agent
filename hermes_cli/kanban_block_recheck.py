@@ -70,6 +70,7 @@ from typing import Iterator, Optional
 
 from hermes_cli import kanban_db as _kb
 from hermes_cli.kanban_db import (
+    _GOVERNANCE_BLOCK_KINDS,
     _append_event,
     unblock_task,
     write_txn,
@@ -462,7 +463,32 @@ def _classify(candidate: dict, *, now: int) -> str:
     if kind == "gave_up":
         return "A"
 
-    # kind == 'blocked' — pick a policy from the reason text.
+    # kind == 'blocked' — inspect the payload's ``kind`` field FIRST.
+    #
+    # Governance-block kinds (``needs_input``, ``capability``) are by
+    # definition human-gated: only an explicit operator ``kanban_unblock``
+    # (or a direct SQL override) may clear them. Auto-unblocking these
+    # via Policy B/C — even when the reason text incidentally mentions
+    # "memory" / "swap" / "before <date>" as CONTEXT (host details, not
+    # the block precondition itself) — silently violates the phantom-
+    # override invariant. RCA: t_53fbabd5 on adr-006b-phase-2 was blocked
+    # ``needs_input`` with a reason describing host memory constraints;
+    # Policy B's ``_RE_PRECONDITION`` matched "memory ... insufficient"
+    # against that context and auto-unblocked the ticket 41 minutes
+    # later, whereupon the worker ran on a model that was not one of
+    # the gated GO/NO-GO options. See task t_604eec8f.
+    #
+    # This short-circuit must come BEFORE the reason-text regex path so
+    # the safe default (skip → operator intervention required) always
+    # wins for governance kinds. ``_GOVERNANCE_BLOCK_KINDS`` is the same
+    # frozenset ``_has_outstanding_governance_gate`` uses, so the two
+    # gates stay in sync.
+    payload_kind = _payload(candidate).get("kind")
+    if isinstance(payload_kind, str) and payload_kind in _GOVERNANCE_BLOCK_KINDS:
+        return "E"
+
+    # kind == 'blocked' with a non-governance payload kind — pick a
+    # policy from the reason text.
     reason = _reason_of(candidate)
     if not reason:
         return "E"
