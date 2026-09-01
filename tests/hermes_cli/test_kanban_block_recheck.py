@@ -842,3 +842,131 @@ def test_prometheus_counter_increments_on_action(kanban_home):
     brc._observe_action(action)
     after = labels._value.get()
     assert after == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Deliberate-block supersession (incident 2026-09-01, wave 20260901g)
+# ---------------------------------------------------------------------------
+#
+# Production incident: an orchestrator agent deliberately re-blocked
+# okr-vfe card t_okr_trial_command_fully_working (operator-tier scope,
+# Lanes canon: Dean = deploy owner). Two minutes later the block-recheck
+# sweep's Policy A joined the card to an 11-day-old stale dispatcher
+# ``gave_up`` (pid 802259, 2026-08-14) and AUTO-UNBLOCKED it — the
+# deliberate block was written as kind ``task.blocked``, which
+# ``_TRIGGER_KINDS`` did not recognize, so it was invisible to
+# candidate selection and the stale ``gave_up`` governed instead.
+# Policy A never reads the block reason, so no wording could have
+# saved the card.
+
+
+def test_deliberate_block_supersedes_stale_gave_up(kanban_home):
+    """A ``task.blocked`` (deliberate orchestrator block) must become the
+    governing trigger over any older ``gave_up``. With a reason matching
+    no auto-release policy the sweep must leave the ticket alone —
+    Policy A must NOT fire on the stale crash event beneath it."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_deliberate_block"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    # Ancient dispatcher gave_up — qualifies for Policy A on its own.
+    _append_trigger(
+        conn, task_id=task_id, kind="gave_up",
+        created_at=now - 11 * 86400,
+        payload={"error": "pid 802259 not alive"},
+    )
+    # Newer deliberate block by an orchestrator agent.
+    _append_trigger(
+        conn, task_id=task_id, kind="task.blocked",
+        created_at=now - 120,
+        payload={
+            "reason": "operator-tier monaco restart pending; "
+                      "operator word required before any execution",
+            "wave": "vcg_wave_20260901f",
+        },
+    )
+
+    result = brc.sweep_once(conn, now=now)
+
+    assert result.acted_count == 0
+    assert result.unblocked_count == 0
+    assert _status(conn, task_id) == "blocked"
+    retry_evts = [
+        e for e in _events(conn, task_id)
+        if e["kind"] == "blocked_auto_retry_after_cooldown"
+    ]
+    assert retry_evts == []
+
+
+def test_deliberate_review_block_escalates_instead_of_retry(kanban_home):
+    """A deliberate ``task.blocked`` whose reason is review-required
+    routes to Policy D (escalate-only): escalation event + comment, the
+    ticket stays blocked, and the stale ``gave_up`` underneath never
+    triggers a Policy A retry."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_deliberate_review"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="gave_up",
+        created_at=now - 11 * 86400,
+        payload={"error": "pid 1309392 not alive"},
+    )
+    _append_trigger(
+        conn, task_id=task_id, kind="task.blocked",
+        created_at=now - 8000,  # >= review_stale_s (7200)
+        payload={
+            "reason": "review-required: operator sign-off required for "
+                      "remaining scope (operator-tier execution)",
+        },
+    )
+
+    result = brc.sweep_once(conn, now=now)
+
+    assert _status(conn, task_id) == "blocked"
+    assert result.unblocked_count == 0
+    escalated = [
+        a for a in result.actions
+        if a.policy == "D" and a.action == "escalated"
+    ]
+    assert len(escalated) == 1
+    review_evts = [
+        e for e in _events(conn, task_id)
+        if e["kind"] == "review_pending_operator_needed"
+    ]
+    assert len(review_evts) == 1
+
+
+def test_fresh_gave_up_still_governs_over_older_block(kanban_home):
+    """Ordering sanity: a FRESH dispatcher gave_up (past cooldown) on top
+    of an older deliberate block still auto-retries via Policy A —
+    supersession only protects against STALE crash events beneath a
+    newer deliberate block, never the reverse."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_fresh_gave_up_wins"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="task.blocked",
+        created_at=now - 100_000,  # older deliberate block
+        payload={"reason": "review-required: operator sign-off"},
+    )
+    _append_trigger(
+        conn, task_id=task_id, kind="gave_up",
+        created_at=now - 1000,  # newer crash, > 900s cooldown
+        payload={"error": "timeout"},
+    )
+
+    result = brc.sweep_once(conn, now=now)
+
+    assert result.unblocked_count == 1
+    assert _status(conn, task_id) == "ready"
+    retry_evts = [
+        e for e in _events(conn, task_id)
+        if e["kind"] == "blocked_auto_retry_after_cooldown"
+    ]
+    assert len(retry_evts) == 1
+    assert retry_evts[0]["payload"]["trigger_kind"] == "gave_up"

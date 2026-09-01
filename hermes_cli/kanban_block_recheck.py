@@ -139,7 +139,16 @@ _TARGET_STATUS = "blocked"
 # Trigger event kinds we inspect. ``gave_up`` is the dispatcher's
 # breaker-tripped ended-here event. ``blocked`` is what ``block_task``
 # emits when a worker or human deliberately blocks a task.
-_TRIGGER_KINDS = ("gave_up", "blocked")
+# ``task.blocked`` is the alias some orchestrator/agent scripts emit for
+# the same deliberate action (observed in production 2026-09-01: an
+# orchestrator's deliberate re-block written as ``task.blocked`` was
+# invisible to this sweep, letting an 11-day-old stale ``gave_up``
+# govern Policy A and auto-unblock the card two minutes after the
+# deliberate block — incident wave 20260901g). Trigger kinds are
+# ordered newest-wins by event id in the candidate query, so a
+# deliberate block (either spelling) always outranks an older
+# dispatcher crash when deciding whether auto-retry is safe.
+_TRIGGER_KINDS = ("gave_up", "blocked", "task.blocked")
 
 # Policy A: cooldown before retrying a gave_up ticket. 15 min matches
 # the sweep cadence so on a 15-min tick a gave_up event triggers a
