@@ -422,3 +422,92 @@ def test_dependency_wait_trigger_is_recognised(kanban_home):
     result = sw.sweep_once(conn, now=now)
     assert result.escalated_count == 1
     assert result.escalated[0].trigger_kind == "dependency_wait"
+
+
+# ---------------------------------------------------------------------------
+# t_2914deca — escalation must emit a durable ``blocked`` event so the
+# governance-sticky-block predicates in ``recompute_ready`` refuse to
+# auto-promote the escalated task on the next tick.
+# ---------------------------------------------------------------------------
+
+
+def test_stall_escalation_emits_blocked_event_with_needs_input_kind(kanban_home):
+    """Regression for t_2914deca.
+
+    Before the fix, ``_escalate_one`` flipped ``status='blocked'`` via a
+    raw UPDATE and emitted only a ``stall_escalated`` event. Both
+    ``_has_outstanding_governance_gate`` and ``_has_sticky_block`` in
+    ``kanban_db`` scan the ``blocked``/``unblocked`` event log — so
+    without an accompanying ``blocked`` event, ``recompute_ready`` on
+    the next tick fell through both guards and re-promoted the task to
+    ``ready``, silently undoing the escalation and cycling the task
+    todo → blocked → ready → running → dependency_wait → todo forever.
+
+    Three assertions, in escalating strictness:
+
+    1. A ``blocked`` event was written with ``payload.kind ==
+       'needs_input'`` (the DB-level fact).
+    2. Its id is strictly less than the accompanying ``stall_escalated``
+       event id (audit-log readers see the governance envelope before
+       the escalation-provenance envelope).
+    3. After the sweep, calling ``recompute_ready`` leaves the row in
+       ``status='blocked'`` — the CRITICAL assertion, because it
+       captures the actual failure mode. A test that only checked event
+       emission would still pass if the sticky-block predicate had a
+       separate bug.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_2914deca_regression"
+
+    # A top-level ``todo`` task (no parents) is the exact shape that
+    # exposes the bug: ``all(p_status in {done, archived})`` is
+    # vacuously True on such rows, so ``recompute_ready`` re-promotes
+    # them unless the governance-gate / sticky-block predicates see
+    # durable ``blocked``-event evidence.
+    _make_ticket(conn, task_id=task_id, status="todo", created_at=now - 7200)
+    trigger_id = _append_trigger(
+        conn, task_id=task_id, kind="dependency_wait",
+        created_at=now - 600, reason="waiting_on: t_5ebb8a20",
+    )
+
+    result = sw.sweep_once(conn, now=now)
+    assert result.escalated_count == 1
+    assert _status(conn, task_id) == "blocked"
+
+    events = _events(conn, task_id)
+
+    # Assertion 1: blocked event exists with the right kind payload.
+    blocked_evts = [e for e in events if e["kind"] == "blocked"]
+    assert len(blocked_evts) == 1, (
+        f"expected exactly one blocked event, got {len(blocked_evts)}: "
+        f"{[e['kind'] for e in events]}"
+    )
+    bp = blocked_evts[0]["payload"]
+    assert bp is not None
+    assert bp["kind"] == "needs_input"
+    assert bp["reason"] == "waiting_on: t_5ebb8a20"
+    assert bp["source"] == "stall_watchdog"
+    assert bp["trigger_kind"] == "dependency_wait"
+    assert bp["trigger_event_id"] == trigger_id
+
+    # Assertion 2: ordering — blocked before stall_escalated.
+    stall_evts = [e for e in events if e["kind"] == "stall_escalated"]
+    assert len(stall_evts) == 1
+    assert blocked_evts[0]["id"] < stall_evts[0]["id"], (
+        "blocked event must precede stall_escalated so audit-log readers "
+        "see the governance envelope first"
+    )
+
+    # Assertion 3 (the critical one): a subsequent recompute_ready call
+    # must NOT re-promote the escalated task to ``ready``. This is the
+    # exact behaviour that was broken before the fix — the sticky-block
+    # / governance-gate predicates in kanban_db rely on the blocked
+    # event, not the row column, to refuse promotion.
+    promoted = kb.recompute_ready(conn)
+    assert promoted == 0, (
+        f"recompute_ready promoted {promoted} rows — the escalated task "
+        "was auto-unblocked, meaning the governance-gate / sticky-block "
+        "predicates never saw the blocked event this test guards."
+    )
+    assert _status(conn, task_id) == "blocked"

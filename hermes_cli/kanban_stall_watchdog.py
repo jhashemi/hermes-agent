@@ -362,6 +362,29 @@ def _escalate_one(
             # the transaction cleanly and no comment/event will leak.
             raise _RaceLostError(task_id)
 
+        # Emit the durable ``blocked`` event BEFORE ``stall_escalated``
+        # (t_2914deca). The row-level UPDATE above is not enough: both
+        # ``_has_outstanding_governance_gate`` and ``_has_sticky_block``
+        # in kanban_db scan the ``blocked``/``unblocked`` event log
+        # (row status can be flipped by external paths — the t_93231838
+        # RCA that motivated the event-based predicates). Without this
+        # event, ``recompute_ready`` on the next tick falls through both
+        # governance guards and re-promotes the escalated task to
+        # ``ready``, silently undoing the escalation. Ordering:
+        # ``blocked`` first so audit-log readers see the standard
+        # governance-block envelope before the escalation-provenance
+        # envelope.
+        _append_event(
+            conn, task_id, "blocked",
+            {
+                "kind": "needs_input",
+                "reason": reason,
+                "source": "stall_watchdog",
+                "trigger_kind": trigger_kind,
+                "trigger_event_id": trigger_event_id,
+            },
+        )
+
         payload = {
             "reason": reason,
             "trigger_kind": trigger_kind,
