@@ -8525,7 +8525,12 @@ def promote_task(
     return True, None
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(
+    conn: sqlite3.Connection,
+    task_id: str,
+    *,
+    audit_event: Optional[tuple[str, Optional[dict]]] = None,
+) -> bool:
     """Transition ``blocked``/``scheduled`` -> ready or todo.
 
     Defensively closes any stale ``current_run_id`` pointer before flipping
@@ -8534,6 +8539,18 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     the leaked run is closed as ``reclaimed`` inside the same txn so the
     runs invariant (``current_run_id IS NULL`` ⇔ run row in terminal
     state) holds for the rest of this function's lifetime.
+
+    ``audit_event`` (optional) — a ``(kind, payload)`` pair appended
+    inside the SAME ``write_txn`` as the status flip and the built-in
+    ``unblocked`` event. Callers (e.g. block-recheck watchdog policies)
+    that need a policy-specific audit event to be atomic with the
+    unblock use this to close the gap: previously the audit event was
+    written in a follow-up txn, so a crash between the two txns left
+    the task unblocked with no audit trail (RCA t_907add3f). The
+    audit event is emitted BEFORE the built-in ``unblocked`` event so
+    the audit trail reads chronologically as "policy fired → task
+    unblocked". No-op when ``audit_event=None`` — the ``unblocked``
+    event is still emitted so the manual-unblock path is unchanged.
     """
     now = int(time.time())
     with write_txn(conn):
@@ -8598,6 +8615,13 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
+        # Emit the caller-supplied audit event FIRST so the chronological
+        # order reads "policy fired → task unblocked". Both events share
+        # this write_txn; a crash between them can't leave the task
+        # unblocked-without-audit.
+        if audit_event is not None:
+            audit_kind, audit_payload = audit_event
+            _append_event(conn, task_id, audit_kind, audit_payload)
         _append_event(
             conn, task_id, "unblocked",
             {"status": new_status} if new_status != "ready" else None,

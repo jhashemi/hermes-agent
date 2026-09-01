@@ -842,3 +842,254 @@ def test_prometheus_counter_increments_on_action(kanban_home):
     brc._observe_action(action)
     after = labels._value.get()
     assert after == before + 1
+
+
+# ---------------------------------------------------------------------------
+# Audit-atomicity regression tests (t_907add3f follow-up to t_604eec8f)
+# ---------------------------------------------------------------------------
+#
+# The live incident on adr-006b-phase-2 t_53fbabd5 had an ``unblocked`` event
+# with an EMPTY payload and no preceding ``precondition_cleared`` audit
+# event. Root cause: policy-B was written as
+#
+#     unblock_task(conn, task_id)     # own write_txn — emits 'unblocked'
+#     with write_txn(conn):           # separate follow-up txn
+#         _append_event(..., 'precondition_cleared', ...)
+#
+# A crash / process kill / DB error between those two txns leaves the task
+# unblocked with no audit trail. The fix consolidates both writes into
+# ``unblock_task``'s single ``write_txn`` by threading an ``audit_event=``
+# kwarg. These tests guard against a regression that puts them back on
+# split transactions.
+
+
+def _last_two_events(conn, task_id: str) -> list[dict]:
+    return _events(conn, task_id)[-2:]
+
+
+def test_policy_b_audit_event_is_atomic_with_unblock(kanban_home):
+    """Policy-B: ``precondition_cleared`` and ``unblocked`` land in the
+    SAME transaction (adjacent event ids, no gap). Regression guard for
+    the t_53fbabd5 empty-payload incident."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_atomic_b"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 3600)
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 300,
+        payload={"reason": "swap free below 512 MB", "kind": "transient"},
+    )
+
+    result = brc.sweep_once(
+        conn, now=now,
+        host_resources={"swap_free_mb": 1024.0, "mem_available_mb": 8192.0},
+    )
+    assert result.acted_count == 1
+    assert _status(conn, task_id) == "ready"
+
+    # The audit event must exist and it must be immediately followed by
+    # ``unblocked``: adjacent ids = same txn (SQLite autoincrement is
+    # per-connection, monotone inside a single ``write_txn``).
+    tail = _last_two_events(conn, task_id)
+    assert [e["kind"] for e in tail] == ["precondition_cleared", "unblocked"], (
+        f"expected [precondition_cleared, unblocked] as last two events, got {tail!r}"
+    )
+    assert tail[1]["id"] == tail[0]["id"] + 1, (
+        f"audit event and unblocked must be adjacent (same txn); got ids "
+        f"{tail[0]['id']} then {tail[1]['id']}"
+    )
+    # The audit payload must carry the policy-B metadata that the
+    # live incident was missing.
+    pl = tail[0]["payload"]
+    assert pl["policy"] == "B"
+    assert pl["resource"] == "swap_free_mb"
+    assert pl["required_mb"] == 512.0
+
+
+def test_policy_a_audit_event_is_atomic_with_unblock(kanban_home):
+    """Policy-A: ``blocked_auto_retry_after_cooldown`` + ``unblocked``
+    share one transaction. Same regression guard as policy-B but for the
+    gave_up cooldown path."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_atomic_a"
+
+    _make_blocked_ticket(
+        conn, task_id=task_id, created_at=now - 7200,
+        consecutive_failures=3,
+    )
+    _append_trigger(
+        conn, task_id=task_id, kind="gave_up",
+        created_at=now - 7200,
+        payload={"reason": "worker crashed", "consecutive_failures": 3},
+    )
+
+    result = brc.sweep_once(conn, now=now)
+    assert result.acted_count == 1
+    assert result.actions[0].policy == "A"
+    assert _status(conn, task_id) == "ready"
+
+    tail = _last_two_events(conn, task_id)
+    assert [e["kind"] for e in tail] == [
+        "blocked_auto_retry_after_cooldown", "unblocked",
+    ], f"got {tail!r}"
+    assert tail[1]["id"] == tail[0]["id"] + 1
+
+
+def test_policy_c_audit_event_is_atomic_with_unblock(kanban_home):
+    """Policy-C: ``time_gate_released`` + ``unblocked`` share one txn."""
+    conn = _open(kanban_home)
+    now = 1755882000 + 3600  # 2025-08-22 18:00:00 UTC == release
+    task_id = "t_atomic_c"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 3600,
+        payload={"reason": "Do not re-promote before 2025-08-22T18:00:00Z"},
+    )
+
+    result = brc.sweep_once(conn, now=now)
+    assert result.acted_count == 1
+    assert _status(conn, task_id) == "ready"
+
+    tail = _last_two_events(conn, task_id)
+    assert [e["kind"] for e in tail] == ["time_gate_released", "unblocked"], (
+        f"got {tail!r}"
+    )
+    assert tail[1]["id"] == tail[0]["id"] + 1
+
+
+def test_unblock_task_audit_event_kwarg_is_atomic(kanban_home):
+    """Direct-API contract: ``unblock_task(audit_event=(kind, payload))``
+    emits the audit event and the built-in ``unblocked`` event inside a
+    single ``write_txn``. Simulate the failure mode of the live incident
+    by killing the connection immediately after ``unblock_task`` returns
+    and reopening — both events must be present or neither."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_atomic_direct"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 3600)
+
+    payload = {"policy": "TEST", "resource": "mem", "current_mb": 2048.0}
+    ok = kb.unblock_task(
+        conn, task_id,
+        audit_event=("precondition_cleared", payload),
+    )
+    assert ok is True
+
+    # Drop the connection to simulate a process crash *right after*
+    # unblock_task returned. A durable-atomicity guarantee means the
+    # audit event must be visible on a fresh connection.
+    conn.close()
+    conn2 = _open(kanban_home)
+    events = _events(conn2, task_id)
+    kinds = [e["kind"] for e in events]
+    assert "precondition_cleared" in kinds, (
+        f"audit event survived commit but is missing on fresh conn: {kinds!r}"
+    )
+    assert "unblocked" in kinds
+    # Adjacent (same txn), audit first.
+    i_audit = kinds.index("precondition_cleared")
+    assert kinds[i_audit + 1] == "unblocked"
+    # Payload round-trips intact.
+    pl = events[i_audit]["payload"]
+    assert pl["policy"] == "TEST"
+    assert pl["resource"] == "mem"
+    assert pl["current_mb"] == 2048.0
+    # Task really is unblocked.
+    assert _status(conn2, task_id) == "ready"
+
+
+def test_unblock_task_without_audit_event_is_unchanged(kanban_home):
+    """Backward-compatibility guard: calling ``unblock_task`` WITHOUT
+    ``audit_event`` still just emits the built-in ``unblocked`` event
+    (manual unblock CLI path)."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_manual"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 3600)
+
+    ok = kb.unblock_task(conn, task_id)
+    assert ok is True
+
+    events = _events(conn, task_id)
+    kinds = [e["kind"] for e in events]
+    assert kinds[-1] == "unblocked"
+    # No stray policy audit event was invented.
+    for e in events:
+        assert e["kind"] not in {
+            "precondition_cleared",
+            "blocked_auto_retry_after_cooldown",
+            "time_gate_released",
+        }
+    assert _status(conn, task_id) == "ready"
+
+
+def test_unblock_task_audit_event_not_emitted_on_failure(kanban_home):
+    """If ``unblock_task`` returns False (not blocked / not found), the
+    supplied audit event must NOT be emitted. This is the flip side of
+    atomicity: no half-writes in either direction."""
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_not_blocked"
+
+    # Create a task in a NON-blocked state — unblock_task should refuse.
+    with kb.write_txn(conn):
+        conn.execute(
+            "INSERT INTO tasks (id, title, body, assignee, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (task_id, "already ready", "body", "backend-eng", "ready", now - 60),
+        )
+
+    ok = kb.unblock_task(
+        conn, task_id,
+        audit_event=("precondition_cleared", {"policy": "B"}),
+    )
+    assert ok is False
+    events = _events(conn, task_id)
+    kinds = [e["kind"] for e in events]
+    assert "precondition_cleared" not in kinds, (
+        f"audit event leaked on failed unblock: {kinds!r}"
+    )
+    assert "unblocked" not in kinds
+    # Task status unchanged.
+    assert _status(conn, task_id) == "ready"
+
+
+def test_no_alternate_unblock_path_skips_audit_in_block_recheck(kanban_home):
+    """Confirms there is no unblock code path in ``kanban_block_recheck``
+    that calls ``unblock_task`` without an ``audit_event=`` argument. If
+    a future edit re-introduces a naked call, this test fails.
+
+    Static grep — cheap and precise. Any regression that re-introduces
+    the split-txn pattern (naked ``unblock_task(conn, task_id)`` inside
+    kanban_block_recheck.py) surfaces here immediately."""
+    import re
+    from pathlib import Path
+
+    src = Path(brc.__file__).read_text()
+    # Match unblock_task( where the FIRST non-space call has neither
+    # audit_event= kwarg. Allow multiline invocations.
+    #
+    # Strategy: find every ``unblock_task(...)`` call and check whether
+    # ``audit_event=`` appears within its balanced argument list.
+    for m in re.finditer(r"\bunblock_task\s*\(", src):
+        start = m.end()
+        depth = 1
+        i = start
+        while i < len(src) and depth > 0:
+            c = src[i]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+            i += 1
+        call_body = src[start:i - 1]
+        assert "audit_event" in call_body, (
+            f"kanban_block_recheck.py has an unblock_task() call without "
+            f"audit_event= near offset {m.start()}: {call_body!r}"
+        )
+

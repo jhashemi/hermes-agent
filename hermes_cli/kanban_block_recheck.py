@@ -556,15 +556,9 @@ def _apply_policy_a(
     # counter) so the ticket gets a fresh retry budget. This is
     # exactly what unblock_task already does, so we DELEGATE to
     # unblock_task — it also handles the parent-gating dance
-    # (blocked -> ready OR blocked -> todo). NOTE: unblock_task
-    # opens its own write_txn, so we cannot call it inside one — do
-    # the pre-check and the audit-event write as two separate
-    # transactions with unblock_task in between.
-    ok = unblock_task(conn, task_id)
-    if not ok:
-        # Race: task moved out from under us. That's fine.
-        return None
-
+    # (blocked -> ready OR blocked -> todo). The audit event is
+    # appended inside unblock_task's own write_txn via ``audit_event``,
+    # so the status flip and the audit trail are atomic (t_907add3f).
     payload = {
         "policy": "A",
         "trigger_kind": candidate["event_kind"],
@@ -576,10 +570,13 @@ def _apply_policy_a(
         "max_cycles": max_cycles,
         "prev_error": reason[:200],
     }
-    with write_txn(conn):
-        _append_event(
-            conn, task_id, "blocked_auto_retry_after_cooldown", payload,
-        )
+    ok = unblock_task(
+        conn, task_id,
+        audit_event=("blocked_auto_retry_after_cooldown", payload),
+    )
+    if not ok:
+        # Race: task moved out from under us. That's fine.
+        return None
 
     return RecheckAction(
         task_id=task_id,
@@ -678,10 +675,6 @@ def _apply_policy_b(
         ):
             return None
 
-    ok = unblock_task(conn, task_id)
-    if not ok:
-        return None
-
     payload = {
         "policy": "B",
         "resource": resource,
@@ -692,8 +685,16 @@ def _apply_policy_b(
         "trigger_created_at": trigger_created_at,
         "reason": reason[:200],
     }
-    with write_txn(conn):
-        _append_event(conn, task_id, "precondition_cleared", payload)
+    # Atomic unblock + audit event in a single write_txn (t_907add3f).
+    # Previously the audit event lived in a follow-up txn, so a crash
+    # between the two txns left the task unblocked with an empty
+    # ``unblocked`` payload and no ``precondition_cleared`` audit trail.
+    ok = unblock_task(
+        conn, task_id,
+        audit_event=("precondition_cleared", payload),
+    )
+    if not ok:
+        return None
 
     return RecheckAction(
         task_id=task_id,
@@ -799,10 +800,6 @@ def _apply_policy_c(
         ):
             return None
 
-    ok = unblock_task(conn, task_id)
-    if not ok:
-        return None
-
     payload = {
         "policy": "C",
         "release_at": release_at,
@@ -811,8 +808,16 @@ def _apply_policy_c(
         "trigger_created_at": trigger_created_at,
         "reason": reason[:200],
     }
-    with write_txn(conn):
-        _append_event(conn, task_id, "time_gate_released", payload)
+    # Atomic unblock + audit event (t_907add3f). The prior split-txn
+    # implementation could crash between unblock_task and the audit-event
+    # write, leaving the task unblocked with no ``time_gate_released``
+    # trail.
+    ok = unblock_task(
+        conn, task_id,
+        audit_event=("time_gate_released", payload),
+    )
+    if not ok:
+        return None
 
     return RecheckAction(
         task_id=task_id,
