@@ -573,6 +573,175 @@ def test_policy_e_skips_unmatched_reason(kanban_home):
     assert _status(conn, task_id) == "blocked"
 
 
+# ---------------------------------------------------------------------------
+# Governance-kind short-circuit (t_604eec8f regression)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_input_block_is_never_auto_unblocked_even_if_reason_matches_precondition(
+    kanban_home,
+):
+    """Regression for t_604eec8f (adr-006b-phase-2 t_53fbabd5).
+
+    A ``blocked`` event with payload ``kind='needs_input'`` MUST NEVER
+    auto-unblock, even when the reason text incidentally matches the
+    Policy B ``_RE_PRECONDITION`` regex (memory/swap/disk/insufficient).
+    The only legitimate clearer is an explicit operator
+    ``kanban_unblock`` (which writes its own ``unblocked`` event via
+    ``kanban_db.unblock_task``).
+
+    Failure mode this locks in: the live incident had a reason of
+    "R4 must NOT run without explicit on-record operator GO/NO-GO ...
+    (hermes2, 4GB swap-full — likely insufficient)". The precondition
+    regex matched "memory ... insufficient" against the HOST-CONTEXT
+    portion of the reason and Policy B fired an auto-unblock 41min
+    later. The classifier now short-circuits on payload.kind before
+    the regex path.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_needs_input_governance"
+
+    _make_blocked_ticket(
+        conn, task_id=task_id, created_at=now - 7200,
+        block_kind="needs_input",
+    )
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 3600,
+        payload={
+            "reason": (
+                "Operator must pick GO/NO-GO on model choice. Also "
+                "confirm target host: memory (hermes2, 4GB — likely "
+                "insufficient)."
+            ),
+            "kind": "needs_input",
+            "recurrences": 1,
+        },
+    )
+
+    # Ample host resources — Policy B's numeric gate would clear if
+    # this even reached Policy B.
+    result = brc.sweep_once(
+        conn, now=now,
+        host_resources={
+            "mem_available_mb": 64000.0,
+            "swap_free_mb": 32000.0,
+            "disk_free_mb": 500000.0,
+        },
+    )
+
+    # Considered but NEVER acted on. Task stays blocked.
+    assert result.considered == 1
+    assert result.acted_count == 0
+    assert result.skipped_no_policy == 1
+    assert _status(conn, task_id) == "blocked"
+
+    # No unblock or precondition_cleared audit event should exist.
+    kinds = [e["kind"] for e in _events(conn, task_id)]
+    assert "unblocked" not in kinds
+    assert "precondition_cleared" not in kinds
+    assert "time_gate_released" not in kinds
+
+
+def test_capability_block_is_never_auto_unblocked_even_if_reason_matches_precondition(
+    kanban_home,
+):
+    """``kind='capability'`` is the sibling governance kind: a hard
+    infrastructure wall no agent can clear autonomously. The same
+    invariant applies — auto-unblocking one is a phantom-override.
+
+    The reason here matches ``_RE_PRECONDITION`` head-on ("swap free
+    below 512 MB") to prove the short-circuit dominates even when the
+    reason is a textbook Policy B trigger.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_capability_governance"
+
+    _make_blocked_ticket(
+        conn, task_id=task_id, created_at=now - 7200,
+        block_kind="capability",
+    )
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 3600,
+        payload={
+            "reason": (
+                "GPU host required — swap free below 512 MB on the "
+                "only available host; CAPABILITY BLOCKER."
+            ),
+            "kind": "capability",
+        },
+    )
+
+    result = brc.sweep_once(
+        conn, now=now,
+        host_resources={"swap_free_mb": 8192.0, "mem_available_mb": 64000.0},
+    )
+
+    assert result.considered == 1
+    assert result.acted_count == 0
+    assert result.skipped_no_policy == 1
+    assert _status(conn, task_id) == "blocked"
+    kinds = [e["kind"] for e in _events(conn, task_id)]
+    assert "unblocked" not in kinds
+    assert "precondition_cleared" not in kinds
+
+
+def test_transient_block_still_auto_unblocks_on_precondition(kanban_home):
+    """Guard rail: the governance short-circuit must NOT regress Policy B
+    for non-governance kinds. A ``kind='transient'`` block with a
+    memory precondition still auto-unblocks when the host clears.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_transient_precondition"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 300,
+        payload={
+            "reason": "swap free below 512 MB",
+            "kind": "transient",
+        },
+    )
+
+    result = brc.sweep_once(
+        conn, now=now,
+        host_resources={"swap_free_mb": 2048.0, "mem_available_mb": 8192.0},
+    )
+
+    # Policy B fires as usual.
+    assert result.acted_count == 1
+    assert result.actions[0].policy == "B"
+    assert _status(conn, task_id) == "ready"
+
+
+def test_blocked_event_without_kind_field_uses_reason_matcher(kanban_home):
+    """Guard rail: a legacy ``blocked`` payload that omits ``kind``
+    entirely still routes by reason text (backward compat). This
+    covers old boards where block_task wrote just ``{"reason": ...}``
+    before the governance-kind field was added.
+    """
+    conn = _open(kanban_home)
+    now = 1_800_000_000
+    task_id = "t_no_kind_field"
+
+    _make_blocked_ticket(conn, task_id=task_id, created_at=now - 7200)
+    _append_trigger(
+        conn, task_id=task_id, kind="blocked", created_at=now - 300,
+        payload={"reason": "swap free below 512 MB"},  # no 'kind'
+    )
+
+    result = brc.sweep_once(
+        conn, now=now,
+        host_resources={"swap_free_mb": 2048.0, "mem_available_mb": 8192.0},
+    )
+
+    assert result.acted_count == 1
+    assert result.actions[0].policy == "B"
+    assert _status(conn, task_id) == "ready"
+
+
 def test_dry_run_reports_but_does_not_mutate(kanban_home):
     """``dry_run=True`` returns the same actions but leaves the DB
     untouched."""
