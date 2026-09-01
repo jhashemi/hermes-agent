@@ -67,6 +67,14 @@ _DISPATCHER_UNHEALTHY_STATES = frozenset({"activating", "failed", "deactivating"
 # or systemctl is unavailable) — treat as UNKNOWN → fail-open.
 _DISPATCHER_UNKNOWN_STATES = frozenset({"unknown", "inactive"})
 
+# TTL for the node-independent probe cache (OOM-in-window, dispatcher-health).
+# These probes read host-global state, so their result is the same for every
+# (task, node) pair the gate evaluates in a dispatch tick. On a busy dispatcher
+# with N nodes × M tasks the uncached path fans out N×M subprocesses per tick;
+# TTL-caching drops that to O(1) per TTL window while preserving fail-open
+# semantics (UNKNOWN results are NEVER cached — see _cached_bool_probe).
+_HOST_GLOBAL_PROBE_TTL_SECONDS = 30.0
+
 
 @dataclass
 class NodeProbeSnapshot:
@@ -144,22 +152,42 @@ class HRVDigestSnapshot:
 class HRVNodeGate:
     """Multi-condition node evaluation gate using HRV probes."""
     
-    def __init__(self, max_probe_age_seconds: float = 60.0):
+    def __init__(
+        self,
+        max_probe_age_seconds: float = 60.0,
+        host_global_probe_ttl_seconds: float = _HOST_GLOBAL_PROBE_TTL_SECONDS,
+    ):
         """
         Initialize the gate.
         
         Args:
             max_probe_age_seconds: reject on unknown/stale probes.
                 When stale, treat as UNKNOWN → fail-open (do NOT reject).
+            host_global_probe_ttl_seconds: TTL for cached results of
+                node-independent probes (OOM-in-window, dispatcher-health).
+                These probes read local host state, so the answer is the same
+                for every (task, node) pair evaluated in the same window.
+                Caching only stores DEFINITIVE True/False answers; UNKNOWN
+                results (None) are never cached so a cache MISS or expired
+                entry always re-probes rather than serving a stale UNKNOWN.
+                Set to 0 to disable caching entirely.
         """
         self.max_probe_age_seconds = max_probe_age_seconds
-        
+        self.host_global_probe_ttl_seconds = host_global_probe_ttl_seconds
+
         # In-memory cache: hostname -> NodeProbeSnapshot
         self._node_cache: Dict[str, NodeProbeSnapshot] = {}
         self._cache_last_refresh: Optional[float] = None
-        
+
         # HRV digest cache
         self._digest: Optional[HRVDigestSnapshot] = None
+
+        # TTL cache slots for node-independent host-global probes.
+        # Each entry is (result: bool, expires_at_monotonic: float) OR None.
+        # We use time.monotonic() so wall-clock jumps (NTP, DST) don't confuse
+        # expiry — the TTL is a real elapsed interval regardless of clock ops.
+        self._oom_cache_entry: Optional[tuple[bool, float]] = None
+        self._dispatcher_cache_entry: Optional[tuple[bool, float]] = None
     
     def set_node_probe_snapshot(self, hostname: str, snapshot: NodeProbeSnapshot) -> None:
         """Cache a node probe snapshot (called by NATS subscriber)."""
@@ -260,7 +288,26 @@ class HRVNodeGate:
     ) -> bool:
         """True iff a kernel OOM kill was recorded in the last ``window_seconds``.
 
-        Strategy:
+        Node-independent (reads local kernel state), so results are TTL-cached
+        via ``self._oom_cache_entry`` when the underlying probe returns a
+        DEFINITIVE True/False. UNKNOWN answers (both probes error out) are
+        NEVER cached — a subsequent call re-probes, preserving fail-open
+        semantics without pinning "no evidence" as a truth for the TTL window.
+
+        On any subprocess error / timeout / permission denied, returns False
+        (UNKNOWN → fail-open, consistent with the gate's stale-probe policy).
+        """
+        return self._cached_bool_probe(
+            slot_name="_oom_cache_entry",
+            uncached_probe=lambda: self._uncached_oom_kill_within_window(window_seconds),
+        )
+
+    def _uncached_oom_kill_within_window(
+        self, window_seconds: int
+    ) -> Optional[bool]:
+        """Tri-state OOM probe: True (OOM found), False (none found), None (UNKNOWN).
+
+        Strategy (unchanged from historical behaviour):
         - Primary: ``journalctl -k --since '<N> seconds ago' --no-pager -q``
           filtered for OOM markers (``Out of memory``, ``oom-kill``,
           ``Killed process``, ``invoked oom-killer``).
@@ -269,8 +316,8 @@ class HRVNodeGate:
           the ``-T`` timestamp when available; when it isn't, dmesg is skipped
           rather than risk stale false-positives from an unrelated old OOM.
 
-        On any subprocess error / timeout / permission denied, returns False
-        (UNKNOWN → fail-open, consistent with the gate's stale-probe policy).
+        Returns None only when BOTH probes couldn't produce a definitive
+        answer — that's the UNKNOWN case that must NOT be cached.
         """
         # Primary path: journalctl (systemd-journal). Preferred because it has
         # a native time filter, so a very old OOM never leaks through.
@@ -284,8 +331,67 @@ class HRVNodeGate:
         if dmesg_result is not None:
             return dmesg_result
 
-        # No probe returned a definitive answer → UNKNOWN → fail-open.
-        return False
+        # No probe returned a definitive answer → UNKNOWN.
+        return None
+
+    def _cached_bool_probe(
+        self,
+        slot_name: str,
+        uncached_probe,
+    ) -> bool:
+        """Read-through TTL cache for tri-state (Optional[bool]) probes.
+
+        Semantics — critical for correctness:
+        * A DEFINITIVE True or False is cached for ``host_global_probe_ttl_seconds``.
+        * UNKNOWN (None from the uncached probe) is NEVER cached; the next call
+          re-probes so a transient probe error can't pin "fail-open" as the
+          truth for the entire TTL window.
+        * TTL <= 0 disables caching (each call re-probes).
+        * Public return type is bool (None collapses to False → don't reject,
+          matching the historical fail-open contract of the wrapping methods).
+
+        Args:
+            slot_name: attribute name on ``self`` holding the ``Optional[tuple[bool, float]]``
+                cache entry. Passed as a string so a single helper can serve
+                multiple independent probe caches without a shared dict lookup.
+            uncached_probe: zero-arg callable returning ``Optional[bool]`` —
+                True/False are definitive; None means UNKNOWN.
+        """
+        ttl = self.host_global_probe_ttl_seconds
+        # TTL <= 0 → caching disabled entirely.
+        if ttl > 0:
+            entry = getattr(self, slot_name, None)
+            if entry is not None:
+                cached_value, expires_at = entry
+                if time.monotonic() < expires_at:
+                    return cached_value
+                # Expired — clear so a re-probe with UNKNOWN doesn't leave a
+                # stale expired tuple around confusing debug dumps.
+                setattr(self, slot_name, None)
+
+        result = uncached_probe()
+
+        # Only cache DEFINITIVE answers. UNKNOWN (None) must never be cached
+        # so the next call can re-probe (fail-open contract).
+        if ttl > 0 and result is not None:
+            setattr(
+                self,
+                slot_name,
+                (result, time.monotonic() + ttl),
+            )
+
+        # Public contract: return bool. None (UNKNOWN) → False (don't reject).
+        return bool(result) if result is not None else False
+
+    def invalidate_host_global_probe_cache(self) -> None:
+        """Clear both TTL cache slots for node-independent probes.
+
+        Useful for tests, and for callers who observe a state change (e.g.
+        systemd unit was just restarted) and want to skip the TTL window.
+        No-op when nothing is cached.
+        """
+        self._oom_cache_entry = None
+        self._dispatcher_cache_entry = None
 
     @staticmethod
     def _line_matches_oom(line: str) -> bool:
@@ -395,6 +501,15 @@ class HRVNodeGate:
     def _check_dispatcher_health(self, node_hostname: str) -> bool:
         """Reject if kanban dispatcher systemd unit is unhealthy on this host.
 
+        Node-independent: the systemd check is local to the machine running
+        the gate (the ``node_hostname`` arg is retained for the interface's
+        symmetry with the per-node checks but the actual probe reads the
+        local host's systemd — same answer for every ``node_hostname``).
+        Results are TTL-cached via ``self._dispatcher_cache_entry`` when the
+        underlying probe returns a DEFINITIVE True/False. UNKNOWN answers
+        (systemctl missing, empty state, timeout) are NEVER cached — a
+        subsequent call re-probes, preserving fail-open semantics.
+
         Queries ``systemctl is-active <unit>`` and rejects when the reported
         state is one of ``_DISPATCHER_UNHEALTHY_STATES`` (activating / failed /
         deactivating). When the unit doesn't exist on the host, systemctl
@@ -406,11 +521,28 @@ class HRVNodeGate:
         systemd status would require SSH or a remote probe, out of scope for
         this pass. In practice the gate runs on the dispatcher host itself.
         """
+        return self._cached_bool_probe(
+            slot_name="_dispatcher_cache_entry",
+            uncached_probe=self._uncached_check_dispatcher_health,
+        )
+
+    def _uncached_check_dispatcher_health(self) -> Optional[bool]:
+        """Tri-state dispatcher-health probe.
+
+        Returns:
+            True  — unit is in an unhealthy state (activating/failed/deactivating).
+            False — unit is definitively healthy (active/reloading).
+            None  — UNKNOWN: no systemctl binary, empty output, subprocess
+                    error, OR the state is in ``_DISPATCHER_UNKNOWN_STATES``
+                    ('inactive'/'unknown' — unit not installed or unreachable).
+                    The task's fail-open contract classifies these as UNKNOWN,
+                    so they must NOT be cached: a follow-up call must re-probe.
+        """
         unit_name = os.environ.get(
             "HRV_DISPATCHER_UNIT_NAME", _DEFAULT_DISPATCHER_UNIT_NAME
         )
         if shutil.which("systemctl") is None:
-            return False  # No systemd → UNKNOWN → fail-open
+            return None  # No systemd binary → UNKNOWN → fail-open, don't cache
 
         try:
             proc = subprocess.run(
@@ -423,13 +555,13 @@ class HRVNodeGate:
             logger.debug(
                 f"[hrv-node-gate] systemctl is-active {unit_name} failed: {exc}"
             )
-            return False
+            return None  # UNKNOWN → don't cache
 
         # `systemctl is-active` exits 0 for active, non-zero otherwise. The
         # state string comes from stdout regardless of exit code.
         state = (proc.stdout or "").strip().lower()
         if not state:
-            return False  # No answer → UNKNOWN → fail-open
+            return None  # No answer → UNKNOWN → don't cache
 
         if state in _DISPATCHER_UNHEALTHY_STATES:
             logger.info(
@@ -437,9 +569,17 @@ class HRVNodeGate:
             )
             return True
 
-        # 'active', 'reloading', 'inactive', 'unknown' → don't reject.
-        # ('inactive' + 'unknown' specifically UNKNOWN → fail-open; other
-        # healthy states just pass.)
+        if state in _DISPATCHER_UNKNOWN_STATES:
+            # 'inactive' / 'unknown' — the gate's spec explicitly classifies
+            # these as UNKNOWN (fail-open, don't reject, and don't cache so
+            # we re-probe on the next call). This mirrors the task's caching
+            # contract: UNKNOWN responses must never be pinned for the TTL
+            # window, since the underlying cause (unit not yet installed,
+            # transient reload) can clear at any moment.
+            return None
+
+        # Definitive healthy states — 'active', 'reloading', or any other
+        # future state systemd invents — cacheable-False.
         return False
     
     def _check_bedrock_rate_limit(
