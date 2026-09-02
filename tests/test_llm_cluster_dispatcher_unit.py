@@ -16,10 +16,17 @@ from unittest import mock
 
 import pytest
 
-# Make the dispatcher importable (it lives outside the package tree).
-SCRIPTS_DIR = "/home/ubuntu/.hermes/scripts"
-if SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, SCRIPTS_DIR)
+# Make the dispatcher importable from the in-repo location.
+# scripts/dispatch/ is the canonical tracked home (t_b38ff45a).
+# Fall back to the deployed ~/.hermes/scripts/ path so tests still
+# work on hosts where the repo hasn't been re-cloned yet.
+_REPO_DISPATCH = Path(__file__).parent.parent / "scripts" / "dispatch"
+if _REPO_DISPATCH.exists() and str(_REPO_DISPATCH) not in sys.path:
+    sys.path.insert(0, str(_REPO_DISPATCH))
+else:
+    _LEGACY_SCRIPTS = "/home/ubuntu/.hermes/scripts"
+    if _LEGACY_SCRIPTS not in sys.path:
+        sys.path.insert(0, _LEGACY_SCRIPTS)
 
 import llm_cluster_dispatcher as lcd
 
