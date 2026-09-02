@@ -22,6 +22,7 @@ import os
 import sys
 import threading
 import time
+import types
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -960,6 +961,106 @@ def _schedule_subscriber(gateway: Any) -> None:
 
 
 # ============================================================================
+# Gateway slash-command registration (t_162dd6e6)
+# ============================================================================
+# The pre_gateway_dispatch hook intercepts voice-agent commands at dispatch
+# time, but without register_command() they are invisible to /help, Telegram
+# autocomplete, and gateway command menus. These thin adapters adapt the
+# existing handlers (which take (text, event, ...) and return hook payloads)
+# to the gateway slash-command contract: handler(raw_args: str) -> str|None.
+
+_COMMAND_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+
+class _FakeEvent:
+    """Minimal event stand-in for slash-command handlers.
+
+    The gateway slash-command contract is handler(raw_args) -> str, but the
+    existing handlers expect an event with a .source (user_id/chat_id/platform).
+    Slash invocations carry no chat context — an empty source is correct.
+    """
+
+    def __init__(self):
+        self.source = types.SimpleNamespace(user_id="", chat_id="", platform="")
+
+
+def _cmd_voice_agents(raw_args: str) -> str:
+    """Slash handler for /voice-agents."""
+    return _handle_list_agents(_FakeEvent())["text"]
+
+
+def _cmd_voice_disconnect(raw_args: str) -> str:
+    """Slash handler for /voice-disconnect."""
+    return _handle_disconnect(_FakeEvent())["text"]
+
+
+def _cmd_voice_info(raw_args: str) -> str:
+    """Slash handler for /voice-info {agent}."""
+    text = f"/voice-info {raw_args}".strip()
+    return _handle_agent_info(text, _FakeEvent())["text"]
+
+
+def _cmd_load_agent(raw_args: str) -> str:
+    """Slash handler for /load {agent} — generic entry for the /load-{agent} family.
+
+    /load-{agent} stays a dynamic command family intercepted by the
+    pre_gateway_dispatch hook; this registered 'load' command gives users a
+    discoverable autocomplete entry.
+    """
+    agent = (raw_args or "").strip()
+    if not agent:
+        return (
+            "Usage: /load {agent} — e.g. /load demis-hassabis\n"
+            "Type /voice-agents to list available agents."
+        )
+    return _handle_load_agent(
+        f"/load-{agent}", _FakeEvent(), gateway=None
+    )["text"]
+
+
+def _register_gateway_commands(plugin_interface) -> None:
+    """Idempotently register all voice-agent slash commands with the gateway."""
+    commands = (
+        (
+            "voice-agents",
+            _cmd_voice_agents,
+            "List available executive voice agents",
+            "",
+        ),
+        (
+            "voice-disconnect",
+            _cmd_voice_disconnect,
+            "Disconnect the active voice agent session",
+            "",
+        ),
+        (
+            "voice-info",
+            _cmd_voice_info,
+            "Show details for a voice agent",
+            "<agent>",
+        ),
+        (
+            "load",
+            _cmd_load_agent,
+            "Connect to an executive voice agent",
+            "<agent>",
+        ),
+    )
+    for name, handler, description, args_hint in commands:
+        if not hasattr(plugin_interface, "register_command"):
+            logger.warning(
+                "[voice-agents] interface lacks register_command; /%s not exposed", name
+            )
+            continue
+        try:
+            plugin_interface.register_command(name, handler, description, args_hint)
+            _COMMAND_REGISTRY[name] = {"handler": handler, "_iface": plugin_interface}
+            logger.info("[voice-agents] Registered gateway command /%s", name)
+        except Exception as exc:
+            logger.warning("[voice-agents] register_command('/%s') failed: %s", name, exc)
+
+
+# ============================================================================
 # Plugin entry points
 # ============================================================================
 
@@ -967,6 +1068,7 @@ def on_load(plugin_interface):
     logger.info("[voice-agents] Plugin loaded — registering pre_gateway_dispatch hook")
     _sync_sessions_from_bridge()
     plugin_interface.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
+    _register_gateway_commands(plugin_interface)
     # Start JetStream bridge + voice_out subscriber
     try:
         get_or_start_bridge()
@@ -981,6 +1083,7 @@ def register(ctx):
     logger.info("[voice-agents] Registering pre_gateway_dispatch hook")
     _sync_sessions_from_bridge()
     ctx.register_hook("pre_gateway_dispatch", pre_gateway_dispatch_hook)
+    _register_gateway_commands(ctx)
     try:
         get_or_start_bridge()
         gateway = getattr(ctx, "gateway", None)
