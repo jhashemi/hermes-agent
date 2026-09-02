@@ -87,7 +87,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing
 from toolsets import get_toolset_names
@@ -12416,6 +12416,45 @@ def _wrap_argv_for_cgroup_detach(cmd: list) -> list:
     ]
 
 
+
+# ── Cluster-dispatch remote-spawner hook ─────────────────────────────────
+# Registered by EAP at gateway startup via
+# ``eap.cluster_dispatch.install(register_remote_spawner)``. When set,
+# ``_default_spawn`` delegates remote branches to the callable. When
+# None (EAP not installed, or cluster_dispatch disabled), the remote
+# branch is skipped and dispatch falls through to the local spawn
+# path — semantically identical to today's "no remote host mapping"
+# fallback. Fail-open: any exception from the callable is logged and
+# dispatch falls back to local (the callable is policy, not a
+# correctness gate).
+#
+# Contract: (task, workspace, *, board, target_node, log_path, env) → Optional[int]
+#   - Return an int pid if the remote spawn succeeded.
+#   - Return None to signal "decline; fall back to local".
+#   - Raise on unexpected error; kernel catches, logs, and falls back.
+#
+# The registered callable is responsible for setting
+# ``_default_spawn._last_actual_node`` to the node where the worker
+# was placed (so the dispatch loop can persist it to
+# ``tasks.worker_node``). If the callable returns None, kernel keeps
+# ``_last_actual_node = None`` (local placement).
+_REMOTE_SPAWNER: Optional[Callable[..., Optional[int]]] = None
+
+
+def register_remote_spawner(fn: Optional[Callable[..., Optional[int]]]) -> None:
+    """Register (or unregister) the remote-spawn hook.
+
+    Pass a callable to enable remote spawning; pass None to disable.
+    Idempotent — later registrations replace earlier ones. Not
+    thread-safe by design (called once at gateway startup).
+
+    Called by ``eap.cluster_dispatch.install(register_remote_spawner)``
+    when ``kanban.cluster_dispatch=true`` is set in the gateway config.
+    """
+    global _REMOTE_SPAWNER
+    _REMOTE_SPAWNER = fn
+
+
 def _default_spawn(
     task: Task,
     workspace: str,
@@ -12603,127 +12642,32 @@ def _default_spawn(
     rotate_bytes, backup_count = worker_log_rotation_config()
     _rotate_worker_log(log_path, rotate_bytes, backup_count)
 
-    # ── Cluster routing ──────────────────────────────────────────────
-    # If target_node is set and differs from the local node, spawn the
-    # worker on the remote node via SSH. This is the integration point
-    # for the LLM cluster dispatcher: it decides which node runs the
-    # task, and _default_spawn routes the worker accordingly.
-    #
-    # Bookkeeping contract: ``_last_actual_node`` records where the
-    # worker was actually placed so the dispatch loop can persist it to
-    # ``tasks.worker_node``. Set to ``target_node`` only when the SSH
-    # spawn actually returned a pid; on every fall-through to local
-    # spawn it's reset to ``None`` (== "this host"). See
-    # ``detect_crashed_workers`` + ``release_stale_claims`` for the reap
-    # loops that consume the column. Ticket t_78fbccf4.
+    # ── Cluster routing (via registered remote-spawner hook) ─────────
+    # ``_default_spawn._last_actual_node`` records where the worker was
+    # actually placed. Reset to None on entry; the registered hook (if
+    # any) is responsible for setting it to the target node when it
+    # returns a pid. Ticket t_78fbccf4.
     _default_spawn._last_actual_node = None  # type: ignore[attr-defined]
-    LOCAL_NODE_ID = _local_node_id()
-    if target_node and target_node != LOCAL_NODE_ID:
-        # Remote spawn via SSH
-        from gateway.cluster_dispatch import spawn_on_remote, _NODE_HOSTS
-        host = _NODE_HOSTS.get(target_node)
-        if host is None:
-            # target_node is the local node or unknown — fall back to local
-            logger.warning(
-                "[dispatch] target_node=%r has no SSH host mapping; "
-                "spawning locally", target_node,
+    if _REMOTE_SPAWNER is not None and target_node is not None:
+        try:
+            pid = _REMOTE_SPAWNER(
+                task,
+                workspace,
+                board=resolved_board,
+                target_node=target_node,
+                log_path=str(log_path),
+                env=env,
             )
-        else:
-            # INCIDENT-01 (2026-08-18) — model liveness gate.
-            #
-            # Before spawning, consult the ``hrv.node_state.<node>.<provider>.<model>``
-            # KV. If a fresh entry says the resolved model is quota-dead on
-            # this node, decline the (task, node) pair and fall back to local
-            # spawn — the dispatcher can then re-route or the card will
-            # naturally re-queue elsewhere. Fail-open on any error / missing
-            # signal so a broken gate NEVER blocks real work. See
-            # ``hermes_cli/dispatch_gate.py`` for the contract and
-            # ticket t_3e1634d9 for the RCA.
-            try:
-                from hermes_cli.dispatch_gate import check_model_liveness
-                # KV reader is a module-level singleton (lazy-init inline
-                # so import-time is unaffected). In-memory until the NATS
-                # bridge lands — reads return None, gate fails open, and
-                # dispatch behavior is preserved. Wired here so the import
-                # path is exercised at dispatch time and any future NATS
-                # bridge slot-in is a single-line change.
-                _gate_reader = _get_liveness_kv_reader()
-                _resolved_provider = getattr(task, "provider_override", None) or ""
-                _resolved_model = getattr(task, "model_override", None) or ""
-                if _resolved_provider and _resolved_model:
-                    _verdict = check_model_liveness(
-                        node=target_node,
-                        provider=_resolved_provider,
-                        model=_resolved_model,
-                        kv_reader=_gate_reader,
-                    )
-                    if not _verdict.allow:
-                        logger.warning(
-                            "[dispatch] model-liveness gate rejected %s "
-                            "for task %s (node=%s, provider=%s, model=%s): %s "
-                            "— spawning locally instead",
-                            target_node, task.id, target_node,
-                            _resolved_provider, _resolved_model, _verdict.reason,
-                        )
-                        host = None   # fall through to local spawn
-            except Exception as _gate_exc:
-                # Fail-open on any gate error — the incident is worse if
-                # the gate itself blocks dispatch than if it fails silent.
-                logger.debug(
-                    "[dispatch] model-liveness gate raised %r — failing open",
-                    _gate_exc,
-                )
-
-        if host is not None:
-            # Validate that the remote node is reachable (basic SSH probe).
-            # If the probe fails, fall back to local spawn rather than
-            # blocking the dispatch loop. The audit trail in the LLM
-            # dispatcher's DuckDB already records the routing decision.
-            try:
-                import subprocess as _sp
-                probe = _sp.run(
-                    ["ssh", "-o", "ConnectTimeout=5", "-o", "BatchMode=yes",
-                     host, "true"],
-                    capture_output=True, timeout=8,
-                )
-                if probe.returncode != 0:
-                    logger.warning(
-                        "[dispatch] SSH probe to %s (%s) failed (rc=%d); "
-                        "spawning locally instead",
-                        target_node, host, probe.returncode,
-                    )
-                else:
-                    # Remote node reachable — spawn via SSH
-                    pid = spawn_on_remote(
-                        task_id=task.id,
-                        assignee=task.assignee or "",
-                        workspace=workspace,
-                        board=resolved_board,
-                        target_node=target_node,
-                        log_path=str(log_path),
-                        skills=list(task.skills) if task.skills else None,
-                        env_extra={
-                            k: v for k, v in env.items()
-                            if k.startswith("HERMES_")
-                        },
-                    )
-                    logger.info(
-                        "[dispatch] spawned task %s on remote node %s "
-                        "(pid=%s)", task.id, target_node, pid,
-                    )
-                    # Signal to dispatch loop that this pid lives on a
-                    # different host — the caller writes it to
-                    # ``tasks.worker_node`` so reap loops here skip
-                    # ``_pid_alive`` (they can't see remote pids).
-                    _default_spawn._last_actual_node = target_node  # type: ignore[attr-defined]
-                    return pid
-            except Exception as exc:
-                logger.warning(
-                    "[dispatch] SSH spawn to %s failed: %s; "
-                    "falling back to local spawn",
-                    target_node, exc,
-                )
-                # Fall through to local spawn below
+            if pid is not None:
+                # Remote spawn succeeded; hook has set _last_actual_node.
+                return pid
+        except Exception as exc:
+            logger.warning(
+                "[dispatch] remote-spawner hook raised %r for task %s "
+                "(target_node=%s); falling back to local spawn",
+                exc, task.id, target_node,
+            )
+            _default_spawn._last_actual_node = None  # type: ignore[attr-defined]
     # ── End cluster routing ─────────────────────────────────────────
 
     # ── cgroup detach (t_6ca85bd2) ─────────────────────────────────────

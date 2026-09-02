@@ -1176,10 +1176,23 @@ class GatewayKanbanWatchersMixin:
         # which always routes to the local node (None).
         cluster_routers: dict[str, "NodeRouter"] = {}
         try:
-            from gateway.cluster_dispatch import create_cluster_node_router, local_node_router
+            from eap.cluster_dispatch import create_cluster_node_router, local_node_router
             _cluster_dispatch_enabled = bool(kanban_cfg.get("cluster_dispatch", False))
             if _cluster_dispatch_enabled:
                 logger.info("kanban dispatcher: cluster dispatch enabled in config")
+                # Register the remote-spawner hook so _default_spawn delegates
+                # remote branches through EAP policy (t_5d3725c3).
+                try:
+                    from eap.cluster_dispatch import install as install_remote_spawner
+                    from hermes_cli.kanban_db import register_remote_spawner
+                    install_remote_spawner(register_remote_spawner)
+                    logger.info("kanban dispatcher: remote-spawner hook installed")
+                except Exception as exc:
+                    logger.warning(
+                        "kanban dispatcher: remote-spawner hook install failed "
+                        "(%s); remote spawns will fall back to local",
+                        exc,
+                    )
             else:
                 logger.debug("kanban dispatcher: cluster dispatch disabled (local-only)")
         except Exception as exc:
@@ -1194,7 +1207,7 @@ class GatewayKanbanWatchersMixin:
         # when cluster_dispatch=true). Emitted once at startup — routine
         # ticks don't repeat this so the log stays legible.
         try:
-            from gateway.cluster_dispatch import log_out_of_scope_boards_at_startup
+            from eap.cluster_dispatch import log_out_of_scope_boards_at_startup
             log_out_of_scope_boards_at_startup()
         except Exception as exc:
             logger.debug("kanban dispatcher: scope-lint init failed (%s)", exc)

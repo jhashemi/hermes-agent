@@ -2751,7 +2751,7 @@ def run_doctor(args):
     # ─────────────────────────────────────────────────────────────────
     _section("Kanban Board Scope")
     try:
-        from gateway.cluster_dispatch import compute_out_of_scope_boards
+        from eap.cluster_dispatch import compute_out_of_scope_boards
         entries = compute_out_of_scope_boards()
         warn_entries = [e for e in entries if e.get("severity") == "warn"]
         info_entries = [e for e in entries if e.get("severity") == "info"]
