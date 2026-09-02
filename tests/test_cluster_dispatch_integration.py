@@ -166,8 +166,8 @@ class TestAC1CleanImport:
             "_default_spawn must accept target_node parameter"
 
     def test_cluster_dispatch_module_imports(self):
-        """gateway.cluster_dispatch imports cleanly."""
-        from gateway.cluster_dispatch import (
+        """eap.cluster_dispatch imports cleanly."""
+        from eap.cluster_dispatch import (
             ClusterNodeRouter,
             local_node_router,
             create_cluster_node_router,
@@ -345,7 +345,7 @@ class TestAC3FallbackChain:
 
     def test_cluster_node_router_fallback_on_import_error(self):
         """When LLM dispatcher import fails, ClusterNodeRouter falls back to local."""
-        from gateway.cluster_dispatch import local_node_router
+        from eap.cluster_dispatch import local_node_router
         # local_node_router always returns None (spawn locally)
         assert local_node_router("t_001", "werner_vogels") is None
 
@@ -487,14 +487,17 @@ class TestDispatchOnceWithNodeRouter:
         """When node_router returns a remote node, target_node is passed to spawn.
 
         Verified by inspecting _default_spawn's handling of target_node:
-        it checks for remote nodes and routes via SSH.
+        it accepts target_node and delegates remote branches via the
+        register_remote_spawner hook (t_5d3725c3 — L1↔L3 separation).
         """
-        from hermes_cli.kanban_db import _default_spawn
+        from hermes_cli.kanban_db import _default_spawn, register_remote_spawner
         import inspect
         source = inspect.getsource(_default_spawn)
         assert "target_node" in source, "_default_spawn must accept target_node"
-        assert "LOCAL_NODE_ID" in source, "_default_spawn must check local vs remote node"
-        assert "spawn_on_remote" in source, "_default_spawn must call spawn_on_remote for remote nodes"
+        assert "_REMOTE_SPAWNER" in source, "_default_spawn must delegate via the registered hook"
+        assert "register_remote_spawner" in inspect.getsource(
+            register_remote_spawner
+        ), "register_remote_spawner must exist"
 
 
 # ---------------------------------------------------------------------------
@@ -506,7 +509,7 @@ class TestRemoteSpawnCmd:
 
     def test_builds_ssh_command_for_hermes1(self):
         """remote_spawn_cmd builds an SSH command for hermes1."""
-        from gateway.cluster_dispatch import remote_spawn_cmd
+        from eap.cluster_dispatch import remote_spawn_cmd
 
         cmd = remote_spawn_cmd(
             task_id="t_ssh01",
@@ -523,7 +526,7 @@ class TestRemoteSpawnCmd:
 
     def test_raises_for_local_node(self):
         """remote_spawn_cmd raises ValueError for local node (no SSH host)."""
-        from gateway.cluster_dispatch import remote_spawn_cmd
+        from eap.cluster_dispatch import remote_spawn_cmd
 
         with pytest.raises(ValueError, match="Cannot SSH-spawn to local node"):
             remote_spawn_cmd(
@@ -536,7 +539,7 @@ class TestRemoteSpawnCmd:
 
     def test_env_vars_forwarded(self):
         """Environment variables are forwarded via SSH export commands."""
-        from gateway.cluster_dispatch import remote_spawn_cmd
+        from eap.cluster_dispatch import remote_spawn_cmd
 
         cmd = remote_spawn_cmd(
             task_id="t_env01",
@@ -590,7 +593,7 @@ class TestGatewayWatcherWiring:
 
     def test_create_cluster_node_router_returns_callable(self):
         """create_cluster_node_router returns a valid NodeRouter callable."""
-        from gateway.cluster_dispatch import create_cluster_node_router, local_node_router
+        from eap.cluster_dispatch import create_cluster_node_router, local_node_router
         # With cluster_dispatch disabled (default), returns local_node_router
         router = create_cluster_node_router(board="test-board")
         assert callable(router), "router must be callable"
