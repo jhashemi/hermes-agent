@@ -5565,7 +5565,15 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       ``kanban_block(reason="review-required: ...")`` (or somebody ran
       ``hermes kanban block <id>``).  This is a deliberate handoff that
       should stay blocked until an operator unblocks it.  The block tool
-      emits a ``"blocked"`` event row in ``task_events``.
+      emits a ``"blocked"`` event row in ``task_events``.  Orchestrator
+      scripts occasionally write the same deliberate block under the
+      ``"task.blocked"`` alias with a prose payload and no canonical
+      event (production incident 2026-09-01, task ``t_8a45c6e7`` on
+      board executive-agents: the alias-only fence was invisible here,
+      and the next unrelated ``recompute_ready`` sweep auto-promoted an
+      operator WONTFIX-gated card — bare ``promoted`` event 4139).  The
+      alias therefore counts as deliberate too, mirroring the FIX-7
+      block-recheck trigger list (wave 20260901g lesson).
 
     * **Circuit-breaker** — ``_record_task_failure`` tripped after
       repeated crashes / spawn failures / timeouts.  This emits
@@ -5574,10 +5582,15 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
       finish, transient infra error clears).
 
     The cheapest signal that distinguishes the two is the most recent
-    ``"blocked"`` / ``"unblocked"`` event for the task.  If the most
-    recent one is ``"blocked"`` (or there is a ``"blocked"`` event and
-    no ``"unblocked"`` event has fired since), the task is sticky and
-    ``recompute_ready`` must *not* auto-promote it.
+    block-ish event for the task.  If the most recent one is a deliberate
+    block — canonical ``"blocked"`` **or** the orchestrator-written
+    ``"task.blocked"`` alias (production incident 2026-09-01, task
+    ``t_8a45c6e7``: the alias-only fence was invisible to this
+    predicate, and an unrelated ``recompute_ready`` sweep auto-promoted
+    an operator WONTFIX-gated card — bare ``promoted`` event 4139,
+    board executive-agents) — and no ``"unblocked"`` event has fired
+    since, the task is sticky and ``recompute_ready`` must *not*
+    auto-promote it.
 
     Returns ``False`` when there is no such event at all (e.g. the task
     was set to ``status='blocked'`` by the circuit breaker or by direct
@@ -5586,11 +5599,11 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     """
     row = conn.execute(
         "SELECT kind FROM task_events "
-        "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
+        "WHERE task_id = ? AND kind IN ('blocked', 'task.blocked', 'unblocked') "
         "ORDER BY id DESC LIMIT 1",
         (task_id,),
     ).fetchone()
-    return bool(row) and row["kind"] == "blocked"
+    return bool(row) and row["kind"] != "unblocked"
 
 
 # Block kinds that indicate a human must decide before the task resumes.
@@ -5709,13 +5722,15 @@ def _effective_parent_status(
 
 
 def _has_outstanding_governance_gate(
-    conn: sqlite3.Connection, task_id: str,
+    conn: sqlite3.Connection,
+    task_id: str,
+    row_block_kind: Optional[str] = None,
 ) -> bool:
     """Return True when ``task_id`` carries an unresolved governance
     block — one that a human must clear explicitly, regardless of the
     task's current row-level ``status``.
 
-    Two overlapping event patterns count:
+    Three overlapping patterns count:
 
     * A ``"blocked"`` event with payload ``kind`` in
       :data:`_GOVERNANCE_BLOCK_KINDS` that has no strictly-later
@@ -5729,6 +5744,16 @@ def _has_outstanding_governance_gate(
       alone (which only inspects ``"blocked"`` / ``"unblocked"``) can't
       see it, but the invariant is identical: a human must clear the
       condition before auto-promotion resumes.
+
+    * The row's own ``block_kind`` column (``tasks.block_kind``) is a
+      governance kind while no ``"unblocked"`` event supersedes it.
+      Orchestrator scripts that fence a card with raw SQL
+      (``status='blocked', block_kind='needs_input'``) plus a
+      ``"task.blocked"`` alias event with prose payloads (task
+      ``t_8a45c6e7``, 2026-09-01) produce no canonical ``"blocked"``
+      event for pattern (a); the operator's column word is the durable
+      governance marker and gates until an explicit unblock. The caller
+      passes it in from the already-fetched row.
 
     Unlike :func:`_has_sticky_block` this predicate is **status-agnostic**:
     it fires even when a subsequent code path (a decomposer, an
@@ -5782,6 +5807,24 @@ def _has_outstanding_governance_gate(
         (task_id,),
     ).fetchone()
     if loop_row is not None and int(loop_row["id"]) > last_unblock_id:
+        return True
+
+    # (c) Row-level block_kind marker with no structured block event at
+    # all. Orchestrator scripts that fence a card via raw row writes
+    # (status='blocked', block_kind='needs_input') plus a
+    # "task.blocked" alias event carrying prose payloads — the exact
+    # t_8a45c6e7 production shape — land here: no canonical "blocked"
+    # event exists, so (a) never fires. The operator's column word is
+    # the durable governance marker; it gates until an explicit
+    # "unblocked" event supersedes it (unblock_task emits one, so the
+    # legitimate exit path is preserved). ``complete_task`` NULLs the
+    # column on completion, so a completed row never trips this guard
+    # via a stale marker. Callers that don't have the row in hand may
+    # omit the argument (behaviour then matches the pre-20260902 code).
+    if (
+        row_block_kind is not None
+        and row_block_kind in _GOVERNANCE_BLOCK_KINDS
+    ):
         return True
 
     return False
@@ -6084,8 +6127,17 @@ def recompute_ready(
             # per-status branches so both ``todo`` and ``blocked`` rows
             # observe the invariant. ``unblock_task`` clears the gate
             # by emitting an ``"unblocked"`` event newer than the
-            # governance/loop event.
-            if _has_outstanding_governance_gate(conn, task_id):
+            # governance/loop event. 2026-09-02: the row's own
+            # ``block_kind`` column is passed through (pattern (c)) so
+            # alias-fenced operator gates (t_8a45c6e7 incident class)
+            # gate here too.
+            if _has_outstanding_governance_gate(
+                conn, task_id,
+                row_block_kind=(
+                    row["block_kind"]
+                    if "block_kind" in row.keys() else None
+                ),
+            ):
                 continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Worker / operator asked for human review — do not
@@ -8370,7 +8422,8 @@ def block_task(
                     continue
                 # Precondition 2: child must currently be in todo/blocked.
                 crow = conn.execute(
-                    "SELECT status FROM tasks WHERE id = ?", (_child,),
+                    "SELECT status, block_kind FROM tasks WHERE id = ?",
+                    (_child,),
                 ).fetchone()
                 if crow is None:
                     unblocks_skipped.append(
@@ -8389,7 +8442,13 @@ def block_task(
                 # ``recompute_ready``. This block's own act of naming
                 # the child in ``unblocks`` is not a licence to bypass
                 # those independent gates.
-                if _has_outstanding_governance_gate(conn, _child):
+                if _has_outstanding_governance_gate(
+                    conn, _child,
+                    row_block_kind=(
+                        crow["block_kind"]
+                        if "block_kind" in crow.keys() else None
+                    ),
+                ):
                     unblocks_skipped.append(
                         {"id": _child, "reason": "governance_gate"}
                     )
