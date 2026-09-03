@@ -1,76 +1,95 @@
 agents:
   demis_hassabis:
+    authenticity: 0.92
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
     path: agents/demis_hassabis
     profile_file: agent_profile.yaml
-    voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: production
-    voice_ready: true
-    interview_complete: true
-    questions: 289
     quality: 0.92
-    authenticity: 0.92
-    
-  steve_jobs:
-    path: agents/steve_jobs
-    profile_file: agent_profile.yaml
-    voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: production
-    voice_ready: false  # Voice clone not yet created
-    interview_complete: true
     questions: 289
-    quality: 0.90
-    authenticity: 0.92
-  
+    status: production
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 63d20b1d
   donald_knuth:
+    authenticity: null
+    interview_complete: false
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
     path: agents/donald_knuth
     profile_file: agent_profile.yaml
-    voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: pending
-    voice_ready: false
-    interview_complete: false
-    questions: 141  # Partial (141/289)
     quality: null
-    authenticity: null
-  
-  jony_ive:
-    path: agents/jony_ive
-    profile_file: agent_profile.yaml
+    questions: 141
+    status: pending
     voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: ready
-    voice_ready: true
-    interview_complete: true
-    questions: 280
-    quality: 0.993
-    authenticity: 1.0
-    voice_uuid: 9d513c17
+    voice_ready: false
   jeff_dean:
+    authenticity: null
+    interview_complete: false
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
     path: agents/jeff_dean
     profile_file: agent_profile.yaml
-    voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: pending
-    voice_ready: false
-    interview_complete: false
-    questions: 0
     quality: null
-    authenticity: null
-  
+    questions: 0
+    status: pending
+    voice_config_file: voice_config.yaml
+    voice_ready: false
+  jony_ive:
+    authenticity: 1.0
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    path: agents/jony_ive
+    profile_file: agent_profile.yaml
+    quality: 0.993
+    questions: 280
+    status: ready
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 9d513c17
   jordan_tigani:
+    authenticity: 0.88
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
     path: agents/jordan_tigani
     profile_file: agent_profile.yaml
-    voice_config_file: voice_config.yaml
-    interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: ready
-    voice_ready: true
-    interview_complete: true
-    questions: 284
     quality: 0.85
-    authenticity: 0.88
-
+    questions: 284
+    status: ready
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 0f2f9a7e
+  marc:
+    authenticity: 0.87
+    gate_status: pass
+    hr_card: t_057e7d32
+    interview_complete: true
+    interview_data_path: interview_data/L10_canonical_session
+    mode: voice
+    path: agents/marc
+    profile_file: agent_profile.yaml
+    quality: 0.86
+    questions: 109
+    role: product_concierge
+    router_key: marc
+    status: ready
+    text_enabled: true
+    title: Producer & Platform Strategy
+    unit: livekit-agent-marc.service
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: ee15cd5a
+    voice_uuid_note: dedicated Resemble clone (Marc Byers), built from memo_115, assigned
+      t_057e7d32 HR remediation
+  steve_jobs:
+    authenticity: 0.92
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    path: agents/steve_jobs
+    profile_file: agent_profile.yaml
+    quality: 0.9
+    questions: 289
+    status: production
+    voice_config_file: voice_config.yaml
+    voice_ready: false
   taylor:
     authenticity: 0.8727
     gate_status: pass
@@ -92,10 +111,9 @@ agents:
     voice_ready: true
     voice_uuid: 4e972f71
 metadata:
-    voice_uuid: 0f2f9a7e
-  total_agents: 6
-  production_ready: 2  # Demis + Steve
-  voice_enabled: 1     # Demis
-  interview_complete: 2
-  last_updated: "2026-05-11T08:45:00Z"
-  platform_version: "1.0.0"
+  interview_complete: 6
+  last_updated: '2026-09-03T21:32:00Z'
+  platform_version: 1.0.0
+  production_ready: 2
+  total_agents: 8
+  voice_enabled: 5
