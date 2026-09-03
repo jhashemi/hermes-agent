@@ -8,6 +8,13 @@ marked voice_ready=true with no voice_uuid, and the commit message recorded a
 clone UUID that actually belongs to jony_ive.
 
 These tests parse the REAL registry file so a corrupt push can never pass CI.
+
+Wave 20260903x addendum — deploy-path drift (found 2026-09-03): wave-w repaired
+and guarded the REPO copy, but the INSTALLED production copy under
+~/.hermes/plugins/voice-agents/agents/ was still the corrupt pre-repair file
+(mtime 20:14 vs repair commit 21:27). A suite that validates only the source
+tree is green while the live fleet parses garbage. The suite therefore runs
+every invariant against BOTH paths, plus an explicit sync test.
 """
 
 from pathlib import Path
@@ -15,9 +22,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-REGISTRY = (
+REPO = (
     Path(__file__).resolve().parent.parent
     / "plugins" / "voice-agents" / "agents" / "agents_registry.yaml"
+)
+# Production path actually read by the deployed fleet (spawn_agent_service,
+# bridge handlers). If this drifts from REPO, the repo guard is guarding
+# nothing — see test_installed_in_sync_with_repo.
+INSTALLED = (
+    Path.home() / ".hermes" / "plugins" / "voice-agents" / "agents"
+    / "agents_registry.yaml"
 )
 
 # Canonical clone identity, verified against Resemble /v2/voices on 2026-09-03:
@@ -35,13 +49,41 @@ CANONICAL_VOICE_UUIDS = {
 }
 
 
-@pytest.fixture(scope="module")
-def registry():
-    assert REGISTRY.exists(), f"registry file missing: {REGISTRY}"
-    with open(REGISTRY) as f:
+def _load(path):
+    assert path.exists(), f"registry file missing: {path}"
+    with open(path) as f:
         data = yaml.safe_load(f)  # must not raise
     assert isinstance(data, dict), "registry root must be a mapping"
     return data
+
+
+@pytest.fixture(scope="module", params=["repo", "installed"])
+def registry(request):
+    """Run every invariant against BOTH the repo copy and the deployed copy."""
+    return _load(REPO if request.param == "repo" else INSTALLED)
+
+
+def test_installed_copy_exists():
+    # A missing deployed artifact is itself a deploy failure.
+    assert INSTALLED.exists(), f"installed registry missing: {INSTALLED}"
+
+
+def test_installed_in_sync_with_repo():
+    """The deployed fleet must parse byte-identical content to the repo copy.
+
+    Guards against wave-w-class deploy drift: repo repaired + guarded while the
+    production path keeps serving the corrupt pre-repair file.
+    """
+    assert INSTALLED.exists(), f"installed registry missing: {INSTALLED}"
+    if REPO.resolve() == INSTALLED.resolve():
+        pytest.skip("plugin deployed via symlink; single artifact")
+    repo_bytes = REPO.read_bytes()
+    inst_bytes = INSTALLED.read_bytes()
+    assert inst_bytes == repo_bytes, (
+        "installed registry drifted from repo copy — deploy the repaired "
+        "registry (repo plugins/voice-agents/agents/agents_registry.yaml) to "
+        "~/.hermes/plugins/voice-agents/agents/ before trusting a green suite"
+    )
 
 
 def test_registry_yaml_parses(registry):
