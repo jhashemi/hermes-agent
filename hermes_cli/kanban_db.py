@@ -6459,6 +6459,27 @@ def heartbeat_claim(
         return False
 
 
+def _is_host_local_lock(lock: Optional[str]) -> bool:
+    """Return True if *lock* was minted by THIS host.
+
+    A claim lock is ``<host>:<pid>`` where ``<host>`` can be either the
+    OS hostname (``socket.gethostname()``) or the cluster-node ID
+    (``HERMES_CLUSTER_LOCAL_NODE``). Both are valid "this host" identifiers:
+    the hostname is used by production dispatchers while the cluster node
+    ID is the canonical identity surfaced by ``_local_node_id()`` and used
+    by tests / cluster-aware callers.  Checking only one of the two caused
+    live-PID extension to silently skip any claim whose lock prefix matched
+    the other form (#IDEMPOTENCY-CONTRACT: test_live_pid_claim_is_extended_not_reclaimed).
+    """
+    if not lock:
+        return False
+    lock_prefix = str(lock).split(":", 1)[0]
+    import socket
+    hostname_prefix = (socket.gethostname() or "unknown")
+    node_prefix = _local_node_id()
+    return lock_prefix in (hostname_prefix, node_prefix)
+
+
 def release_stale_claims(
     conn: sqlite3.Connection,
     *,
@@ -6491,7 +6512,6 @@ def release_stale_claims(
     """
     now = int(time.time())
     reclaimed = 0
-    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
     _local_node = _local_node_id()
     stale = conn.execute(
         "SELECT id, claim_lock, worker_pid, claim_expires, last_heartbeat_at, "
@@ -6503,7 +6523,7 @@ def release_stale_claims(
     ).fetchall()
     for row in stale:
         lock = row["claim_lock"] or ""
-        host_local = lock.startswith(host_prefix)
+        host_local = _is_host_local_lock(lock)
         hb = row["last_heartbeat_at"]
         wn = row["worker_node"] if "worker_node" in row.keys() else None
         remote_node = bool(wn and wn != _local_node)
@@ -9806,8 +9826,7 @@ def _terminate_reclaimed_worker(
     if not pid or pid <= 0 or not claim_lock:
         return info
 
-    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
-    if not str(claim_lock).startswith(host_prefix):
+    if not _is_host_local_lock(claim_lock):
         return info
     info["host_local"] = True
 
@@ -9977,7 +9996,6 @@ def enforce_max_runtime(
     import signal
     timed_out: list[str] = []
     now = int(time.time())
-    host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, "
@@ -9991,7 +10009,7 @@ def enforce_max_runtime(
     ).fetchall()
     for row in rows:
         lock = row["claim_lock"] or ""
-        if not lock.startswith(host_prefix):
+        if not _is_host_local_lock(lock):
             continue
         # Runtime is per attempt, not lifetime-of-task. ``tasks.started_at``
         # intentionally records the first time a task ever started, so retries
@@ -10335,7 +10353,6 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             "FROM tasks "
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
-        host_prefix = f"{_claimer_id().split(':', 1)[0]}:"
         for row in rows:
             # Cluster gate: skip tasks that were spawned on another node.
             # Their pids belong to that host; ``_pid_alive`` here would
@@ -10348,7 +10365,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
             # Only check liveness for claims owned by this host.
             lock = row["claim_lock"] or ""
-            if not lock.startswith(host_prefix):
+            if not _is_host_local_lock(lock):
                 continue
             # Skip liveness check inside the launch-window grace period
             # so a freshly-spawned worker isn't reclaimed before its PID
