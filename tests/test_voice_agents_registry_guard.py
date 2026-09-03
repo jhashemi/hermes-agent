@@ -15,6 +15,15 @@ and guarded the REPO copy, but the INSTALLED production copy under
 (mtime 20:14 vs repair commit 21:27). A suite that validates only the source
 tree is green while the live fleet parses garbage. The suite therefore runs
 every invariant against BOTH paths, plus an explicit sync test.
+
+Wave 20260903z addendum — mirror lag (found 2026-09-03 ~22:30 UTC): the plugin
+registry is a MIRROR of the canonical platform registry
+(~/executive_agents_platform/agents/agents_registry.yaml, the file the live
+voice bridge :8193 /list endpoint serves). The mirror had drifted: real clone
+uuids wired live on the platform (steve_jobs 66bca144, donald_knuth 3f5fb9f1,
+jeff_dean 00ace829) were absent here, so any redeploy of this plugin would
+silently drop those voices from the fleet. Mirror must cover every
+non-placeholder platform uuid.
 """
 
 from pathlib import Path
@@ -140,3 +149,60 @@ def test_canonical_clone_identities(registry):
             f"{name}: voice_uuid={a.get('voice_uuid')!r} != canonical "
             f"{expected!r} (API-verified 2026-09-03)"
         )
+
+
+# Canonical platform checkout: the file the live voice bridge (:8193 /list)
+# serves. The plugin registry is a mirror of it, not an independent truth.
+PLATFORM_REGISTRY = (
+    Path.home() / "executive_agents_platform" / "agents" / "agents_registry.yaml"
+)
+
+_PLACEHOLDER_PREFIX = "pending_clone_"
+
+
+def _load_platform_uuids():
+    assert PLATFORM_REGISTRY.exists(), (
+        f"canonical platform registry missing: {PLATFORM_REGISTRY}"
+    )
+    with open(PLATFORM_REGISTRY) as f:
+        platform = yaml.safe_load(f)
+    return {
+        name: a.get("voice_uuid")
+        for name, a in (platform.get("agents") or {}).items()
+        if a.get("voice_uuid") and not str(a.get("voice_uuid")).startswith(_PLACEHOLDER_PREFIX)
+    }
+
+
+def test_mirror_covers_platform_clone_uuids():
+    """Every real platform clone uuid must exist in the fleet mirror.
+
+    Guards the mirror-lag defect class: platform wires a clone (clone paid for,
+    verified live) but the mirrored plugin registry never learns it, so a
+    plugin redeploy silently drops a wired voice from the fleet.
+    """
+    mirror = _load(REPO)["agents"]
+    platform_uuids = _load_platform_uuids()
+    assert platform_uuids, "platform registry carries no real clone uuids?!"
+    missing = {
+        name: uuid
+        for name, uuid in platform_uuids.items()
+        if name not in mirror
+        or mirror[name].get("voice_uuid") != uuid
+    }
+    assert not missing, (
+        "fleet mirror lags canonical platform registry (redeploy would drop "
+        f"these wired voices): {missing}"
+    )
+
+
+def test_no_placeholder_uuid_marked_voice_ready(registry):
+    """A placeholder ('pending_clone_*') must never masquerade as a live voice."""
+    for name, a in registry["agents"].items():
+        uuid = a.get("voice_uuid")
+        if uuid and str(uuid).startswith(_PLACEHOLDER_PREFIX):
+            assert not a.get("voice_ready"), (
+                f"{name}: placeholder uuid {uuid} but voice_ready=true"
+            )
+            assert a.get("status") != "production", (
+                f"{name}: placeholder uuid {uuid} but status=production"
+            )

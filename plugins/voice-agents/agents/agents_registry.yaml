@@ -1,4 +1,20 @@
 agents:
+  bahram:
+    authenticity: 0.9
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    mode: both
+    path: agents/bahram
+    profile_file: agent_profile.yaml
+    quality: 0.95
+    router_key: bahram
+    status: production
+    text_enabled: true
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 9fd7430d
+    voice_uuid_note: dedicated Resemble library voice (Abdulaziz), assigned t_23ecc36a
+      remediation
   demis_hassabis:
     authenticity: 0.92
     interview_complete: true
@@ -12,16 +28,74 @@ agents:
     voice_ready: true
     voice_uuid: 63d20b1d
   donald_knuth:
-    authenticity: null
-    interview_complete: false
+    authenticity: 1.0
+    interview_complete: true
     interview_data_path: interview_data/L4_assembled_interview_complete.json
     path: agents/donald_knuth
     profile_file: agent_profile.yaml
-    quality: null
-    questions: 141
-    status: pending
+    quality: 0.985
+    questions: 336
+    status: ready
     voice_config_file: voice_config.yaml
-    voice_ready: false
+    voice_ready: true
+    voice_uuid: 3f5fb9f1
+    voice_uuid_note: canonical VoiceTwin set (platform .env RESEMBLE_VOICE_KNUTH);
+      live /synthesize round-trip re-verified 2026-09-03 HTTP 200, 379670 bytes
+      (t_5527f0ec gate D remediation)
+  elon_musk:
+    authenticity: 1.0
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    mode: both
+    path: agents/elon_musk
+    profile_file: agent_profile.yaml
+    quality: 0.985
+    questions: 40
+    status: production
+    text_enabled: true
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 0dda0b70
+  fei_fei_li:
+    agent_name: athena
+    authenticity: 0.8716
+    canonical_session_complete: true
+    fleet_entry: athena/rb1
+    fleet_manifest: config/lk_fleet_manifest.yaml
+    host: rb1
+    hr_card: t_c2356a19
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    interviewer: demis_hassabis
+    mode: text
+    path: agents/fei_fei_li
+    profile_file: agent_profile.yaml
+    quality: 0.8536
+    questions: 251
+    reactivation_note: unit stopped per KR-H1.3; ops action required to start
+      lk-worker@athena.service on rb1
+    reactivation_pending: true
+    router_key: athena
+    status: pending
+    text_enabled: true
+    unit: lk-worker@athena.service
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: db2d33e0
+  gerry_spence:
+    adaptive_qa_path: adaptive_qa_protocol.json
+    authenticity: 0.93
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    mode: both
+    path: agents/gerry_spence
+    profile_file: agent_profile.yaml
+    quality: 0.93
+    router_key: spence
+    status: production
+    text_enabled: true
+    voice_ready: true
+    voice_uuid: 27644c60
   jeff_dean:
     authenticity: null
     interview_complete: false
@@ -33,6 +107,9 @@ agents:
     status: pending
     voice_config_file: voice_config.yaml
     voice_ready: false
+    voice_uuid: 00ace829
+    voice_uuid_note: uuid reserved from canonical platform registry (live bridge
+      /list 2026-09-03); voice_ready stays false until clone provenance note exists
   jony_ive:
     authenticity: 1.0
     interview_complete: true
@@ -57,6 +134,20 @@ agents:
     voice_config_file: voice_config.yaml
     voice_ready: true
     voice_uuid: 0f2f9a7e
+  karl_friston:
+    adaptive_qa_path: adaptive_qa_protocol.json
+    authenticity: 0.88
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    mode: both
+    path: agents/karl_friston
+    profile_file: agent_profile.yaml
+    quality: 0.88
+    router_key: friston
+    status: production
+    text_enabled: true
+    voice_ready: true
+    voice_uuid: c7c55da8
   marc:
     authenticity: 0.87
     gate_status: pass
@@ -79,6 +170,54 @@ agents:
     voice_uuid: ee15cd5a
     voice_uuid_note: dedicated Resemble clone (Marc Byers), built from memo_115, assigned
       t_057e7d32 HR remediation
+  margaret_hamilton:
+    agent_name: apollo
+    authenticity: 0.89
+    canonical_session_complete: true
+    fleet_entry: apollo/h1
+    fleet_manifest: config/lk_fleet_manifest.yaml
+    host: h1
+    hr_card: t_9162b3af
+    interview_complete: true
+    interview_data_path: interview_data/L4_assembled_interview_complete.json
+    interviewer: karl_friston
+    mode: both
+    path: agents/margaret_hamilton
+    profile_file: agent_profile.yaml
+    quality: 0.87
+    questions: 280
+    reactivation_note: unit stopped per KR-H1.3; ops action required to start
+      livekit-agent-apollo.service on h1
+    reactivation_pending: true
+    router_key: apollo
+    status: pending
+    text_enabled: true
+    unit: livekit-agent-apollo.service
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 62f48fc7
+  nader:
+    authenticity: 0.86
+    gate_status: pass
+    hr_card: t_c1dd2f56
+    interview_complete: true
+    interview_data_path: interview_data/L10_canonical_session
+    mode: voice
+    path: agents/nader
+    profile_file: agent_profile.yaml
+    quality: 0.86
+    questions: 109
+    role: product_concierge
+    router_key: nader
+    status: ready
+    text_enabled: true
+    title: Growth & Strategy Lead
+    unit: livekit-agent-nader.service
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 12066e89
+    voice_uuid_note: stock_proxy (Resemble library gavin), assigned t_c1dd2f56 HR
+      remediation
   steve_jobs:
     authenticity: 0.92
     interview_complete: true
@@ -89,7 +228,10 @@ agents:
     questions: 289
     status: production
     voice_config_file: voice_config.yaml
-    voice_ready: false
+    voice_ready: true
+    voice_uuid: 66bca144
+    voice_uuid_note: VoiceTwin Atlas v2 (rebuilt 2026-07-19, 4 curated clips 34.6s,
+      Resemble-enhanced, synthesis verified HTTP 200 per platform voice_config)
   taylor:
     authenticity: 0.8727
     gate_status: pass
@@ -111,9 +253,9 @@ agents:
     voice_ready: true
     voice_uuid: 4e972f71
 metadata:
-  interview_complete: 6
-  last_updated: '2026-09-03T21:32:00Z'
+  interview_complete: 14
+  last_updated: '2026-09-03T22:38:02Z'
   platform_version: 1.0.0
   production_ready: 2
-  total_agents: 8
-  voice_enabled: 5
+  total_agents: 15
+  voice_enabled: 14
