@@ -40,13 +40,13 @@ agents:
     profile_file: agent_profile.yaml
     voice_config_file: voice_config.yaml
     interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: pending
-    voice_ready: false
-    interview_complete: false
-    questions: 0
-    quality: null
-    authenticity: null
-  
+    status: ready
+    voice_ready: true
+    interview_complete: true
+    questions: 280
+    quality: 0.993
+    authenticity: 1.0
+    voice_uuid: 9d513c17
   jeff_dean:
     path: agents/jeff_dean
     profile_file: agent_profile.yaml
@@ -64,14 +64,35 @@ agents:
     profile_file: agent_profile.yaml
     voice_config_file: voice_config.yaml
     interview_data_path: interview_data/L4_assembled_interview_complete.json
-    status: pending
-    voice_ready: false
-    interview_complete: false
-    questions: 220  # Partial (220/289)
-    quality: null
-    authenticity: null
+    status: ready
+    voice_ready: true
+    interview_complete: true
+    questions: 284
+    quality: 0.85
+    authenticity: 0.88
 
+  taylor:
+    authenticity: 0.8727
+    gate_status: pass
+    hr_card: t_bd2ca1ff
+    interview_complete: true
+    interview_data_path: interview_data/L10_canonical_session
+    mode: both
+    path: agents/taylor
+    profile_file: agent_profile.yaml
+    quality: 0.8545
+    questions: 109
+    role: product_concierge
+    router_key: taylor
+    status: ready
+    text_enabled: true
+    title: QA/QC Lead
+    unit: livekit-agent-taylor.service
+    voice_config_file: voice_config.yaml
+    voice_ready: true
+    voice_uuid: 4e972f71
 metadata:
+    voice_uuid: 0f2f9a7e
   total_agents: 6
   production_ready: 2  # Demis + Steve
   voice_enabled: 1     # Demis
