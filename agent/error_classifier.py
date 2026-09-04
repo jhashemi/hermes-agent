@@ -1020,6 +1020,12 @@ def _classify_by_status(
     if status_code == 403:
         # OpenRouter 403 "key limit exceeded" is actually billing. Other
         # providers also use 403 for account-plan or credit exhaustion.
+        # Kimi (and some other providers) return HTTP 403 for weekly/daily
+        # quota exhaustion with bodies like "You've reached your weekly
+        # (7-day) usage limit" — these match _QUOTA_EXHAUSTED_PATTERNS and
+        # must be treated as billing (immediate fallback, no retry) rather
+        # than a plain auth failure (which would trigger refresh attempts
+        # against a quota wall that won't reset for days). See t_8819eda2.
         if (
             (
                 provider == "xai-oauth"
@@ -1028,6 +1034,7 @@ def _classify_by_status(
             or "key limit exceeded" in error_msg
             or "spending limit" in error_msg
             or any(p in error_msg for p in _BILLING_PATTERNS)
+            or any(p in error_msg for p in _QUOTA_EXHAUSTED_PATTERNS)
         ):
             return result_fn(
                 FailoverReason.billing,

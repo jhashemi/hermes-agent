@@ -44,6 +44,11 @@ class TestBillingTriggersClientErrorAbort:
         Kept in lock-step with the source.  If you change one, change
         both — or, better, refactor the predicate into a shared helper
         and have both sites import it.
+
+        Updated for t_8819eda2: FailoverReason.rate_limit is now only
+        excluded from the abort set when classified_retryable=True
+        (transient RPM/burst 429s).  Quota-exhaustion 429s have
+        retryable=False and must fall through to the abort/fallback path.
         """
         from agent.error_classifier import FailoverReason
 
@@ -53,7 +58,7 @@ class TestBillingTriggersClientErrorAbort:
                 not classified_retryable
                 and not classified_should_compress
                 and classified_reason not in {
-                    FailoverReason.rate_limit,
+                    FailoverReason.rate_limit if classified_retryable else None,
                     FailoverReason.overloaded,
                     FailoverReason.context_overflow,
                     FailoverReason.payload_too_large,
@@ -77,7 +82,41 @@ class TestBillingTriggersClientErrorAbort:
             "credential-pool rotation and provider fallback have failed — see #31273."
         )
 
+    def test_quota_exhausted_429_now_aborts_the_loop(self):
+        """Quota-exhaustion 429 (retryable=False) → ``is_client_error`` True.
 
+        INCIDENT-01 / t_8819eda2 fix: rate_limit with retryable=False must
+        reach the abort path rather than burning 5 retries in the backoff loop.
+        """
+        from agent.error_classifier import FailoverReason
+
+        # What classify_api_error() returns for an ollama/kimi weekly-quota 429:
+        #   reason=rate_limit, retryable=False, should_compress=False
+        assert self._mirror_is_client_error(
+            classified_retryable=False,
+            classified_reason=FailoverReason.rate_limit,
+        ), (
+            "FailoverReason.rate_limit with retryable=False (quota exhaustion) "
+            "must trigger is_client_error so the loop aborts after pool-rotation "
+            "and fallback-chain have failed, not burn 5 retries — see t_8819eda2."
+        )
+
+    def test_transient_429_stays_in_backoff_loop(self):
+        """Transient RPM/burst 429 (retryable=True) → NOT is_client_error.
+
+        Transient rate limits must still go through backoff-and-retry.
+        Only quota-exhaustion 429s (retryable=False) reach the abort path.
+        """
+        from agent.error_classifier import FailoverReason
+
+        # Transient 429: reason=rate_limit, retryable=True
+        assert not self._mirror_is_client_error(
+            classified_retryable=True,
+            classified_reason=FailoverReason.rate_limit,
+        ), (
+            "FailoverReason.rate_limit with retryable=True (transient burst 429) "
+            "must NOT be classified as a client error — it should backoff-and-retry."
+        )
 
     def test_context_overflow_still_falls_through_to_compression(self):
         """Sanity check: context-overflow must NOT be classified as

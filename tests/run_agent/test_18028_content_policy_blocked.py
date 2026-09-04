@@ -63,6 +63,10 @@ class TestContentPolicyTriggersClientErrorAbort:
         """Exact shape of conversation_loop.py's is_client_error check.
 
         Kept in lock-step with the source. If you change one, change both.
+
+        Updated for t_8819eda2: FailoverReason.rate_limit is only excluded
+        when classified_retryable=True (transient 429s). Quota-exhaustion
+        429s (retryable=False) must reach the abort path.
         """
         from agent.error_classifier import FailoverReason
 
@@ -72,7 +76,7 @@ class TestContentPolicyTriggersClientErrorAbort:
                 not classified_retryable
                 and not classified_should_compress
                 and classified_reason not in {
-                    FailoverReason.rate_limit,
+                    FailoverReason.rate_limit if classified_retryable else None,
                     FailoverReason.overloaded,
                     FailoverReason.context_overflow,
                     FailoverReason.payload_too_large,

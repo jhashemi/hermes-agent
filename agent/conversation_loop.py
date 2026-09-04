@@ -4846,15 +4846,32 @@ def run_conversation(
                 # just burns more paid requests against a depleted
                 # balance with no recovery mechanism left — see #31273
                 # (real-world: ~$40 in 48h on a 24/7 gateway).  Aborting
-                # mirrors how 401/403 (also ``should_fallback=True``)
-                # already behave once their recovery paths have failed.
+                # mirrors how 401/403 (also ``should_fallback=True``).
+                #
+                # ``FailoverReason.rate_limit`` with ``retryable=False``
+                # (quota-exhaustion 429s, classified by INCIDENT-01
+                # _QUOTA_EXHAUSTED_PATTERNS) is similarly NOT in the
+                # exclusion set below. Quota walls (weekly/monthly/daily
+                # limit) will not recover within the retry window; when
+                # both pool-rotation and fallback-chain have been exhausted
+                # the backoff loop just burns all 5 attempts against the
+                # same dead wall.  Only ``retryable=True`` rate-limit
+                # errors (transient RPM/burst 429s) stay in the exclusion
+                # set and receive the normal backoff-and-retry treatment.
+                # See t_8819eda2 (ERR-DRIVE-01 follow-up).
                 is_client_error = (
                     is_local_validation_error
                     or (
                         not classified.retryable
                         and not classified.should_compress
                         and classified.reason not in {
-                            FailoverReason.rate_limit,
+                            # Only truly-transient rate-limits stay in the
+                            # exclusion set.  Quota-exhaustion 429s have
+                            # retryable=False (INCIDENT-01) and must fall
+                            # through to the abort/fallback path below.
+                            FailoverReason.rate_limit
+                            if classified.retryable
+                            else None,
                             FailoverReason.overloaded,
                             FailoverReason.context_overflow,
                             FailoverReason.payload_too_large,
