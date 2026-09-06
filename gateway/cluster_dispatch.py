@@ -330,7 +330,13 @@ def remote_spawn_cmd(
         for sk in skills:
             if sk and sk != "kanban-worker":
                 remote_cmd_parts.extend(["--skills", sk])
-    remote_cmd_parts.extend(["chat", "-q", prompt])
+    # shlex.quote the prompt: it contains spaces ("work kanban task <id>") and is
+    # joined into a bash inline script via ' '.join(remote_cmd_parts).  Without
+    # quoting, bash word-splits the value so "-q" only receives "work" and the
+    # remaining tokens ("kanban", "task", "<id>") land as unrecognised top-level
+    # arguments — reproducing the "unrecognized arguments: kanban task <id>" error
+    # observed in run-186 of t_okr_market_research_assignment (RCA t_276cb9df).
+    remote_cmd_parts.extend(["chat", "-q", shlex.quote(prompt)])
 
     # Environment variables for the remote worker
     env_lines = []

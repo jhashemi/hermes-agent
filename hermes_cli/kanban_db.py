@@ -12831,6 +12831,77 @@ def _default_spawn(
     # subprocess._active.  Without this, _classify_worker_exit() sees
     # "unknown" for every spawned worker (FIX-A: Popen-retention bug).
     _popen_retention[proc.pid] = proc
+
+    # ── Spawn-time argparse guard (RCA t_276cb9df) ───────────────────────
+    # If the child exits with rc=2 within a short window (~1 s), read the
+    # first few bytes of its log and check for an argparse "unrecognised
+    # arguments" error.  That error means the spawn command was malformed
+    # (e.g. an unquoted prompt was word-split by the remote shell, or a CLI
+    # flag mismatch).  A plain crash / nonzero-exit re-queue would just
+    # cycle the worker through the same broken command forever.  Instead
+    # we surface a typed block immediately so a human (or the re-spawn
+    # guard) sees the real cause, and we emit a ``spawn_parse_error`` event
+    # so the log is searchable.
+    # NOTE: this is best-effort — we use a short poll so normal workers
+    # that start quickly are not delayed.  False negatives (argparse dies
+    # but we miss the window) fall through to the existing crash path.
+    try:
+        _rc = proc.poll()
+        if _rc is None:
+            import time as _time
+            _time.sleep(0.5)
+            _rc = proc.poll()
+        if _rc == 2:
+            # Flush / close the child's log fd ref so reads see current bytes.
+            try:
+                log_f.flush()
+            except Exception:
+                pass
+            try:
+                with open(log_path, "rb") as _lf:
+                    _head = _lf.read(4096).decode("utf-8", errors="replace")
+            except Exception:
+                _head = ""
+            if "unrecognized arguments" in _head or "error: unrecognized" in _head:
+                # Extract the offending tokens for a human-readable message.
+                _err_line = ""
+                for _line in _head.splitlines():
+                    if "unrecognized arguments" in _line:
+                        _err_line = _line.strip()
+                        break
+                _block_reason = (
+                    f"spawn-parse-error: hermes argparse rejected the spawn command "
+                    f"(rc=2, unrecognised arguments). "
+                    f"Likely cause: unquoted multi-word -q prompt injected as separate "
+                    f"tokens on a remote SSH spawn. "
+                    f"Check remote_spawn_cmd in gateway/cluster_dispatch.py. "
+                    f"Offending line: {_err_line!r}. "
+                    f"Spawn cmd (first 512): {str(spawn_cmd)[:512]}"
+                )
+                logger.error(
+                    "[dispatch] spawn-parse-error for task %s pid=%d: %s",
+                    task.id, proc.pid, _block_reason,
+                )
+                # Emit a dedicated event so the board shows the typed error.
+                try:
+                    with connect() as _conn:
+                        _append_event(
+                            _conn, task.id,
+                            "spawn_parse_error",
+                            {"pid": proc.pid, "reason": _block_reason,
+                             "offending_line": _err_line},
+                            run_id=task.current_run_id,
+                        )
+                except Exception as _evt_err:
+                    logger.debug(
+                        "[dispatch] failed to append spawn_parse_error event: %s",
+                        _evt_err,
+                    )
+    except Exception as _guard_err:
+        # Fail-open: the guard must never block a real spawn.
+        logger.debug("[dispatch] spawn-parse guard raised: %s", _guard_err)
+    # ── End spawn-time argparse guard ────────────────────────────────────
+
     return proc.pid
 
 
