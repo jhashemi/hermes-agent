@@ -98,6 +98,80 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Event-id accumulator (Option A — ADR-006b Phase 3)
+# ---------------------------------------------------------------------------
+# When a write_txn commits, it collects all task_events.id values minted by
+# _append_event during that txn.  If there is a parent write_txn on the
+# stack, the ids bubble up to it (nested-txn pattern).  After the outermost
+# write_txn commits, the ids sit in ``_event_id_pending`` until
+# ``_fire_kanban_write_op`` reads and clears them.
+#
+# ContextVar gives per-asyncio-task / per-coroutine isolation for free;
+# plain list mutation is safe for synchronous callers because SQLite
+# write_txn serialises them anyway.
+#
+# Stack layout:
+#   _event_id_stack  — list of lists, one per active write_txn frame
+#   _event_id_pending — ids committed by the outermost txn, not yet read by
+#                        the seam fire; None means "no ids pending"
+# ---------------------------------------------------------------------------
+_event_id_stack: ContextVar[list[list[int]]] = ContextVar(
+    "_event_id_stack", default=[]
+)
+_event_id_pending: ContextVar[Optional[list[int]]] = ContextVar(
+    "_event_id_pending", default=None
+)
+
+
+def _push_event_accumulator() -> None:
+    """Push a fresh accumulator frame onto the stack."""
+    stack = _event_id_stack.get()
+    _event_id_stack.set(list(stack) + [[]])
+
+
+def _pop_and_merge_event_accumulator() -> None:
+    """Pop the top frame.
+
+    On success (called after commit):
+    - If there is a parent frame, merge collected ids up into it.
+    - If this was the outermost frame, stash in _event_id_pending so
+      _fire_kanban_write_op can pick them up.
+
+    On rollback (called from except path):
+    - Discard collected ids — they never landed.
+    """
+    stack = _event_id_stack.get()
+    if not stack:
+        return
+    finished = stack[-1]
+    remaining = stack[:-1]
+    _event_id_stack.set(remaining)
+    if remaining:
+        # Nested txn: bubble ids up to the parent frame.
+        remaining[-1].extend(finished)
+    else:
+        # Outermost txn: stash for _fire_kanban_write_op.
+        pending = _event_id_pending.get()
+        if pending is None:
+            _event_id_pending.set(list(finished))
+        else:
+            _event_id_pending.set(pending + finished)
+
+
+def _discard_event_accumulator() -> None:
+    """Pop the top frame and discard (rollback path)."""
+    stack = _event_id_stack.get()
+    if stack:
+        _event_id_stack.set(stack[:-1])
+
+
+def _take_pending_event_ids() -> list[int]:
+    """Return and clear the pending event ids."""
+    ids = _event_id_pending.get() or []
+    _event_id_pending.set(None)
+    return ids
+
 
 # =============================================================================
 # INCIDENT-01 — dispatch-gate model-liveness KV reader
@@ -430,6 +504,7 @@ def _fire_kanban_write_op(
     task_id: str = "",
     *,
     result: Any = None,
+    event_ids: Optional[list] = None,
     **fields: Any,
 ) -> None:
     """Fire the ``kanban_write_op`` observer seam, fully best-effort.
@@ -458,6 +533,14 @@ def _fire_kanban_write_op(
     * ``result`` — the op's return value (task id from ``create_task``,
       row id from ``add_comment``, ``Task`` from ``claim_task`` …).
       Used by the mirror to preserve id passthrough across backends.
+    * ``event_ids`` — list of SQLite-minted ``task_events.id`` values
+      appended by this op (in insertion order).  The DuckDB mirror
+      uses these to INSERT with an explicit ``id`` column so both
+      stores share the same id space.  ``None`` / empty list means
+      the op emits no events (``heartbeat_claim``,
+      ``release_stale_claims`` heartbeat variant, …) or that the
+      caller opted out of id passthrough.  Version-guarded: plugins
+      that predate Option A simply ignore this kwarg.
     * ``**fields`` — the op-specific kwargs the mirror needs to replay
       the write (``title``, ``assignee`` for ``create_task``;
       ``parent_id``, ``child_id`` for ``link_tasks`` …).
@@ -482,6 +565,13 @@ def _fire_kanban_write_op(
                 break
     except Exception:  # pragma: no cover - defensive
         sqlite_path = None
+    # Pop the event-id accumulator that write_txn pushed.  If the caller
+    # passed explicit event_ids (e.g. from a nested or manual site) use those;
+    # otherwise use the auto-accumulated list.
+    collected_ids = _take_pending_event_ids()
+    resolved_event_ids: list[int] = (
+        list(event_ids) if event_ids is not None else collected_ids
+    )
     _fire_kanban_lifecycle_hook(
         "kanban_write_op",
         task_id,
@@ -489,6 +579,7 @@ def _fire_kanban_write_op(
         board=get_current_board(),
         sqlite_path=sqlite_path,
         result=result,
+        event_ids=resolved_event_ids,
         **fields,
     )
 
@@ -3813,12 +3904,19 @@ def write_txn(conn: sqlite3.Connection):
     The explicit ROLLBACK on exception is wrapped in try/except so that
     a SQLite auto-rollback (which leaves no active transaction) does not
     shadow the original exception with a spurious rollback error.
+
+    Also pushes an event-id accumulator (Option A — ADR-006b §4-A) onto
+    the thread-local stack so that _append_event auto-captures its
+    lastrowid; _fire_kanban_write_op pops it after commit.
     """
     _assert_not_delegated_child_mutation()
+    _push_event_accumulator()
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
     try:
         yield conn
     except Exception:
+        # On rollback the events never landed — discard the accumulator.
+        _discard_event_accumulator()
         try:
             conn.execute("ROLLBACK")
         except sqlite3.OperationalError:
@@ -3833,6 +3931,7 @@ def write_txn(conn: sqlite3.Connection):
         except Exception:
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
+            _discard_event_accumulator()
             try:
                 conn.execute("ROLLBACK")
             except sqlite3.OperationalError:
@@ -3841,6 +3940,9 @@ def write_txn(conn: sqlite3.Connection):
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
+        # Merge committed event ids up the stack (or into _event_id_pending
+        # if this is the outermost txn).
+        _pop_and_merge_event_accumulator()
 
 
 # ---------------------------------------------------------------------------
@@ -5438,21 +5540,32 @@ def _append_event(
     payload: Optional[dict] = None,
     *,
     run_id: Optional[int] = None,
-) -> None:
+) -> int:
     """Record an event row.  Called from within an already-open txn.
 
     ``run_id`` is optional: pass the current run id so UIs can group
     events by attempt. For events that aren't scoped to a single run
     (task created/edited/archived, dependency promotion) leave it None
     and the row carries NULL.
+
+    Returns the SQLite-minted row id (``cur.lastrowid``) so callers
+    can collect the ids and forward them to ``_fire_kanban_write_op``
+    as ``event_ids``; the DuckDB mirror then inserts the same id
+    values rather than minting new ones from its own sequence.
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    row_id = int(cur.lastrowid or 0)
+    # Auto-append to the active accumulator (if any write op has activated one).
+    stack = _event_id_stack.get()
+    if stack:
+        stack[-1].append(row_id)
+    return row_id
 
 
 def _end_run(
