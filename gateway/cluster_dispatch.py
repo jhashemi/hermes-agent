@@ -486,6 +486,21 @@ def create_cluster_node_router(board: str) -> NodeRouter:
 
     Env override:
       - ``HERMES_CLUSTER_DISPATCH`` in {0, false, no, off} disables globally.
+
+    HERMES_HOME scoping (documented asymmetry, see kanban.md
+    "Profile-scoped HERMES_HOME"): config resolution goes through
+    ``hermes_cli.config.load_config()``, which honors ``HERMES_HOME``.
+    The gateway runs with ``HERMES_HOME`` at the root Hermes home and is
+    the only process whose routing decision matters. Under a
+    profile-scoped ``HERMES_HOME`` (e.g. ``~/.hermes/profiles/<name>``)
+    the profile config normally has no cluster-dispatch keys, so this
+    factory fail-safes to local-only even for whitelisted boards. That
+    direction is deliberate and fail-closed: a worker-shell live-fire of
+    this factory returning LOCAL is expected, not a whitelist-gate bug.
+    Live-fire with the gateway's environment (``HERMES_HOME=<root>``)
+    when testing the real routing path. Likewise, ``hermes config set
+    kanban.cluster_dispatch*`` under a profile writes the profile config
+    the gateway never reads — set these keys from the root environment.
     """
     # Check config
     try:
