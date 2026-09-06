@@ -174,11 +174,26 @@ class TestRemoteSpawnCmd:
         assert "ConnectTimeout=10" in cmd
 
     def test_remote_cmd_mirrors_local_hermes_spawn(self):
+        # RCA t_276cb9df: the multi-word -q prompt MUST be shell-quoted in the
+        # remote inline script. The remote command is joined with spaces and
+        # wrapped in `bash -l -c "..."`, so an unquoted "work kanban task t_abc"
+        # is word-split by the remote shell: `-q` receives only "work" and the
+        # remaining tokens land as unrecognized top-level arguments (argparse
+        # rc=2, worker dead in ~1s, run-186 of t_okr_market_research_assignment).
         cmd = self._cmd()
         payload = cmd[-1]
         assert "hermes -p werner_vogels" in payload
         assert "--skills kanban-worker" in payload
-        assert "chat -q work kanban task t_abc" in payload
+        # The prompt must arrive as ONE shell word: quoted, spaces intact.
+        assert "chat -q 'work kanban task t_abc'" in payload
+
+    def test_remote_cmd_prompt_quoted_against_shell_metacharacters(self):
+        # Regression for RCA t_276cb9df defect (1): a prompt is caller/task-id
+        # influenced text; quoting must survive shell metacharacters so the
+        # payload cannot break out of the -q argument.
+        cmd = self._cmd(task_id="t_x; rm -rf /tmp/$(whoami)")
+        payload = cmd[-1]
+        assert "chat -q 'work kanban task t_x; rm -rf /tmp/$(whoami)'" in payload
 
     def test_env_exports_present(self):
         cmd = self._cmd()

@@ -854,6 +854,160 @@ class TestSharedBoardPaths:
 
 
 # ---------------------------------------------------------------------------
+# Spawn-time argparse guard (RCA t_276cb9df, defect 2)
+#
+# Run-186 of t_okr_market_research_assignment: the remote spawn passed the
+# multi-word "work kanban task <id>" prompt unquoted, the remote shell
+# word-split it, and hermes argparse rejected the leftovers with rc=2 —
+# the worker died ~1s after spawn and the dispatcher re-queued it onto the
+# SAME broken command forever. The guard converts that signature
+# (rc==2 within ~1s + "unrecognized arguments" in the worker log head)
+# into a typed spawn_parse_error event so the failure is loud and
+# searchable instead of a silent crash-requeue loop.
+# ---------------------------------------------------------------------------
+class TestSpawnParseErrorGuard:
+    def _task(self, tmp_path):
+        return kb.Task(
+            id="t_parse_guard",
+            title="x",
+            body=None,
+            assignee="coder",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=str(tmp_path / "ws"),
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+            branch_name=None,
+        )
+
+    def _spawn_env(self, monkeypatch, tmp_path):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+        # HERMES_KANBAN_HOME overrides the .hermes ROOT used for kanban path
+        # resolution (not the kanban subdir). Pin it to the same root so the
+        # tempdir heuristic warning doesn't fire and paths stay isolated.
+        monkeypatch.setenv("HERMES_KANBAN_HOME", str(default_home))
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+
+    def _fake_popen(self, monkeypatch, rc, log_path, writes):
+        """Popen stub whose child immediately exits with `rc` after writing
+        the given bytes to the (dispatcher-pre-created) log file."""
+
+        class _FakeProc:
+            pid = 4242
+
+            def poll(self):
+                return rc
+
+        def _popen(cmd, **kwargs):
+            if writes is not None:
+                log_path.write_bytes(writes)
+            return _FakeProc()
+
+        monkeypatch.setattr("subprocess.Popen", _popen)
+
+    def test_guard_emits_typed_event_on_unrecognized_arguments(
+        self, tmp_path, monkeypatch
+    ):
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        # Derive the log path from the same resolver the dispatcher uses —
+        # the test must track path-resolution reality, not guess it.
+        log_dir = kb.worker_logs_dir(board="b")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "t_parse_guard.log"
+
+        events = []
+        self._fake_popen(
+            monkeypatch, 2, log_path,
+            b"usage: hermes [-h] ...\n"
+            b"hermes: error: unrecognized arguments: kanban task t_parse_guard\n",
+        )
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind, payload)),
+        )
+        # Stub the module-level connect() context manager so the event write
+        # doesn't hit a real board DB inside the test sandbox.
+        import contextlib
+
+        @contextlib.contextmanager
+        def _fake_connect():
+            yield object()
+
+        monkeypatch.setattr(kb, "connect", _fake_connect)
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert len(events) == 1
+        tid, kind, payload = events[0]
+        assert tid == "t_parse_guard"
+        assert kind == "spawn_parse_error"
+        assert "unrecognised arguments" in payload["reason"]
+        assert "unrecognized arguments: kanban task t_parse_guard" in payload["offending_line"]
+
+    def test_guard_silent_when_child_runs_normally(self, tmp_path, monkeypatch):
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        events = []
+        self._fake_popen(monkeypatch, None, None, None)  # child still running
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind)),
+        )
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert events == []
+
+    def test_guard_silent_on_rc2_without_unrecognized_arguments(
+        self, tmp_path, monkeypatch
+    ):
+        # rc=2 for an unrelated reason must NOT produce a spawn_parse_error.
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        log_dir = kb.worker_logs_dir(board="b")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "t_parse_guard.log"
+
+        events = []
+        self._fake_popen(monkeypatch, 2, log_path, b"some other failure\n")
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind)),
+        )
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert events == []
+
+
+# ---------------------------------------------------------------------------
 # latest_summary / latest_summaries — surface task_runs.summary handoffs
 # ---------------------------------------------------------------------------
 
