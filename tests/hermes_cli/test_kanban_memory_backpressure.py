@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import time
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -332,10 +333,16 @@ def test_max_spawn_counts_already_running_toward_cap(
         ]
         with kb.write_txn(conn):
             for tid in already_running:
+                # Model a genuine claim: claim_lock AND an unexpired
+                # claim_expires. Under the merged reconcile_orphaned_running
+                # semantics (fork lineage), running-without-claim_expires is
+                # broken bookkeeping and gets requeued to ready before the
+                # max_spawn cap counts running rows — which would make this
+                # test's premise (2 live claims toward the cap) impossible.
                 conn.execute(
-                    "UPDATE tasks SET status = 'running', claim_lock = 'test:1' "
-                    "WHERE id = ?",
-                    (tid,),
+                    "UPDATE tasks SET status = 'running', claim_lock = 'test:1', "
+                    "claim_expires = ? WHERE id = ?",
+                    (int(time.time()) + 3600, tid),
                 )
         for i in range(4):
             kb.create_task(conn, title=f"n{i}", assignee="jeff_dean")

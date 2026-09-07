@@ -12183,6 +12183,13 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # counter (see the post-txn loop below).
     crash_details: list[tuple[str, int, str, bool, str]] = []
     # (task_id, pid, claimer, protocol_violation, error_text)
+    # RFC #58548 worker-lifecycle exit hooks: accumulated per reclaimed
+    # task in the loop below, fired after the reclaim txn commits.
+    # Initializer restored 2026-09-07: fork merge 4f058fc5 kept both the
+    # append site and the consumer but dropped this line, raising
+    # NameError in detect_crashed_workers and failing every dispatcher
+    # tick on every board (1,340+ failed ticks since 04:14 UTC).
+    exited_hook_payloads: list[dict] = []
     _local_node = _local_node_id()
     with write_txn(conn):
         rows = conn.execute(
@@ -13436,6 +13443,11 @@ def dispatch_once(
                 default_assignee=default_assignee,
                 max_in_progress_per_profile=max_in_progress_per_profile,
                 reconcile_orphans=reconcile_orphans,
+                # FIX-B passthrough restored 2026-09-07: fork merge 4f058fc5
+                # kept the kwarg on the exception-fallback call sites but
+                # dropped it here (the lock-acquired path the gateway uses),
+                # silently disabling the memory backpressure gate.
+                memory_backpressure_gb=memory_backpressure_gb,
             )
             # Still under the dispatch lock: run the periodic PASSIVE WAL
             # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
