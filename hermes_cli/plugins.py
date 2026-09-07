@@ -1252,6 +1252,16 @@ class PluginManifest:
     # category plugin at ``plugins/image_gen/openai/`` the key is
     # ``image_gen/openai``. When empty, falls back to ``name``.
     key: str = ""
+    # Default-load policy — read from ``plugin.yaml``'s ``default_state``
+    # field (``enabled`` | ``disabled``). ``"disabled"`` (the default)
+    # preserves the historical opt-in behavior: the plugin only loads if
+    # its key or name appears in ``plugins.enabled``. ``"enabled"`` flips
+    # the polarity: the plugin loads unless explicitly named in
+    # ``plugins.disabled``. Use this for cluster hooks that should be
+    # baseline agent behavior (e.g. the VFE cluster hook stack).
+    # Only honored for ``kind='standalone'`` — other kinds already have
+    # their own discovery/activation paths.
+    default_state: str = "disabled"
     portable: bool = False
     skill_namespace: str = ""
     # Declared capability ids from the manifest ``capabilities:`` list
@@ -4977,6 +4987,7 @@ class PluginManager:
                 path=str(plugin_dir),
                 kind=kind,
                 key=key,
+                default_state=default_state,
                 capabilities=_parse_declared_capabilities(
                     data.get("capabilities"), name
                 ),
