@@ -2501,7 +2501,14 @@ class TestRunConversation:
             profile_key="/profile",
             session_id=agent.session_id or "",
         )
-        relay_turn = object()
+        relay_turn = SimpleNamespace(
+            relay_enabled=True,
+            closed=False,
+            handle=None,
+            logical_llm_calls={},
+            logical_llm_lock=threading.RLock(),
+            finalize_lock=threading.RLock(),
+        )
         coordinator = MagicMock()
         coordinator.acquire_conversation.return_value = relay_lease
         coordinator.begin_turn.return_value = relay_turn
