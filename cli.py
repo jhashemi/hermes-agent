@@ -22039,6 +22039,23 @@ def main(
             # model's vision input.
             single_query_image_urls: list[str] = []
             _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+            # Worker-side host-capacity admission (t_2cff74c4).
+            # Probe PSI + load BEFORE the agent does any work.  If the host
+            # is saturated, release the claim back to ready and exit cleanly
+            # so the dispatcher can retry on the next tick or on a healthier
+            # host.  Fail-open: if the probe itself fails we proceed normally.
+            if _kanban_task_id:
+                try:
+                    _run_id_raw = os.environ.get("HERMES_KANBAN_RUN_ID", "").strip()
+                    _hcap_run_id = int(_run_id_raw) if _run_id_raw else None
+                    from hermes_cli.host_capacity import check_and_defer_if_saturated as _hcap_check
+                    if _hcap_check(_kanban_task_id, run_id=_hcap_run_id):
+                        # Claim released; exit without doing work.
+                        sys.exit(0)
+                except SystemExit:
+                    raise
+                except Exception as _hcap_exc:
+                    logger.debug("host_capacity admission check failed (fail-open): %s", _hcap_exc)
             if _kanban_task_id:
                 try:
                     from hermes_cli import kanban_db as _kb

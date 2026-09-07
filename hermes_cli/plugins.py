@@ -513,6 +513,26 @@ VALID_HOOKS: Set[str] = {
     # cache and emits ``dispatch.node_rejected`` telemetry alongside
     # the veto return, per Demis amendment A2).
     "kanban_task_pre_dispatch",
+    # Worker-side host-capacity admission seam (t_2cff74c4).
+    # Fires in the WORKER PROCESS at startup, AFTER the env is configured
+    # and BEFORE the agent executes any work.  The kernel admission check
+    # in hermes_cli.host_capacity fires this hook and then performs the
+    # built-in PSI + load probe.  A plugin callback may also return a veto:
+    #
+    #   {"veto": True, "reason": "<human-readable reason>",
+    #    "source": "<optional label>"}
+    #
+    # to defer the task without counting a failure.  Abstentions (None,
+    # non-dict, dict without ``veto: True``) let the worker proceed.
+    # A raising callback is swallowed (fail-open).
+    #
+    # Kwargs (stable, additive-only):
+    #   * task_id: str     — claimed task id (from HERMES_KANBAN_TASK).
+    #   * run_id: int|None — current run id (from HERMES_KANBAN_RUN_ID).
+    #   * board: str|None  — active board slug.
+    #   * assignee: str|None — task assignee.
+    #   * profile_name: str — active profile.
+    "kanban_worker_pre_execute",
 }
 
 # Hooks whose return value carries a directive that the shell-hook response
