@@ -287,6 +287,7 @@ export function BoardSwitcher() {
   const qc = useQueryClient()
   const slug = useValue($boardSlug)
   const { data: boards } = useQuery({ queryFn: fetchBoards, queryKey: BOARDS_KEY, staleTime: 30_000 })
+
   // Cluster fan-out gives us origin_host per board so the switcher can badge
   // peer-host boards distinctly from local ones. It's a soft dependency: if
   // the fan-out is down we keep the switcher fully functional on local
@@ -299,6 +300,7 @@ export function BoardSwitcher() {
     // cluster info" and render the local list on its own.
     retry: false
   })
+
   const [adding, setAdding] = useState(false)
   const [settingsFor, setSettingsFor] = useState<BoardMeta | null>(null)
   const [renameFor, setRenameFor] = useState<BoardMeta | null>(null)
@@ -351,8 +353,9 @@ export function BoardSwitcher() {
   // pointer is per-host) but if two hosts happen to point at the same slug
   // we fall back to the first match; peer boards still badge correctly.
   const localHost =
-    Object.entries(cluster?.currents ?? {}).find(([, currentSlugOnHost]) => currentSlugOnHost === boards.current)?.[0]
-    ?? null
+    Object.entries(cluster?.currents ?? {}).find(
+      ([, currentSlugOnHost]) => currentSlugOnHost === boards.current
+    )?.[0] ?? null
 
   // Merge: start with local boards (they carry full metadata for settings)
   // and stamp them with the resolved local origin_host. Then append every
@@ -363,17 +366,23 @@ export function BoardSwitcher() {
     ...b,
     origin_host: b.origin_host ?? localHost ?? null
   }))
+
   const localKeys = new Set(merged.map(b => `${b.origin_host ?? localHost ?? ''}::${b.slug}`))
+
   for (const b of cluster?.boards ?? []) {
     const key = `${b.origin_host ?? ''}::${b.slug}`
+
     if (b.origin_host && b.origin_host !== localHost && !localKeys.has(key)) {
       merged.push(b)
     }
   }
 
   const currentSlug = slug || boards.current
-  const current = merged.find(meta => meta.slug === currentSlug && (meta.origin_host === localHost || !meta.origin_host))
-    ?? boards.boards.find(meta => meta.slug === currentSlug)
+
+  const current =
+    merged.find(meta => meta.slug === currentSlug && (meta.origin_host === localHost || !meta.origin_host)) ??
+    boards.boards.find(meta => meta.slug === currentSlug)
+
   const label = current?.name || current?.slug || k.board
 
   // Show a short host tag when we know the origin AND either (a) more than
@@ -387,14 +396,14 @@ export function BoardSwitcher() {
     if (!showHostBadges || !host) {
       return null
     }
+
     const isPeer = localHost !== null && host !== localHost
+
     return (
       <span
         className={
           'ml-1 rounded px-1 py-px text-[0.5625rem] font-medium leading-none tabular-nums ' +
-          (isPeer
-            ? 'bg-(--ui-surface-hover) text-(--ui-text-secondary)'
-            : 'text-(--ui-text-quaternary)')
+          (isPeer ? 'bg-(--ui-surface-hover) text-(--ui-text-secondary)' : 'text-(--ui-text-quaternary)')
         }
         title={isPeer ? `Peer host: ${host}` : `Local host: ${host}`}
       >
@@ -418,17 +427,21 @@ export function BoardSwitcher() {
         <DropdownMenuContent align="center">
           {merged.map(meta => {
             const key = `${meta.origin_host ?? '?'}::${meta.slug}`
-            const isPeer = showHostBadges && localHost !== null && meta.origin_host !== null && meta.origin_host !== localHost
+            const isPeer =
+              showHostBadges && localHost !== null && meta.origin_host !== null && meta.origin_host !== localHost
+
             return (
               <DropdownMenuItem
-                key={key}
                 // Peer-host boards can't be opened in this dashboard (the
                 // /board endpoint hits the local DB), so make selecting one
                 // a no-op — the label + badge still communicate "this board
                 // lives on <host>", which is the whole point of the badge.
                 disabled={isPeer}
+                key={key}
                 onSelect={() => {
-                  if (isPeer) return
+                  if (isPeer) {
+                    return
+                  }
                   $boardSlug.set(meta.slug === boards.current ? '' : meta.slug)
                 }}
               >
