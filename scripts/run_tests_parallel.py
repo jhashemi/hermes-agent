@@ -59,6 +59,26 @@ from typing import Dict, List, Tuple
 # Default test discovery roots.
 _DEFAULT_ROOTS = ["tests"]
 
+
+def _default_worker_count() -> int:
+    """Compute the default parallel worker count.
+
+    h1 blackout RCA (2026-09-07): the old default (cpu_count * 2) allowed
+    32 concurrent pytest subprocesses on a 16-core box.  With multiple
+    kanban workers each firing a full suite, the cumulative worker count
+    hit >700, triggering a 55-minute SSH blackout.
+
+    New default = cpu_count (1× rather than 2×).  This is still
+    aggressive enough for fast wall-clock times (per-file suites are
+    I/O-bound on imports, not CPU-bound) but leaves headroom for
+    concurrent kanban workers and system processes.
+
+    Operators who want the old behavior can:
+      HERMES_TEST_WORKERS=$(nproc --ignore=1) scripts/run_tests.sh
+    or set kanban.pytest_full_suite_workers in config.yaml.
+    """
+    return os.cpu_count() or 4
+
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt
 # image, etc.) and are run in their own dedicated CI jobs:
@@ -781,8 +801,11 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
-        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count*2)",
+        default=int(
+            os.environ.get("HERMES_TEST_WORKERS")
+            or _default_worker_count()
+        ),
+        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count)",
     )
     parser.add_argument(
         "--paths",

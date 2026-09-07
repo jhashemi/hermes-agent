@@ -12,6 +12,12 @@
 #     is belt-and-suspenders for anyone running pytest outside our
 #     conftest path — e.g. on a single file)
 #   * Proper venv activation (probes .venv, venv, then ~/.hermes/...)
+#   * Full-suite concurrency gate (flock): prevents multiple concurrent
+#     full-suite runs from swamping the host (h1 blackout RCA,
+#     2026-09-07). Second invocation WAITS (up to HERMES_PYTEST_LOCK_WAIT
+#     seconds, default 7200) rather than silently skipping, so CI and
+#     kanban workers still get a result. Set HERMES_PYTEST_NO_WAIT=1 to
+#     no-op instead (exits 0 immediately, prints a notice to stderr).
 #
 # Usage:
 #   scripts/run_tests.sh                            # full suite
@@ -36,6 +42,141 @@ set -euo pipefail
 # ── Locate repo root ────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# ── Full-suite concurrency gate (flock) ─────────────────────────────────────
+# Prevent multiple concurrent full hermes-agent pytest suites from
+# killing the host (h1 blackout RCA, 2026-09-07: load >700, 45×
+# oversubscribed, 55-minute SSH blackout).
+#
+# Gate only fires when the invocation looks like a full-suite run
+# (no positional path arg that restricts to a subset, and flock is
+# available). Targeted runs — `scripts/run_tests.sh tests/foo.py` or
+# `scripts/run_tests.sh tests/agent/` — are NOT gated: they are cheap
+# and safe to run concurrently.
+#
+# Lock file lives in ~/.hermes/ (always writable by the user running
+# workers, even in a minimal container without /var/lock).
+#
+# Knobs:
+#   HERMES_PYTEST_NO_WAIT=1   — exit 0 immediately if lock is held
+#                               (kanban workers that want to no-op rather
+#                               than wait a long time can set this)
+#   HERMES_PYTEST_LOCK_WAIT   — seconds flock waits before giving up
+#                               (default 7200 = 2 h; 0 = no-op immediately)
+#
+# Preflight load check:
+#   If load-per-core >= HERMES_PYTEST_LOAD_LIMIT (default 2.0), the
+#   script sleeps HERMES_PYTEST_LOAD_BACKOFF (default 60) seconds and
+#   rechecks up to HERMES_PYTEST_LOAD_RETRIES (default 30) times before
+#   proceeding. This protects against launching a new suite while another
+#   already-running suite is still peaking. Set limit=0 to skip entirely.
+
+_FULL_SUITE_LOCK="${HOME}/.hermes/pytest-full-suite.lock"
+_LOCK_WAIT="${HERMES_PYTEST_LOCK_WAIT:-7200}"
+_NO_WAIT="${HERMES_PYTEST_NO_WAIT:-0}"
+_LOAD_LIMIT="${HERMES_PYTEST_LOAD_LIMIT:-2.0}"
+_LOAD_BACKOFF="${HERMES_PYTEST_LOAD_BACKOFF:-60}"
+_LOAD_RETRIES="${HERMES_PYTEST_LOAD_RETRIES:-30}"
+
+# Detect whether this is a full-suite invocation by checking for path
+# positional arguments. We parse just enough: any argument that does
+# NOT start with '-' and IS NOT a value for a flag we know (-j, -k,
+# --jobs, --paths, --slice, --file-timeout, --file-retries) is a path.
+# False-positive (treating a value as a path) is safe: it just skips
+# the gate, which is the conservative direction.
+_IS_FULL_SUITE=1
+_PREV_WAS_FLAG_WITH_VALUE=0
+for _arg in "$@"; do
+  if [ "$_PREV_WAS_FLAG_WITH_VALUE" = "1" ]; then
+    _PREV_WAS_FLAG_WITH_VALUE=0
+    continue  # skip the value; it is not a path
+  fi
+  case "$_arg" in
+    -j|--jobs|-k|--paths|--slice|--file-timeout|--file-retries)
+      _PREV_WAS_FLAG_WITH_VALUE=1 ;;
+    --)
+      break ;;  # rest are pytest pass-through; not our path args
+    -*)
+      : ;;  # bare flag, no value
+    *)
+      # Positional non-flag arg: this is a path restriction → NOT full suite
+      _IS_FULL_SUITE=0
+      break ;;
+  esac
+done
+
+if [ "$_IS_FULL_SUITE" = "1" ] && command -v flock >/dev/null 2>&1; then
+  # Ensure the lock directory exists (it always should, but be defensive).
+  mkdir -p "$(dirname "$_FULL_SUITE_LOCK")"
+  touch "$_FULL_SUITE_LOCK"
+
+  # ── Preflight: check load before acquiring the lock ──────────────────
+  if [ "${_LOAD_LIMIT%.*}" != "0" ] || [ "${_LOAD_LIMIT#*.}" != "0" ]; then
+    _NPROC="$(nproc 2>/dev/null || echo 1)"
+    _retry=0
+    while [ "$_retry" -lt "$_LOAD_RETRIES" ]; do
+      # /proc/loadavg field 1 is the 1-min load average (most reactive).
+      _LOAD1="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo 0)"
+      # Shell integer arithmetic — compare load×100 vs limit×100 to
+      # avoid needing bc or awk for floating-point comparison.
+      _LOAD1_INT="$(echo "$_LOAD1" | awk '{printf "%d", $1 * 100}')"
+      _LIMIT_INT="$(echo "$_NPROC" "$_LOAD_LIMIT" | awk '{printf "%d", $1 * $2 * 100}')"
+      if [ "$_LOAD1_INT" -lt "$_LIMIT_INT" ]; then
+        break  # load is acceptable
+      fi
+      _retry=$(( _retry + 1 ))
+      echo "▶ load preflight: 1-min load ${_LOAD1} >= ${_NPROC}×${_LOAD_LIMIT}; waiting ${_LOAD_BACKOFF}s (attempt ${_retry}/${_LOAD_RETRIES})" >&2
+      sleep "$_LOAD_BACKOFF"
+    done
+    if [ "$_retry" -ge "$_LOAD_RETRIES" ]; then
+      _LOAD1="$(awk '{print $1}' /proc/loadavg 2>/dev/null || echo '?')"
+      echo "▶ load preflight: proceeding after ${_LOAD_RETRIES} retries (current load: ${_LOAD1})" >&2
+    fi
+  fi
+
+  if [ "$_NO_WAIT" = "1" ] || [ "$_LOCK_WAIT" = "0" ]; then
+    # Non-blocking: exit 0 if another suite is already running.
+    if ! flock -n "$_FULL_SUITE_LOCK" true 2>/dev/null; then
+      echo "▶ full-suite gate: another full pytest suite is already running on this host." >&2
+      echo "  Skipping this run (HERMES_PYTEST_NO_WAIT=1 or HERMES_PYTEST_LOCK_WAIT=0)." >&2
+      echo "  To wait for the lock, unset HERMES_PYTEST_NO_WAIT and set HERMES_PYTEST_LOCK_WAIT=7200." >&2
+      exit 0
+    fi
+  fi
+
+  # Re-exec this script under flock so the lock is held for the
+  # entire run (including venv setup, bytecode compilation, and the
+  # parallel run itself). flock --timeout N exits 1 if it times out.
+  # We map that to a clear error message + exit 1 (not 0, so CI fails
+  # visibly rather than silently skipping).
+  #
+  # Guard against re-entrant exec: if HERMES_PYTEST_FLOCK_ACTIVE is
+  # already set, we are already inside the flock'd child — skip the
+  # re-exec to avoid an infinite loop.
+  if [ -z "${HERMES_PYTEST_FLOCK_ACTIVE:-}" ]; then
+    export HERMES_PYTEST_FLOCK_ACTIVE=1
+    echo "▶ full-suite gate: acquiring lock (timeout ${_LOCK_WAIT}s) ..." >&2
+    # flock --timeout is a Linux-specific extension (util-linux);
+    # macOS flock uses -w N. Try the Linux form first.
+    if flock --timeout "$_LOCK_WAIT" "$_FULL_SUITE_LOCK" \
+        bash "${BASH_SOURCE[0]}" "$@"; then
+      exit $?
+    else
+      _FLOCK_RC=$?
+      if [ "$_FLOCK_RC" = "1" ]; then
+        echo "ERROR: full-suite gate: lock wait timed out after ${_LOCK_WAIT}s." >&2
+        echo "  Another full pytest suite has been running for >${_LOCK_WAIT}s." >&2
+        echo "  Check for hung workers: pgrep -a pytest" >&2
+        exit 1
+      fi
+      exit "$_FLOCK_RC"
+    fi
+  fi
+  # If we reach here, HERMES_PYTEST_FLOCK_ACTIVE is set — we ARE the
+  # flock'd child. Fall through to the normal test runner logic below.
+  echo "▶ full-suite gate: lock acquired — proceeding" >&2
+fi
+# ── (end full-suite concurrency gate) ───────────────────────────────────────
 
 # ── Locate python ───────────────────────────────────────────────────────────
 # Probe local venvs first; fall back to the Nix devShell's editable venv
