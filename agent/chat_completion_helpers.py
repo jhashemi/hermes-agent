@@ -27,7 +27,52 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
+from hermes_cli.timeouts import (
+    get_provider_request_timeout,
+    get_provider_stale_timeout,
+    _get_model_config,
+)
+
+
+def _get_provider_max_output(provider_id: str, model: str | None) -> int | None:
+    """Return the fallback provider's configured output cap, if any.
+
+    Reads ``providers.<id>.max_output`` (and per-model overrides under
+    ``providers.<id>.models.<model>.max_output``) from the readonly
+    config.  Used to clamp ``agent.max_tokens`` when a fallback target
+    has a smaller output limit than the primary (e.g. ollama-cloud glm
+    at 131072 failing over to bedrock claude-haiku at 64000) so the
+    failover can actually succeed instead of failing every retry with
+    a ValidationException.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        config = load_config_readonly()
+    except Exception:
+        return None
+    providers = config.get("providers", {}) if isinstance(config, dict) else {}
+    provider_config = (
+        providers.get(provider_id, {}) if isinstance(providers, dict) else {}
+    )
+    if not isinstance(provider_config, dict):
+        return None
+
+    def _coerce(raw: object) -> int | None:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    model_config = _get_model_config(provider_config, model)
+    if model_config:
+        capped = _coerce(model_config.get("max_output"))
+        if capped:
+            return capped
+    return _coerce(provider_config.get("max_output"))
+
+
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import FailoverReason
 from agent.errors import EmptyStreamError
@@ -1906,6 +1951,29 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         agent.requested_provider = fb_provider
         agent.base_url = fb_base_url
         agent.api_mode = fb_api_mode
+        # Clamp the output budget to the fallback target's configured
+        # max_output (providers.<id>.max_output / fallback-chain entry).
+        # Without this, a primary tuned for a huge-output model (e.g.
+        # model.max_tokens: 131072 on ollama-cloud glm) fails over to a
+        # smaller-cap provider (e.g. bedrock claude-haiku, limit 64000)
+        # and EVERY retry dies with ValidationException until retries
+        # exhaust — the fallback never gets a single successful call.
+        try:
+            _fb_max_output = None
+            if fb_provider == "bedrock":
+                _fb_max_output = _get_provider_max_output(fb_provider, fb_model)
+            if _fb_max_output and agent.max_tokens and agent.max_tokens > _fb_max_output:
+                logger.info(
+                    "Fallback to %s/%s: clamping max_tokens %d -> %d "
+                    "(fallback provider output cap)",
+                    fb_provider, fb_model, agent.max_tokens, _fb_max_output,
+                )
+                agent.max_tokens = _fb_max_output
+        except Exception as _fb_clamp_exc:
+            logger.debug(
+                "Fallback max_tokens clamp lookup failed (non-fatal): %s",
+                _fb_clamp_exc,
+            )
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
