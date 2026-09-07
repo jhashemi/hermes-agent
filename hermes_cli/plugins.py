@@ -386,6 +386,113 @@ VALID_HOOKS: Set[str] = {
     #   alias_used: the exact token the user typed (str), args_raw: str,
     #   session_key: str | None (gateway), platform: str | None (gateway).
     "pre_command",
+    # Kwargs: task_id: str, board: str | None, assignee: str | None,
+    #   summary: str | None, result: str | None, metadata: dict | None,
+    #   profile_name: str.
+    "kanban_task_completing",
+    # Kanban write-op observer seam (ADR-006b P2 row 1).
+    # Fires from ``hermes_cli.kanban_db`` at the end of every kernel write
+    # op — ``create_task`` / ``assign_task`` / ``reassign_task`` /
+    # ``link_tasks`` / ``unlink_tasks`` / ``add_comment`` / ``claim_task`` /
+    # ``heartbeat_claim`` / ``release_stale_claims`` / ``reclaim_task`` /
+    # ``complete_task`` / ``block_task`` / ``unblock_task`` /
+    # ``add_notify_sub`` — AFTER the enclosing SQLite ``write_txn`` has
+    # committed. Observer-only: the return value of any callback is
+    # IGNORED (no veto), and a raising callback is swallowed and logged
+    # at DEBUG so a misbehaving observer can never wedge a board write.
+    # Fires in whichever process is executing the write (dispatcher,
+    # worker, CLI, gateway MCP path) — plugins that want an eventually-
+    # complete view MUST subscribe in every process that mutates a
+    # board, not just the dispatcher.
+    #
+    # Kwargs (stable, additive-only):
+    #   * op: str — kernel function name (``create_task`` etc.);
+    #       consumers key dispatch tables on this exact string.
+    #   * task_id: str — primary task id or ``""`` for board-scoped
+    #       ops (``release_stale_claims``).
+    #   * board: str — board slug from ``get_current_board()``.
+    #   * sqlite_path: str | None — resolved on-disk path of the
+    #       SQLite database that just committed (``None`` for
+    #       in-memory / unusual conns).
+    #   * result: Any — the op's SQLite return value (``task_id`` from
+    #       ``create_task``, row id from ``add_comment``, ``Task``
+    #       from ``claim_task``, ``bool`` / ``int`` for the rest).
+    #       Consumers that need to preserve id-passthrough across a
+    #       second backend read this field.
+    #   * profile_name: str — active profile (added by the shared
+    #       lifecycle dispatch machinery).
+    #   * Plus op-specific kwargs sufficient to replay the write
+    #       against a second store; the exact set matches the outer
+    #       function's signature with two collisions renamed to avoid
+    #       clashing with the framing kwargs:
+    #         - ``create_task.board`` (board-slug override) → ``board_override``
+    #         - ``complete_task.result`` (completion string)  → ``completion_result``
+    #
+    # Named consumer at land time: ``vfe-kanban-dual-write`` plugin
+    # (mirrors every write to the DuckDB kanban store under
+    # ``HERMES_KANBAN_WRITE_BACKEND=dual``; extracted from the
+    # in-kernel ``kanban_dual_write`` shim per ADR-006b row 1).
+    "kanban_write_op",
+    # Kanban pre-dispatch veto seam (ADR-006b P3 row 2).
+    # Fires from ``hermes_cli.kanban_db._dispatch_once_locked`` AFTER
+    # a task's claim is committed and BEFORE the worker is spawned,
+    # but ONLY when the cluster router selected a remote target node
+    # (``target_node is not None``). Local dispatch skips the seam:
+    # local has no remote probe to consult, and the pre-extraction
+    # gate short-circuited on the same condition.
+    #
+    # This is the SECOND kanban hook (alongside ``kanban_task_completing``)
+    # whose return value influences flow. A callback may return:
+    #
+    #   {"veto": True, "reason": "<human-readable rejection reason>",
+    #    "source": "<optional callback label>"}
+    #
+    # to release the claim back to ``ready`` this tick without counting
+    # a failure. The kernel then:
+    #   * atomically resets ``status='ready'``, ``claim_lock=NULL``,
+    #     ``claim_expires=NULL``, ``worker_pid=NULL`` under a single
+    #     ``write_txn`` (kernel-owned primitive);
+    #   * emits a ``node_gate_rejected`` task_event with
+    #     ``{node, reason, task_id, [source]}``;
+    #   * appends the rejection to
+    #     ``DispatchResult.skipped_node_rejected`` for observability;
+    #   * does NOT increment ``consecutive_failures`` (a probe RED is
+    #     not a task problem).
+    #
+    # Callbacks that return ``None``, a non-dict, or a dict without
+    # ``veto: True`` are treated as abstentions. A callback that
+    # raises is swallowed by the ``invoke_hook`` machinery and
+    # treated as abstain (fail-open) — a busted policy plugin cannot
+    # halt cluster dispatch. This preserves the pre-extraction
+    # fail-open contract of the inline HRV node gate.
+    #
+    # Kwargs (stable, additive-only — Demis amendment A1 binding):
+    #   * task_id: str — claimed task id.
+    #   * node_hostname: str — target node hostname from the cluster
+    #       router (never None at the seam — the kernel skips the
+    #       fire when the router returns None for local dispatch).
+    #   * model_name: str — LLM model override on the task, or "".
+    #   * priority: int | None — task priority column.
+    #   * min_resources: dict | None — parsed JSON from the
+    #       ``min_resources`` column, or None when missing/invalid.
+    #   * board: str | None — active board slug (from the dispatch
+    #       call scope).
+    #   * assignee: str | None — task assignee, for observability.
+    #   * profile_name: str — active profile (added by the shared
+    #       lifecycle dispatch machinery).
+    #
+    # The kwargs are sufficient for a policy plugin to evaluate a
+    # rejection WITHOUT re-opening a SQLite handle mid-dispatch. If a
+    # future policy needs another column, add it here (additive-only)
+    # and grow the plugin behavior contract.
+    #
+    # Named consumer at land time: ``vfe-hrv-node-gate`` plugin
+    # (evaluates the 5 HRV rejection conditions — memory_pressure,
+    # kanban_dispatcher_health, bedrock_rate_limit_saturation[model],
+    # hrv_urgent_state, min_resources_overflow — using the HRV probe
+    # cache and emits ``dispatch.node_rejected`` telemetry alongside
+    # the veto return, per Demis amendment A2).
+    "kanban_task_pre_dispatch",
 }
 
 # Hooks whose return value carries a directive that the shell-hook response

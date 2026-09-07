@@ -208,6 +208,215 @@ def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None
         invoke_hook(event, task_id=task_id, profile_name=profile_name, **fields)
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban lifecycle hook %s failed: %s", event, exc)
+# ---------------------------------------------------------------------------
+# Event-id accumulator (Option A — ADR-006b Phase 3)
+# ---------------------------------------------------------------------------
+# When a write_txn commits, it collects all task_events.id values minted by
+# _append_event during that txn.  If there is a parent write_txn on the
+# stack, the ids bubble up to it (nested-txn pattern).  After the outermost
+# write_txn commits, the ids sit in ``_event_id_pending`` until
+# ``_fire_kanban_write_op`` reads and clears them.
+#
+# ContextVar gives per-asyncio-task / per-coroutine isolation for free;
+# plain list mutation is safe for synchronous callers because SQLite
+# write_txn serialises them anyway.
+#
+# Stack layout:
+#   _event_id_stack  — list of lists, one per active write_txn frame
+#   _event_id_pending — ids committed by the outermost txn, not yet read by
+#                        the seam fire; None means "no ids pending"
+# ---------------------------------------------------------------------------
+_event_id_stack: ContextVar[list[list[int]]] = ContextVar(
+    "_event_id_stack", default=[]
+)
+_event_id_pending: ContextVar[Optional[list[int]]] = ContextVar(
+    "_event_id_pending", default=None
+)
+
+
+def _push_event_accumulator() -> None:
+    """Push a fresh accumulator frame onto the stack."""
+    stack = _event_id_stack.get()
+    _event_id_stack.set(list(stack) + [[]])
+
+
+def _pop_and_merge_event_accumulator() -> None:
+    """Pop the top frame.
+
+    On success (called after commit):
+    - If there is a parent frame, merge collected ids up into it.
+    - If this was the outermost frame, stash in _event_id_pending so
+      _fire_kanban_write_op can pick them up.
+
+    On rollback (called from except path):
+    - Discard collected ids — they never landed.
+    """
+    stack = _event_id_stack.get()
+    if not stack:
+        return
+    finished = stack[-1]
+    remaining = stack[:-1]
+    _event_id_stack.set(remaining)
+    if remaining:
+        # Nested txn: bubble ids up to the parent frame.
+        remaining[-1].extend(finished)
+    else:
+        # Outermost txn: stash for _fire_kanban_write_op.
+        pending = _event_id_pending.get()
+        if pending is None:
+            _event_id_pending.set(list(finished))
+        else:
+            _event_id_pending.set(pending + finished)
+
+
+def _discard_event_accumulator() -> None:
+    """Pop the top frame and discard (rollback path)."""
+    stack = _event_id_stack.get()
+    if stack:
+        _event_id_stack.set(stack[:-1])
+
+
+def _take_pending_event_ids() -> list[int]:
+    """Return and clear the pending event ids."""
+    ids = _event_id_pending.get() or []
+    _event_id_pending.set(None)
+    return ids
+
+
+# =============================================================================
+# INCIDENT-01 — dispatch-gate model-liveness KV reader
+# =============================================================================
+#
+# Wires a shared, in-memory KV reader used by the spawn-time liveness gate
+# (see ``dispatch_gate.check_model_liveness`` and its call site in the
+# cluster-routing branch of ``dispatch_once``). Kept as a module-level
+# singleton so:
+#   - the KV survives across dispatch ticks (a model marked dead once
+#     stays dead until its TTL expires — no re-checking every tick);
+#   - a future NATS-bridged reader can be plugged in with a single-line
+#     swap here, without threading a writer through every call site;
+#   - tests can monkeypatch ``_LIVENESS_KV`` directly if they need to
+#     drive the gate deterministically.
+#
+# Fail-safe posture: the reader ALWAYS returns None on missing keys,
+# which the gate treats as "no signal → fail open". A dead reader can
+# never block real work. See ticket t_3e1634d9 for the RCA.
+
+_LIVENESS_KV: dict[str, dict] | None = None
+
+
+def _get_liveness_kv_reader():
+    """Return the shared KV reader for the dispatch-gate liveness probe.
+
+    Lazy-init on first call so import-time is unaffected. Returns a
+    zero-arg-safe callable: ``reader(key) -> dict | None``.
+    """
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+    return _kv.get
+
+
+def _get_liveness_kv_writer():
+    """Companion writer for tests and post-mortem recorders."""
+    global _LIVENESS_KV
+    if _LIVENESS_KV is None:
+        _LIVENESS_KV = {}
+    _kv = _LIVENESS_KV
+
+    def _write(key: str, value: dict) -> None:
+        _kv[key] = value
+
+    return _write
+
+
+
+
+def _fire_kanban_write_op(
+    conn: sqlite3.Connection,
+    op: str,
+    task_id: str = "",
+    *,
+    result: Any = None,
+    event_ids: Optional[list] = None,
+    **fields: Any,
+) -> None:
+    """Fire the ``kanban_write_op`` observer seam, fully best-effort.
+
+    Called at the end of each kernel write op AFTER its ``write_txn`` block
+    has committed. Observer-only (NO veto): the return value of any callback
+    is ignored; a raising callback is swallowed. This mirrors the
+    ``_fire_kanban_lifecycle_hook`` contract so a misbehaving observer can
+    never wedge a board write.
+
+    The seam carries enough context for an out-of-tree consumer (e.g. the
+    DuckDB dual-write mirror plugin) to reconstruct the write against a
+    second store without reaching back into kernel internals:
+
+    * ``op`` — the kernel-side function name (``create_task`` /
+      ``assign_task`` / …). Stable identifier — callers key their
+      dispatch table on this string.
+    * ``task_id`` — primary task identifier when the op is task-scoped;
+      the empty string for board-scoped ops (``release_stale_claims``).
+    * ``board`` — board slug resolved via ``get_current_board()`` so the
+      consumer can address the mirror without opening the SQLite conn.
+    * ``sqlite_path`` — resolved on-disk path of the SQLite database
+      that just committed (``None`` for in-memory / unusual conns).
+      Consumers derive their mirror path from this without needing
+      access to the ``sqlite3.Connection`` object directly.
+    * ``result`` — the op's return value (task id from ``create_task``,
+      row id from ``add_comment``, ``Task`` from ``claim_task`` …).
+      Used by the mirror to preserve id passthrough across backends.
+    * ``event_ids`` — list of SQLite-minted ``task_events.id`` values
+      appended by this op (in insertion order).  The DuckDB mirror
+      uses these to INSERT with an explicit ``id`` column so both
+      stores share the same id space.  ``None`` / empty list means
+      the op emits no events (``heartbeat_claim``,
+      ``release_stale_claims`` heartbeat variant, …) or that the
+      caller opted out of id passthrough.  Version-guarded: plugins
+      that predate Option A simply ignore this kwarg.
+    * ``**fields`` — the op-specific kwargs the mirror needs to replay
+      the write (``title``, ``assignee`` for ``create_task``;
+      ``parent_id``, ``child_id`` for ``link_tasks`` …).
+
+    Args:
+        conn: The SQLite connection whose txn just committed. Used only
+            to recover the database path for the ``sqlite_path`` kwarg;
+            the seam does NOT re-open a txn on it.
+        op: Kernel-side operation name.
+        task_id: Task id or empty string for board-scoped ops.
+        result: Op return value (id passthrough, may be ``None``).
+        **fields: Op-specific kwargs sufficient to replay the write.
+    """
+    sqlite_path: Optional[str] = None
+    try:
+        rows = list(conn.execute("PRAGMA database_list"))
+        for r in rows:
+            name = r[1] if len(r) > 1 else None
+            path = r[2] if len(r) > 2 else None
+            if name == "main" and path:
+                sqlite_path = str(path)
+                break
+    except Exception:  # pragma: no cover - defensive
+        sqlite_path = None
+    # Pop the event-id accumulator that write_txn pushed.  If the caller
+    # passed explicit event_ids (e.g. from a nested or manual site) use those;
+    # otherwise use the auto-accumulated list.
+    collected_ids = _take_pending_event_ids()
+    resolved_event_ids: list[int] = (
+        list(event_ids) if event_ids is not None else collected_ids
+    )
+    _fire_kanban_lifecycle_hook(
+        "kanban_write_op",
+        task_id,
+        op=op,
+        board=get_current_board(),
+        sqlite_path=sqlite_path,
+        result=result,
+        event_ids=resolved_event_ids,
+        **fields,
+    )
 
 
 def _kanban_observer_consumed(event: str) -> bool:
@@ -709,6 +918,94 @@ def board_exists(board: Optional[str] = None) -> bool:
     d = board_dir(slug)
     return (d / "board.json").exists() or (d / "kanban.db").exists()
 
+
+
+def _board_slug_from_db_path(db_path: Path) -> str:
+    """Best-effort reverse of :func:`kanban_db_path` for observability labels.
+
+    Given a resolved kanban DB path, return the board slug it belongs to.
+    The mapping is:
+
+    * ``<root>/kanban/boards/<slug>/kanban.db`` → ``<slug>``
+    * ``<root>/kanban.db``                      → ``default``
+    * anything else (custom ``HERMES_KANBAN_DB``, tests, …) → ``unknown``
+
+    Never raises — a mislabelled quarantine metric is strictly better than
+    breaking the corruption-quarantine path over a label heuristic.
+    """
+    try:
+        p = db_path.resolve()
+    except OSError:
+        p = db_path
+    try:
+        # The <slug> is the immediate parent dir when the layout is
+        # ``kanban/boards/<slug>/kanban.db``.
+        parent = p.parent
+        if parent.name and parent.parent.name == "boards" and parent.parent.parent.name == "kanban":
+            return parent.name
+        # Back-compat: the default board lives at ``<root>/kanban.db``.
+        if p.name == "kanban.db":
+            return DEFAULT_BOARD
+    except Exception:
+        pass
+    return "unknown"
+
+def _notify_corrupt_quarantine(
+    db_path: Path,
+    backup_path: Optional[Path],
+    reason: str,
+) -> None:
+    """Emit observability signals for a kanban DB corruption quarantine.
+
+    Every ``.corrupt.<hash>.bak`` event fires TWO always-on signals:
+
+    1. A structured WARNING log record on the ``hermes_cli.kanban_db``
+       logger with the extras ``{event, board, db_path, backup_path,
+       reason}``. Log-tailing observability plugins (e.g. this cluster's
+       vein-aggregator sidecar) can pick it up with zero new dependencies.
+    2. The ``kanban_db_corrupt_quarantine`` lifecycle hook, so first-party
+       observers and plugins can translate it into a Prometheus counter,
+       NATS event, alertmanager page, or whatever the deployment prefers,
+       WITHOUT adding a prometheus/NATS dep to hermes-agent core.
+
+    Both surfaces are best-effort — a broken observer must never stop
+    us from quarantining a corrupt DB. ``task_id=""`` because a corruption
+    event is board-scoped, not task-scoped; downstream consumers should
+    key on ``board`` and ``db_path``.
+    """
+    board = _board_slug_from_db_path(db_path)
+    backup_str = str(backup_path) if backup_path is not None else ""
+    # Signal 1: structured log line — no extra deps.
+    try:
+        _log.warning(
+            "kanban DB %s quarantined as corrupt (board=%s, reason=%s, "
+            "backup=%s)",
+            db_path,
+            board,
+            reason,
+            backup_str or "<backup failed>",
+            extra={
+                "event": "kanban_db_corrupt_quarantine",
+                "board": board,
+                "db_path": str(db_path),
+                "backup_path": backup_str,
+                "reason": reason,
+            },
+        )
+    except Exception:  # pragma: no cover - defensive; logging must never crash
+        pass
+    # Signal 2: lifecycle hook — plugins can subscribe.
+    try:
+        _fire_kanban_lifecycle_hook(
+            "kanban_db_corrupt_quarantine",
+            "",  # not task-scoped
+            board=board,
+            db_path=str(db_path),
+            backup_path=backup_str,
+            reason=reason,
+        )
+    except Exception:  # pragma: no cover - already best-effort inside the fn
+        pass
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
     """Return the path to the ``kanban.db`` for ``board``.
@@ -2185,6 +2482,11 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
     # Quarantine FIRST — both the repair path and the fail-closed path
     # preserve the pre-touch bytes before anything mutates the file.
     backup = _backup_corrupt_db(resolved)
+    _notify_corrupt_quarantine(
+        resolved,
+        backup,
+        f"integrity_check returned {messages[0] if messages else '<no row>'!r}",
+    )
     index_names = _repairable_index_names(messages)
     if index_names:
         _log.warning(
@@ -2281,17 +2583,25 @@ def repair_db(
         except sqlite3.DatabaseError as exc:
             # Same quarantine the connect-time guard takes for a file
             # sqlite refuses to open at all (e.g. malformed page 1).
+            db_error_reason = f"sqlite refused to open file: {exc}"
+            db_error_backup = _backup_corrupt_db(resolved)
+            _notify_corrupt_quarantine(resolved, db_error_backup, db_error_reason)
             return RepairResult(
                 status="corrupt",
                 db_path=resolved,
-                messages=[f"sqlite refused to open file: {exc}"],
-                backup_path=_backup_corrupt_db(resolved),
+                messages=[db_error_reason],
+                backup_path=db_error_backup,
             )
         if _integrity_messages_ok(messages):
             return RepairResult(status="ok", db_path=resolved, messages=messages)
 
         # Quarantine FIRST — identical policy to the connect-time guard.
         backup = _backup_corrupt_db(resolved)
+        _notify_corrupt_quarantine(
+            resolved,
+            backup,
+            f"integrity_check returned {messages[0] if messages else '<no row>'!r}",
+        )
         index_names = _repairable_index_names(messages)
         if not index_names:
             return RepairResult(
@@ -3085,9 +3395,11 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             )
         savepoint = f"hermes_nested_{secrets.token_hex(8)}"
         conn.execute(f"SAVEPOINT {savepoint}")
+        _push_event_accumulator()
         try:
             yield conn
         except Exception:
+            _discard_event_accumulator()
             try:
                 conn.execute(f"ROLLBACK TO {savepoint}")
                 conn.execute(f"RELEASE {savepoint}")
@@ -3096,12 +3408,15 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             raise
         else:
             conn.execute(f"RELEASE {savepoint}")
+        _pop_and_merge_event_accumulator()
         return
 
     _execute_boundary_with_retry(conn, "BEGIN IMMEDIATE")
+    _push_event_accumulator()
     try:
         yield conn
     except Exception:
+        _discard_event_accumulator()
         try:
             conn.execute("ROLLBACK")
         except sqlite3.OperationalError:
@@ -3114,6 +3429,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         try:
             _execute_boundary_with_retry(conn, "COMMIT")
         except Exception:
+            _discard_event_accumulator()
             # COMMIT exhausted retries with the txn still open; roll back so the
             # connection isn't poisoned for the next BEGIN IMMEDIATE.
             try:
@@ -3121,6 +3437,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             except sqlite3.OperationalError:
                 pass
             raise
+        _pop_and_merge_event_accumulator()
         # Post-commit file-length check: header page_count must match actual file pages.
         # A discrepancy means a torn-extend — raise now rather than silently corrupt.
         _check_file_length_invariant(conn)
@@ -3566,6 +3883,34 @@ def create_task(
                     },
                 )
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
+            _fire_kanban_write_op(
+                conn,
+                "create_task",
+                task_id,
+                result=task_id,
+                title=title,
+                assignee=assignee,
+                created_by=created_by,
+                workspace_kind=workspace_kind,
+                workspace_path=workspace_path,
+                branch_name=branch_name,
+                tenant=tenant,
+                priority=priority,
+                parents=tuple(parents) if parents else (),
+                triage=triage,
+                idempotency_key=idempotency_key,
+                max_runtime_seconds=max_runtime_seconds,
+                skills=tuple(skills) if skills else None,
+                max_retries=max_retries,
+                model_override=model_override,
+                provider_override=provider_override,
+                goal_mode=goal_mode,
+                goal_max_turns=goal_max_turns,
+                initial_status=initial_status,
+                session_id=session_id,
+                project_id=project_id,
+                project_source_task_id=project_source_task_id,
+            )
             return task_id
         except sqlite3.IntegrityError:
             if attempt == 1:
@@ -3740,6 +4085,9 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
         else:
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
         _append_event(conn, task_id, "assigned", {"assignee": profile})
+    _fire_kanban_write_op(
+        conn, "assign_task", task_id, result=True, profile=profile,
+    )
     # Task-mutation observer (RFC #58548), fired AFTER the assignment txn
     # has committed so subscribers always observe durable board state.
     notify_task_updated(conn, task_id, ("assignee",))
@@ -3866,6 +4214,10 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
             {"parent": parent_id, "child": child_id},
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
+    _fire_kanban_write_op(
+        conn, "link_tasks", child_id,
+        parent_id=parent_id, child_id=child_id,
+    )
 
 
 def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
@@ -3909,6 +4261,10 @@ def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
         # unblock_task; without this the child stays stuck in todo until the
         # next dispatcher tick or a manual `hermes kanban recompute` (issue #22459).
         recompute_ready(conn)
+        _fire_kanban_write_op(
+            conn, "unlink_tasks", child_id,
+            result=True, parent_id=parent_id, child_id=child_id,
+        )
     return removed
 
 
@@ -4011,7 +4367,12 @@ def add_comment(
             (task_id, author.strip(), body.strip(), now),
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        _comment_row_id = int(cur.lastrowid or 0)
+    _fire_kanban_write_op(
+        conn, "add_comment", task_id,
+        result=_comment_row_id, author=author, body=body,
+    )
+    return _comment_row_id
 
 
 def list_comments(conn: sqlite3.Connection, task_id: str) -> list[Comment]:
@@ -4325,11 +4686,17 @@ def _append_event(
     """
     now = int(time.time())
     pl = json.dumps(payload, ensure_ascii=False) if payload else None
-    conn.execute(
+    cur = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
         (task_id, run_id, kind, pl, now),
     )
+    row_id = int(cur.lastrowid or 0)
+    # Auto-append to the active accumulator (if any write op has activated
+    # one); mirrored to DuckDB with explicit ids by the write-op seam.
+    stack = _event_id_stack.get()
+    if stack:
+        stack[-1].append(row_id)
 
 
 def _end_run(
@@ -4737,6 +5104,15 @@ def claim_task(
             run_id=run_id,
         )
         claimed = get_task(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "claim_task", task_id,
+        result=claimed,
+        run_id=run_id,
+        ttl_seconds=ttl_seconds,
+        claimer=claimer,
+        lock=lock,
+        expires=expires,
+    )
     _fire_kanban_lifecycle_hook(
         "kanban_task_claimed",
         task_id,
@@ -4938,6 +5314,7 @@ def heartbeat_claim(
     """
     expires = int(time.time()) + _resolve_claim_ttl_seconds(ttl_seconds)
     lock = claimer or _claimer_id()
+    _heartbeat_held = False
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
@@ -4951,8 +5328,16 @@ def heartbeat_claim(
                     "UPDATE task_runs SET claim_expires = ? WHERE id = ?",
                     (expires, run_id),
                 )
-            return True
-        return False
+            _heartbeat_held = True
+        else:
+            _heartbeat_held = False
+    if _heartbeat_held:
+        _fire_kanban_write_op(
+            conn, "heartbeat_claim", task_id,
+            result=True, ttl_seconds=ttl_seconds, claimer=claimer,
+            lock=lock, expires=expires,
+        )
+    return _heartbeat_held
 
 
 def release_stale_claims(
@@ -5101,6 +5486,10 @@ def release_stale_claims(
                 run_id=run_id,
             )
             reclaimed += 1
+            _fire_kanban_write_op(
+                conn, "release_stale_claims", "",
+                result=reclaimed, reclaimed_count=reclaimed,
+            )
         # Worker-lifecycle observer (RFC #58548): the reclaim txn above has
         # committed. The ``continue`` branches (rowcount mismatch, claim
         # extension, deferred reclaim) never reach this point, so only a
@@ -5190,6 +5579,10 @@ def reclaim_task(
     # a fresh budget. (_clear_failure_counter opens its own write_txn,
     # so it runs after the enclosing one commits.)
     _clear_failure_counter(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "reclaim_task", task_id,
+        result=True, reason=reason, prev_lock=prev_lock,
+    )
     return True
 
 
@@ -5217,11 +5610,18 @@ def reassign_task(
         reclaim_task(conn, task_id, reason=reason or "reassign")
     # assign_task handles its own txn + the still-running guard.
     try:
-        return assign_task(conn, task_id, profile)
+        _ok = assign_task(conn, task_id, profile)
     except RuntimeError:
         # Task is still running and reclaim_first was False; caller
         # needs to decide whether to retry with reclaim.
         return False
+    if _ok:
+        _fire_kanban_write_op(
+            conn, "reassign_task", task_id,
+            result=_ok, profile=profile,
+            reclaim_first=reclaim_first, reason=reason,
+        )
+    return _ok
 
 
 def _verify_created_cards(
@@ -5591,6 +5991,16 @@ def complete_task(
     # Clean up the scratch workspace and any stale tmux session for the worker.
     _cleanup_workspace(conn, task_id)
     _done_task = get_task(conn, task_id)
+    _fire_kanban_write_op(
+        conn, "complete_task", task_id,
+        result=True,
+        summary=summary,
+        completion_result=result,
+        metadata=metadata,
+        created_cards=tuple(created_cards) if created_cards else (),
+        expected_run_id=expected_run_id,
+        run_id=run_id,
+    )
     if fire_lifecycle_hook:
         _fire_kanban_lifecycle_hook(
             "kanban_task_completed",
@@ -6479,6 +6889,13 @@ def block_task(
         run_id=run_id,
         reason=reason,
     )
+    _fire_kanban_write_op(
+    conn, "block_task", task_id,
+    result=True,
+    reason=reason,
+    kind=kind,
+    expected_run_id=expected_run_id,
+    )
     return True
 
 
@@ -6909,6 +7326,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
     state) holds for the rest of this function's lifetime.
     """
     now = int(time.time())
+    _unblock_ok = False
     with write_txn(conn):
         current = conn.execute(
             "SELECT status FROM tasks WHERE id = ?",
@@ -6956,7 +7374,13 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
                 else None
             ),
         )
-        return True
+        _unblock_ok = True
+    if _unblock_ok:
+        _fire_kanban_write_op(
+            conn, "unblock_task", task_id,
+            result=True, new_status=new_status,
+        )
+    return _unblock_ok
 
 
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -11525,6 +11949,19 @@ def add_notify_sub(
                 """,
                 (metadata_json, task_id, platform, chat_id, thread_id or ""),
             )
+
+    _fire_kanban_write_op(
+        conn, "add_notify_sub", task_id,
+        platform=platform,
+        chat_id=chat_id,
+        chat_type=chat_type,
+        thread_id=thread_id,
+        user_id=user_id,
+        user_id_alt=user_id_alt,
+        notifier_profile=notifier_profile,
+        delivery_mode=delivery_mode,
+        delivery_metadata=delivery_metadata,
+    )
 
 
 def _notify_profile_filter(
