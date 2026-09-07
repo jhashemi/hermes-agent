@@ -2649,6 +2649,17 @@ def run_conversation(
                             force=True,
                         )
                         finish_reason = "length"
+                        # Tag the response so the length-handler below can
+                        # distinguish a REAL output-cap exhaustion (provider
+                        # said finish_reason="length") from this heuristic
+                        # stop→length promotion. The follow-up "model hit max
+                        # output tokens" message is only true for the former;
+                        # for a misreported stop the model simply ended its
+                        # turn without terminal punctuation mid-prose.
+                        try:
+                            response._stop_misreport_promoted = True
+                        except Exception:
+                            pass
 
                 # ── Content-policy refusal (HTTP 200) ──────────────────
                 # The model — or the provider's safety system — returned a
@@ -2757,6 +2768,17 @@ def run_conversation(
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  Stream interrupted by network error "
                             f"(finish_reason='length' on partial-stream-stub)",
+                            force=True,
+                        )
+                    elif getattr(response, "_stop_misreport_promoted", False):
+                        # Not a real output-cap hit: the provider misreported a
+                        # natural stop as "stop" mid-prose and the GLM heuristic
+                        # promoted it to "length". Say so — "model hit max
+                        # output tokens" would be false here.
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Provider reported a natural "
+                            f"stop on an apparently mid-sentence response — "
+                            f"requesting continuation",
                             force=True,
                         )
                     else:
