@@ -73,6 +73,52 @@ def _get_provider_max_output(provider_id: str, model: str | None) -> int | None:
     return _coerce(provider_config.get("max_output"))
 
 
+def _apply_fallback_max_output_clamp(agent, fb: dict, fb_provider: str, fb_model: str) -> None:
+    """Clamp ``agent.max_tokens`` down to the fallback target's output cap.
+
+    Reads the cap from (in order):
+      1. the INLINE ``fallback_providers`` entry (``fb["max_output"]``) —
+         the shape used by profile configs, where no ``providers.<id>``
+         section exists;
+      2. the ``providers.<id>.max_output`` config section (legacy shape).
+
+    Gated to providers whose model families have hard provider-side output
+    ceilings that reject oversized requests with ValidationException
+    (bedrock, native anthropic). Without the inline read, profiles whose
+    cap only exists on the fallback-chain entry resolved to ``None`` and
+    the clamp never fired — the 0.21.0-era ValidationException crash loop
+    on every worker profile (RCA t_8ec6fb76, 2026-09-07).
+    """
+    try:
+        _fb_max_output = None
+        if fb_provider in ("bedrock", "anthropic"):
+            # Prefer the INLINE fallback_providers entry cap (the shape
+            # actually used by profile configs: providers.<id>.max_output
+            # is usually absent, the cap rides on the chain entry itself).
+            # Fall back to the providers-section lookup for configs that
+            # declare it there.
+            try:
+                _fb_inline = int(fb.get("max_output") or 0)
+                if _fb_inline > 0:
+                    _fb_max_output = _fb_inline
+            except (TypeError, ValueError):
+                _fb_max_output = None
+            if _fb_max_output is None:
+                _fb_max_output = _get_provider_max_output(fb_provider, fb_model)
+        if _fb_max_output and agent.max_tokens and agent.max_tokens > _fb_max_output:
+            logger.info(
+                "Fallback to %s/%s: clamping max_tokens %d -> %d "
+                "(fallback provider output cap)",
+                fb_provider, fb_model, agent.max_tokens, _fb_max_output,
+            )
+            agent.max_tokens = _fb_max_output
+    except Exception as _fb_clamp_exc:
+        logger.debug(
+            "Fallback max_tokens clamp lookup failed (non-fatal): %s",
+            _fb_clamp_exc,
+        )
+
+
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import (
     FailoverReason,
@@ -2789,22 +2835,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # smaller-cap provider (e.g. bedrock claude-haiku, limit 64000)
         # and EVERY retry dies with ValidationException until retries
         # exhaust — the fallback never gets a single successful call.
-        try:
-            _fb_max_output = None
-            if fb_provider == "bedrock":
-                _fb_max_output = _get_provider_max_output(fb_provider, fb_model)
-            if _fb_max_output and agent.max_tokens and agent.max_tokens > _fb_max_output:
-                logger.info(
-                    "Fallback to %s/%s: clamping max_tokens %d -> %d "
-                    "(fallback provider output cap)",
-                    fb_provider, fb_model, agent.max_tokens, _fb_max_output,
-                )
-                agent.max_tokens = _fb_max_output
-        except Exception as _fb_clamp_exc:
-            logger.debug(
-                "Fallback max_tokens clamp lookup failed (non-fatal): %s",
-                _fb_clamp_exc,
-            )
+        _apply_fallback_max_output_clamp(agent, fb, fb_provider, fb_model)
         if hasattr(agent, "_transport_cache"):
             agent._transport_cache.clear()
         agent._fallback_activated = True
