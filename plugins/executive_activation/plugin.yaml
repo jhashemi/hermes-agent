@@ -1,0 +1,14 @@
+name: executive-activation
+kind: standalone
+version: 1.0.0
+description: >
+  Memory-driven executive agent activation for Hermes.
+  Resolves the active executive agent (helios/Elon, atlas/Jobs, orion/Demis)
+  from command context. Queries cognitive memory of the resolved agent before
+  responding. Falls back to RACI matrix if no agent is active. Runs a full
+  observe->reason->plan->reward->memory->reflect cycle on activation.
+author: Hermes Agent
+hooks:
+  - pre_gateway_dispatch
+requires_env: []
+optional_env: []

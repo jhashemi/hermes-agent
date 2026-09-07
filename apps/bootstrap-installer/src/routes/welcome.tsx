@@ -37,8 +37,7 @@ export default function Welcome() {
         </p>
 
         <p className="m-0 text-center text-base leading-normal tracking-tight text-muted-foreground">
-          The agent that grows with you. We&rsquo;ll set things up in the
-          background &mdash; takes a few minutes.
+          We're setting up AI Assistant for you. This only takes a few minutes.
         </p>
       </div>
 

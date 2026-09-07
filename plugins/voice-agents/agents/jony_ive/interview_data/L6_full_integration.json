@@ -1,0 +1,208 @@
+{
+  "agent": "jony_ive",
+  "layer": "L6",
+  "adaptive_qa_protocol": {
+    "agent_id": "jony_ive",
+    "version": "1.0",
+    "domains": [
+      "Human Interface Design",
+      "Legacy & Vision",
+      "Competition & Aesthetics",
+      "Design Leadership",
+      "Apple Design Language",
+      "Design Foundations",
+      "Ethics & Design",
+      "Materials & Manufacturing"
+    ],
+    "question_templates": {
+      "Human Interface Design": {
+        "seed_questions": [
+          "How should technology respond to human touch?",
+          "What makes a digital interaction feel natural?",
+          "How do you design for emotion?",
+          "What's the difference between designing for utility and delight?",
+          "How does spatial design affect user experience?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Legacy & Vision": {
+        "seed_questions": [
+          "What would you design if you had no constraints?",
+          "How should design evolve in the AI era?",
+          "What's the future of physical design in a digital world?",
+          "How do you want to be remembered as a designer?",
+          "What's the most important lesson design has taught you?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Competition & Aesthetics": {
+        "seed_questions": [
+          "How do you respond when competitors copy your designs?",
+          "What makes Apple's aesthetic distinct from Samsung's?",
+          "How do you maintain design leadership in a commodity market?",
+          "What's the cost of chasing trends vs setting them?",
+          "How does culture affect design perception?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Design Leadership": {
+        "seed_questions": [
+          "How did you build and lead the Apple design team?",
+          "What's your approach to giving design feedback?",
+          "How do you protect design vision in a product-driven company?",
+          "What makes a great design partnership?",
+          "How did Steve Jobs change your approach to design?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Apple Design Language": {
+        "seed_questions": [
+          "How did the original iMac design come about?",
+          "What was the design thinking behind the iPhone?",
+          "How did you maintain design coherence across products?",
+          "What made the unibody MacBook possible?",
+          "How did Apple's design process differ from other companies?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Design Foundations": {
+        "seed_questions": [
+          "What makes a design feel inevitable?",
+          "How do you know when a design is 'right'?",
+          "What's the relationship between form and function?",
+          "How does constraint enable creativity?",
+          "What's the most misunderstood aspect of design?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Ethics & Design": {
+        "seed_questions": [
+          "What responsibility do designers have for addiction?",
+          "How should we design technology that respects attention?",
+          "What's the environmental cost of premium design?",
+          "How do you balance beauty and sustainability?",
+          "What ethical line won't you cross in design?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Materials & Manufacturing": {
+        "seed_questions": [
+          "Why did you pursue aluminum so aggressively?",
+          "How does material choice shape the user experience?",
+          "What's the relationship between manufacturing and design?",
+          "How did you work with Steve on manufacturing decisions?",
+          "What manufacturing innovation are you most proud of?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      }
+    },
+    "response_quality_threshold": 0.85,
+    "authenticity_threshold": 0.85,
+    "min_response_length": 100
+  },
+  "leadership_framework": {
+    "style": "transformational",
+    "communication_effectiveness": 1.0,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7,
+    "authenticity_basis": 1.0,
+    "quality_basis": 0.993
+  },
+  "reward_wiring": {
+    "extrinsic": {
+      "weight": 0.35,
+      "signals": [
+        "quality_score",
+        "authenticity_score",
+        "domain_coverage"
+      ]
+    },
+    "intrinsic": {
+      "weight": 0.2,
+      "signals": [
+        "coherence_score",
+        "vocabulary_richness",
+        "response_depth"
+      ]
+    },
+    "hindsight": {
+      "weight": 0.15,
+      "signals": [
+        "cross_domain_consistency",
+        "narrative_continuity"
+      ]
+    },
+    "shaped": {
+      "weight": 0.15,
+      "signals": [
+        "leadership_alignment",
+        "executive_function_match"
+      ]
+    },
+    "kpi_health": {
+      "weight": 0.15,
+      "signals": [
+        "system_health_contribution",
+        "pipeline_pass_rate"
+      ]
+    }
+  },
+  "enr6_compliance": {
+    "l0_raw": true,
+    "l1_cleaned": true,
+    "l2_enriched": true,
+    "l3_thematic": true,
+    "l4_assembled": true,
+    "l5_extensions": true,
+    "l6_integrated": true
+  },
+  "overall_scores": {
+    "quality": 0.993,
+    "authenticity": 1.0,
+    "coherence": 1.0,
+    "richness": 1.0,
+    "domain_coverage": 1.0
+  },
+  "processed_at": "2026-05-17T01:38:17.475850"
+}

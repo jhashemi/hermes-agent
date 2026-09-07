@@ -743,6 +743,44 @@ def _handle_complete(args: dict, **kw) -> str:
         )
     metadata = _stamp_worker_session_metadata(tid, metadata)
     board = args.get("board")
+    unblocks = args.get("unblocks")
+    commit_hash = args.get("commit_hash")
+    test_run_id = args.get("test_run_id")
+    # FIX-5 (t_b56c4ca7): peer-review routing primitive.
+    pending_peer_review = bool(args.get("pending_peer_review", False))
+    peer_review_assignee = args.get("peer_review_assignee")
+    if peer_review_assignee is not None:
+        peer_review_assignee = str(peer_review_assignee).strip() or None
+    review_verdict = args.get("review_verdict")
+    if review_verdict is not None:
+        review_verdict = str(review_verdict).strip().lower() or None
+        if review_verdict not in {"pass", "fail"}:
+            return tool_error(
+                f"review_verdict must be 'pass' or 'fail', got "
+                f"{args.get('review_verdict')!r}"
+            )
+    
+    # Validate unblocks is a list if provided
+    if unblocks is not None:
+        if isinstance(unblocks, str):
+            unblocks = [unblocks]
+        if not isinstance(unblocks, (list, tuple)):
+            return tool_error(
+                f"unblocks must be a list of task ids, got "
+                f"{type(unblocks).__name__}"
+            )
+        unblocks = [str(u).strip() for u in unblocks if str(u).strip()]
+    
+    # Redact and validate commit_hash if provided
+    if commit_hash:
+        commit_hash = str(commit_hash).strip()
+        commit_hash = redact_sensitive_text(commit_hash, force=True) if commit_hash else None
+    
+    # Redact and validate test_run_id if provided
+    if test_run_id:
+        test_run_id = str(test_run_id).strip()
+        test_run_id = redact_sensitive_text(test_run_id, force=True) if test_run_id else None
+    
     try:
         kb, conn = _connect(board=board)
         try:
@@ -751,26 +789,63 @@ def _handle_complete(args: dict, **kw) -> str:
             # calling kanban_complete before acceptance criteria are met.
             # Only enforce when a judge is actually reachable — see
             # _goal_judge_available for why an unavailable judge fails open.
+            #
+            # FIX-5 (t_b56c4ca7): the judge gate does NOT fire on a
+            # peer-review handoff (pending_peer_review=True) — the task is
+            # not becoming ``done``, only being routed to a reviewer, so
+            # the acceptance-criteria check is the REVIEWER's job. It also
+            # does not fire on a reviewer verdict (review_verdict set) —
+            # the reviewer's judgement IS the acceptance signal.
             task = kb.get_task(conn, tid)
-            rejection = _goal_mode_handoff_rejection(
-                task,
-                (summary or result or "").strip(),
+            gate_active = (
+                task
+                and task.goal_mode
+                and not pending_peer_review
+                and review_verdict is None
+                and _goal_judge_available()
             )
-            if rejection is not None:
-                return tool_error(
-                    f"Goal completion rejected by judge: {rejection}. "
-                    f"To proceed, either: (1) provide explicit acceptance "
-                    f"evidence in your summary matching the task's criteria, "
-                    f"or (2) create continuation tasks with parents=[{tid}] "
-                    f"and keep this task alive."
-                )
+            if gate_active:
+                verdict = "done"
+                reason = ""
+                try:
+                    # judge_goal returns (verdict, reason, parse_failed,
+                    # wait_directive, transport_failed) — see
+                    # hermes_cli/goals.py. Unpacking fewer raises ValueError,
+                    # which the defensive handler below swallows, leaving
+                    # verdict="done" and silently disabling the gate.
+                    verdict, reason, _, _, _ = judge_goal(
+                        goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                        last_response=(summary or result or "").strip(),
+                    )
+                except Exception as judge_exc:
+                    # Defensive: judge_goal swallows its own errors, but if
+                    # it ever raises, fail open rather than wedge the worker.
+                    logger.warning(
+                        "goal judge check failed, allowing completion: %s",
+                        judge_exc,
+                        exc_info=True,
+                    )
+                if verdict != "done":
+                    return tool_error(
+                        f"Goal completion rejected by judge: {reason}. "
+                        f"To proceed, either: (1) provide explicit acceptance "
+                        f"evidence in your summary matching the task's criteria, "
+                        f"or (2) create continuation tasks with parents=[{tid}] "
+                        f"and keep this task alive."
+                    )
 
             try:
                 ok = kb.complete_task(
                     conn, tid,
                     result=result, summary=summary, metadata=metadata,
                     created_cards=created_cards,
+                    unblocks=unblocks,
+                    commit_hash=commit_hash,
+                    test_run_id=test_run_id,
                     expected_run_id=_worker_run_id(tid),
+                    pending_peer_review=pending_peer_review,
+                    peer_review_assignee=peer_review_assignee,
+                    review_verdict=review_verdict,
                 )
             except kb.ArtifactPreservationError as artifact_err:
                 return tool_error(
@@ -798,6 +873,24 @@ def _handle_complete(args: dict, **kw) -> str:
                     f"Retry kanban_complete with the same summary/metadata "
                     f"and either drop these ids from created_cards, or pass "
                     f"created_cards=[] to skip the card-claim check entirely."
+                )
+            except kb.CompletionEvidenceRejected as evidence_err:
+                # VFE-COMPLETE-01 pre-hook veto. Task state is NOT
+                # mutated (the veto runs before the completion write
+                # txn) and a ``completion_blocked_evidence`` audit event
+                # is already durable. Surface the reason verbatim so the
+                # worker can fix its metadata and retry. Same phrasing
+                # pattern as HallucinatedCardsError: spell out that the
+                # task is still in-flight and retry is expected.
+                source_hint = (
+                    f" (source: {evidence_err.veto_source})"
+                    if evidence_err.veto_source else ""
+                )
+                return tool_error(
+                    f"kanban_complete blocked: {evidence_err.reason}{source_hint}. "
+                    f"Your task is still in-flight (no state change). "
+                    f"Fix the completion evidence and retry kanban_complete "
+                    f"with the corrected summary/metadata."
                 )
             if not ok:
                 return tool_error(
@@ -833,6 +926,36 @@ def _handle_block(args: dict, **kw) -> str:
     reason = redact_sensitive_text(str(reason), force=True)
     kind = args.get("kind")
     board = args.get("board")
+    waiting_for = args.get("waiting_for")
+    waiting_for_commit = args.get("waiting_for_commit")
+    waiting_for_event = args.get("waiting_for_event")
+    waiting_for_condition = args.get("waiting_for_condition")
+    
+    # Sanitize waiting_for parameters
+    if waiting_for:
+        waiting_for = str(waiting_for).strip() if waiting_for else None
+    if waiting_for_commit:
+        waiting_for_commit = str(waiting_for_commit).strip()
+        waiting_for_commit = redact_sensitive_text(waiting_for_commit, force=True) if waiting_for_commit else None
+    if waiting_for_event:
+        waiting_for_event = str(waiting_for_event).strip() if waiting_for_event else None
+    if waiting_for_condition:
+        waiting_for_condition = str(waiting_for_condition).strip() if waiting_for_condition else None
+    # ``unblocks`` — optional list of child ids to atomically promote
+    # to ready as part of this block. Filter to strings, strip, dedupe.
+    unblocks_raw = args.get("unblocks")
+    unblocks: list[str] = []
+    if isinstance(unblocks_raw, list):
+        _seen: set[str] = set()
+        for _x in unblocks_raw:
+            if not isinstance(_x, str):
+                continue
+            _s = _x.strip()
+            if not _s or _s in _seen:
+                continue
+            _seen.add(_s)
+            unblocks.append(_s)
+    
     try:
         kb, conn = _connect(board=board)
         if kind is not None and kind not in kb.VALID_BLOCK_KINDS:
@@ -869,6 +992,11 @@ def _handle_block(args: dict, **kw) -> str:
                 conn, tid,
                 reason=reason,
                 kind=kind,
+                waiting_for=waiting_for,
+                waiting_for_commit=waiting_for_commit,
+                waiting_for_event=waiting_for_event,
+                waiting_for_condition=waiting_for_condition,
+                unblocks=unblocks or None,
                 expected_run_id=_worker_run_id(tid),
             )
             if not ok:
@@ -1357,6 +1485,28 @@ def _handle_create(args: dict, **kw) -> str:
         return tool_error(
             "assignee is required — name the profile that should execute this "
             "task (the dispatcher will only spawn tasks with an assignee)"
+        )
+    # Assignee validation (okr_audit acct_fail_e9b3a1532629, VFE-ROUTE-01
+    # Front A1). Refuse tickets whose assignee is neither a Hermes profile
+    # on disk nor a registered virtual assignee — otherwise the dispatcher
+    # falls back to a regular CLI worker under an implicit profile, produces
+    # prose, exits rc=0 without calling ``kanban_complete``/``kanban_block``,
+    # and the ticket loops forever burning inference budget. The registry
+    # file at ``<kanban_home>/virtual_assignees.yaml`` lists names that DO
+    # have external handlers (e.g. ``livekit-boardroom``); missing/empty is
+    # treated as an empty allowlist. This tool-layer check only makes the
+    # failure loud — actual route-through dispatch is Front A2.
+    try:
+        from hermes_cli import kanban_db as _kb_validate
+        _assignee_err = _kb_validate.validate_assignee(str(assignee))
+    except Exception:
+        _assignee_err = None
+    if _assignee_err:
+        return tool_error(
+            f"unknown assignee {assignee!r}: {_assignee_err.get('hint', '')}",
+            error_code="unknown_assignee",
+            assignee=str(assignee),
+            hint=_assignee_err.get("hint"),
         )
     body = args.get("body")
     parents = args.get("parents") or []
@@ -1850,6 +2000,76 @@ KANBAN_COMPLETE_SCHEMA = {
                     "task in-flight so you can fix the path and retry."
                 ),
             },
+            "unblocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional: list of task ids that should be auto-unblocked "
+                    "by this completion. Kernel will atomically unblock them "
+                    "as part of the same transaction. Each must currently be "
+                    "in blocked-dependency state with waiting_for pointing back "
+                    "to this task."
+                ),
+            },
+            "commit_hash": {
+                "type": "string",
+                "description": (
+                    "Optional: canonical fix commit hash for this completion. "
+                    "Enables auto-healing of downstream block-loops that are "
+                    "waiting for this commit to land on master."
+                ),
+            },
+            "test_run_id": {
+                "type": "string",
+                "description": (
+                    "Optional: CI/test run id (e.g., GitHub Actions run URL) "
+                    "that validated this completion. Provides evidence trail "
+                    "for compliance / audit logs."
+                ),
+            },
+            "pending_peer_review": {
+                "type": "boolean",
+                "description": (
+                    "FIX-5 (t_b56c4ca7): opt this completion into the "
+                    "peer-review workflow instead of transitioning "
+                    "straight to done. When true, the task moves to "
+                    "``status='review'`` and the dispatcher spawns the "
+                    "profile named in ``peer_review_assignee`` (or the "
+                    "value already saved on the task row) on the next "
+                    "tick. The original ``assignee`` is preserved so a "
+                    "'fail' verdict from the reviewer bounces cleanly "
+                    "back. When false (the default) completion behaves "
+                    "exactly as before."
+                ),
+            },
+            "peer_review_assignee": {
+                "type": "string",
+                "description": (
+                    "FIX-5 (t_b56c4ca7): profile name of the reviewer for "
+                    "this task. Only meaningful when "
+                    "``pending_peer_review=true``; ignored otherwise. If "
+                    "omitted but the task row already has a "
+                    "``peer_review_assignee`` set (e.g. by a parent task "
+                    "or the CLI), that value is used. If neither is set, "
+                    "``pending_peer_review=true`` degrades to a normal "
+                    "``done`` completion so a stray flag can't strand "
+                    "the ticket in review."
+                ),
+            },
+            "review_verdict": {
+                "type": "string",
+                "enum": ["pass", "fail"],
+                "description": (
+                    "FIX-5 (t_b56c4ca7): reviewer's final call on a "
+                    "peer-reviewed task. ``'pass'`` transitions the task "
+                    "to ``done`` (clearing ``peer_review_assignee``); "
+                    "``'fail'`` bounces it back to ``ready`` for the "
+                    "ORIGINAL assignee with a ``review_rejected`` event "
+                    "carrying the reviewer's summary/metadata. Only "
+                    "meaningful when the current run is a review run "
+                    "(the row was spawned via the review-column path)."
+                ),
+            },
             "board": _board_schema_prop(),
         },
         "required": [],
@@ -1892,6 +2112,56 @@ KANBAN_BLOCK_SCHEMA = {
                     "Why you're blocked. 'dependency' waits in todo and "
                     "resumes automatically; the others surface to a human. "
                     "Omit only if none apply."
+                ),
+            },
+            "waiting_for": {
+                "type": "string",
+                "description": (
+                    "Optional: if blocking on a specific task's completion, "
+                    "pass its ticket id. Enables kernel sanity-check (refuse "
+                    "block if task is already done) and auto-healing by "
+                    "recheck jobs when block-loops fire."
+                ),
+            },
+            "waiting_for_commit": {
+                "type": "string",
+                "description": (
+                    "Optional: git commit hash this task is waiting for. "
+                    "Kernel will use to auto-heal if commit lands on master."
+                ),
+            },
+            "waiting_for_event": {
+                "type": "string",
+                "description": (
+                    "Optional: NATS event name (e.g., 'spine.gate.wave2_cleared') "
+                    "this task is waiting for. Kernel will use to auto-heal "
+                    "if event is observed."
+                ),
+            },
+            "waiting_for_condition": {
+                "type": "string",
+                "description": (
+                    "Optional: human-readable predicate describing what "
+                    "condition must be met for unblocking (for L3 rechecker audit)."
+                ),
+            },
+            "unblocks": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional: child task ids to atomically promote to "
+                    "'ready' as part of this block. Use this when your "
+                    "block IS a handoff to a review child (i.e. "
+                    "``waiting_for`` names that child) — the review "
+                    "child inherits your parent-gate, so naming it "
+                    "here guarantees it lands in the dispatcher's "
+                    "queue instead of stalling in 'todo'. Each id "
+                    "must already be linked as a child of this task; "
+                    "ids that fail preconditions (wrong parent, not "
+                    "in todo/blocked, own governance gate, sticky "
+                    "block, unresolved dependency) are recorded in "
+                    "the block event and skipped without failing the "
+                    "block itself."
                 ),
             },
             "board": _board_schema_prop(),

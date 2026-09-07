@@ -40,7 +40,7 @@ _TRUNCATION_MARKER = "… [truncated]"
 # Persisted as ordinary message content. ContextCompressor uses this stable
 # header to distinguish the synthetic post-compaction row from a real user.
 TODO_INJECTION_HEADER = (
-    "[Your active task list was preserved across context compression]"
+    "[Your active task list and session parameters were preserved across context compression]"
 )
 
 

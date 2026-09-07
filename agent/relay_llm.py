@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import contextvars
 import inspect
 import json

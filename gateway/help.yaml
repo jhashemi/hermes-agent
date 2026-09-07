@@ -1,0 +1,70 @@
+# Help System Configuration
+# Section metadata (titles, descriptions, examples) for the dynamic help
+# menu on the Hermes gateway.
+#
+# NOTE: Per-command descriptions are NOT authored here anymore. They are
+# derived from ``hermes_cli.commands.COMMAND_REGISTRY`` at runtime — each
+# ``CommandDef`` provides the canonical description and its
+# ``category`` field determines which /help topic it appears under (see
+# ``gateway/help_menu.py::CATEGORY_TO_TOPIC``).
+#
+# To add a new command that shows up in /help, add a ``CommandDef`` with
+# ``category="Agents"`` (or "Instances", "Help", "Info") — it will appear
+# automatically.
+#
+# Sections: agents, instances, general
+# Loaded at runtime with validation.
+
+agents:
+  title: "🤖 Executive Agent Commands"
+  description: "Connect to expert personas with specialized knowledge."
+  example: |
+    Example:
+      User: /load-demis
+      System: Switched to Demis Hassabis
+      User: How should we approach AGI safety?
+      Agent: [Responds as Demis Hassabis]
+
+instances:
+  title: "🌐 Multi-Instance Orchestration"
+  description: "Control which Hermes instance executes your requests."
+  example: |
+    Example:
+      User: /hermes-list
+      System: Shows 🟢 LOCAL and 🔵 REMOTE (hermes2) instances
+      User: /switch-hermes2
+      System: Switched to remote instance (hermes2)
+      User: What is the meaning of life?
+      Agent: [Executes on hermes2]
+
+general:
+  title: "📋 General Commands"
+  description: "Common utility commands."
+  example: |
+    Example:
+      User: /help agents
+      System: Shows all agent loading commands
+      User: /status
+      System: Shows gateway health and model info
+
+# Command categories order for help index
+categories:
+  - agents
+  - instances
+  - general
+
+# Quick reference (shown on welcome)
+quick_reference:
+  - section: "Instance Control"
+    commands:
+      - "/hermes-list → List instances"
+      - "/switch-hermes2 → Route to agent layer"
+  - section: "Agent Personas"
+    commands:
+      - "/load-demis → Chat as Demis Hassabis"
+      - "/load-jony → Chat as Jony Ive"
+      - "/agents-list → All personas"
+  - section: "Help"
+    commands:
+      - "/help → Command help"
+      - "/help agents → Agent commands"

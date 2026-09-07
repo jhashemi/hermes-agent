@@ -238,6 +238,83 @@ gateway docs). Without a running gateway, `ready` tasks stay where they are
 until one comes up — `hermes kanban create` warns about this at creation
 time.
 
+The dispatcher enumerates every board via `list_boards(include_archived=False)`
+on every tick and processes them all — there is no "current board" or
+"active board" gate. Add a new board (`hermes kanban board create foo`) and
+the next dispatch tick picks up its ready tasks automatically; no restart,
+no whitelist edit, nothing else to configure.
+
+### Cluster dispatch: routing remote worker spawns
+
+By default every worker is spawned locally on the same host as the
+gateway. Larger deployments can distribute worker spawns across a cluster
+of Hermes hosts (SSH-reachable, sharing the profile skills tree). Two
+keys control this — and they are frequently confused because their names
+look symmetric:
+
+```yaml
+# config.yaml
+kanban:
+  cluster_dispatch: false        # master switch (default)
+  cluster_dispatch_board:        # per-board whitelist, only consulted when master switch is on
+    - default
+    - executive-agents
+    # ...
+```
+
+| Key                       | Type   | What it gates                                                                                                                       | What it does NOT gate                                                              |
+|---------------------------|--------|-------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+| `cluster_dispatch`        | bool   | Master switch: when `false`, `create_cluster_node_router()` returns `local_node_router` and every worker spawns on the gateway host. | Board enumeration. Every board is still processed on every tick.                    |
+| `cluster_dispatch_board`  | list   | Per-board whitelist for the LLM cluster router: with `cluster_dispatch=true`, boards not on the list fall back to local spawn.       | Which boards the local dispatcher processes. Local dispatch touches every board.   |
+
+Two consequences worth internalising:
+
+- **`cluster_dispatch_board` is inert while `cluster_dispatch: false`.** It is only read when the master switch is on. Adding or removing boards from the list while cluster dispatch is disabled changes nothing at runtime. It is fine to keep the list forward-populated for a later re-enablement — but if that is what you are doing, keep a comment saying so, because otherwise the next reader will assume the list is load-bearing when it is not.
+- **A board being off the whitelist never "stalls" tickets in local mode.** If ready tasks are sitting on some board and not getting picked up, the cause is somewhere else (blocked parents, missing assignee profile, spawn-failure back-off after `kanban.failure_limit`, worker crash loop) — it is not the whitelist. Grep the dispatcher's log for `dispatch_skipped` or run `hermes doctor` to see which case applies.
+
+`hermes doctor` runs a "Kanban Board Scope" check that surfaces both failure modes distinctly:
+
+- `⚠` **WARN** when `cluster_dispatch=true` and a board with active tickets is NOT on the whitelist — the LLM cluster router falls back to local for that board, which usually means an operator forgot to whitelist a new board after adding it.
+- `ℹ` **INFO** when `cluster_dispatch=false` and a whitelist is defined that omits boards with active tickets — informational only; local dispatch still processes every board and no tickets are stalled by the omission. Flipping the master switch to `true` later without updating the whitelist would silently route those boards locally by fallback, which is why the check surfaces them ahead of time.
+
+The check is emitted once at gateway startup and re-runs on every `hermes doctor` invocation. Set `hermes.doctor.strict_kanban_scope: true` to make doctor exit non-zero on WARN entries (default false; INFO never gates exit).
+
+#### Profile-scoped `HERMES_HOME`: where the gate reads config from
+
+`create_cluster_node_router()` resolves its config via `load_config()`,
+which honors `HERMES_HOME`. This produces a deliberate asymmetry between
+the gateway process and worker shells:
+
+- **The gateway** runs with `HERMES_HOME` pointing at the root Hermes
+  home (e.g. `/home/ubuntu/.hermes`), so it reads the root `config.yaml`
+  and its `kanban.cluster_dispatch` / `kanban.cluster_dispatch_board`
+  keys are live. The gateway is the only process whose routing decision
+  matters — it owns the dispatcher and spawns every worker.
+- **Worker shells** (agents spawned with a profile-scoped
+  `HERMES_HOME`, e.g. `~/.hermes/profiles/<name>`) resolve the profile's
+  own `config.yaml`, which normally has **no** cluster dispatch keys.
+  The gate therefore fail-safes to local-only there: a factory call in a
+  worker shell returns `local_node_router` even for a board that is
+  whitelisted and cluster-routed at the gateway.
+
+Both directions are safe: the fallback is fail-closed (all-local), and
+the process that actually dispatches — the gateway — always sees the
+root config. But it trips up debugging: a live-fire test of
+`create_cluster_node_router()` executed from a worker shell (or any
+process without `HERMES_HOME` pointing at the root) returns LOCAL for a
+whitelisted board and looks like a whitelist-gate bug when it is not.
+**Always live-fire the dispatch gate with the gateway's environment**
+(`HERMES_HOME=<root>`), or read the gateway process's own environment to
+confirm which config it resolved.
+
+The same scoping rule applies at write time: `hermes config set
+kanban.cluster_dispatch …` run from a profile-scoped shell writes the
+profile config, which the gateway never reads. Set cluster dispatch keys
+from the root environment (or edit the root `config.yaml` directly).
+Only `vfe.*` keys are root-routed automatically when set under a
+profile; `kanban.*` remains profile-scoped by design because most of its
+keys (workspace kind, heartbeat intervals) are legitimately per-profile.
+
 Running `hermes kanban daemon` as a separate process is **deprecated**;
 use the gateway. If you truly cannot run the gateway (headless host
 policy forbids long-lived services, etc.) a `--force` escape hatch keeps

@@ -411,6 +411,50 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("debug", "Upload debug report (system info + logs) and get shareable links", "Info",
                args_hint="[nous|local]"),
 
+    # Executive Agent Loading (WhatsApp integration)
+    CommandDef("load-demis", "Connect to Demis Hassabis (DeepMind co-founder, AI researcher)", "Agents",
+               gateway_only=True, aliases=("demis",)),
+    CommandDef("load-jony", "Connect to Jony Ive (Apple design chief, product visionary)", "Agents",
+               gateway_only=True, aliases=("jony",)),
+    CommandDef("load-jeff", "Connect to Jeff Dean (Google AI/systems researcher)", "Agents",
+               gateway_only=True, aliases=("jeff",)),
+    CommandDef("load-knuth", "Connect to Donald Knuth (Computer science pioneer, TAOCP author)", "Agents",
+               gateway_only=True, aliases=("knuth",)),
+    CommandDef("load-tigani", "Connect to Jordan Tigani (BigQuery architect, data warehouse expert)", "Agents",
+               gateway_only=True, aliases=("tigani",)),
+    CommandDef("load-turing", "Connect to Alan Turing (Computing theory pioneer)", "Agents",
+               gateway_only=True, aliases=("turing",)),
+    CommandDef("agents-list", "List all available executive agents", "Agents",
+               gateway_only=True, aliases=("list-agents",)),
+    CommandDef("agents-disconnect", "Disconnect from current agent and end session", "Agents",
+               gateway_only=True, aliases=("disconnect",)),
+
+    # Multi-Instance Orchestration (WhatsApp integration)
+    CommandDef("switch-local", "Switch to local Hermes instance (WhatsApp gateway)", "Instances",
+               gateway_only=True, aliases=("local",)),
+    CommandDef("switch-hermes2", "Switch to remote Hermes instance (agent execution layer)", "Instances",
+               gateway_only=True, aliases=("hermes2",)),
+    CommandDef("hermes-list", "List all available Hermes instances", "Instances",
+               gateway_only=True, aliases=("list-hermes",)),
+    CommandDef("hermes-status", "Show current active Hermes instance", "Instances",
+               gateway_only=True, aliases=("status-hermes",)),
+
+    # Help & Documentation (WhatsApp integration)
+    CommandDef("help-agents", "Show help for agent commands", "Help",
+               gateway_only=True, aliases=("help agents",)),
+    CommandDef("help-instances", "Show help for instance switching", "Help",
+               gateway_only=True, aliases=("help instances",)),
+
+    # Access Control (WhatsApp integration)
+    CommandDef("access-list", "Show all whitelisted users (admin only)", "Access",
+               gateway_only=True, aliases=("list-access",)),
+    CommandDef("access-status", "Check your access permission", "Access",
+               gateway_only=True, aliases=("status-access",)),
+    CommandDef("access-grant", "Grant access to a user (admin only)", "Access",
+               gateway_only=True, aliases=("grant-access",)),
+    CommandDef("access-revoke", "Revoke access from a user (admin only)", "Access",
+               gateway_only=True, aliases=("revoke-access",)),
+
     # Exit
     CommandDef("quit", "Exit the CLI (use --delete to also remove session history)", "Exit",
                cli_only=True, aliases=("exit",), args_hint="[--delete]",
@@ -1478,8 +1522,18 @@ _SLACK_PRIORITY_ALIASES: tuple[str, ...] = ()
 #     (session export is an interactive surface; platform is a rare
 #     informational lookup) — without this entry /save tips the registry
 #     past the 50-cap and silently clamps /platform, breaking parity.
-_SLACK_VIA_HERMES_ONLY = frozenset({"topup", "moa", "debug", "egress", "init", "version", "diff", "update", "heartbeat", "refine", "review", "pause", "whoami", "platform", "insights"})
-
+#   - access_grant/access_list/access_revoke/access_status: access-control
+#     administration (merged from fork main lineage 2026-09-07).
+#   - agents_disconnect/agents_list: multi-agent management; not worth
+#     native Slack slots (fork lineage).
+#   - help_agents/help_instances: help sub-commands routed via /hermes help
+#     on Slack (fork lineage).
+#   - hermes_list/hermes_status: instance management (fork lineage).
+#   - load_* persona commands and switch_hermes2/switch_local: persona and
+#     instance switching routed via /hermes on Slack (fork lineage).
+_SLACK_VIA_HERMES_ONLY = frozenset({
+    "access_grant", "access_list", "access_revoke", "access_status", "agents_disconnect", "agents_list", "debug", "diff", "egress", "heartbeat", "help_agents", "help_instances", "hermes_list", "hermes_status", "init", "insights", "load_demis", "load_jeff", "load_jony", "load_knuth", "load_tigani", "load_turing", "moa", "pause", "platform", "refine", "review", "switch_hermes2", "switch_local", "topup", "update", "version", "whoami",
+})
 
 def _sanitize_slack_name(raw: str) -> str:
     """Convert a command name to a valid Slack slash command name.

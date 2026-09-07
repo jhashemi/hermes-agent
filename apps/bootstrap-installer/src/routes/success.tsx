@@ -48,14 +48,13 @@ export default function Success() {
           }
         >
           <span>
-            <span>Hermes is ready</span>
+            <span>AI Assistant is ready</span>
           </span>
-          <span aria-hidden="true">Hermes is ready</span>
+          <span aria-hidden="true">AI Assistant is ready</span>
         </p>
 
         <p className="m-0 text-center text-base leading-normal tracking-tight text-muted-foreground">
-          You can launch from here, or any time from your terminal with{' '}
-          <code className="font-mono text-sm text-foreground/80">hermes desktop</code>.
+          AI Assistant is ready to go. Click the button below to open it, or start it later from your terminal with ai-assistant desktop.
         </p>
       </div>
 
@@ -70,7 +69,7 @@ export default function Success() {
         <div className="flex max-w-2xl items-start gap-2 text-sm" role="alert">
           <AlertCircle className="mt-0.5 shrink-0 text-destructive" size={16} />
           <div className="min-w-0">
-            <div className="font-medium text-destructive">Couldn&rsquo;t launch the desktop app</div>
+            <div className="font-medium text-destructive">We couldn't open the app</div>
             <div className="mt-0.5 text-muted-foreground">{error}</div>
           </div>
         </div>

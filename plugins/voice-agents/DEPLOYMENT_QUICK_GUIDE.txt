@@ -1,0 +1,455 @@
+VOICE BRIDGE + AGENT DEPLOYMENT - QUICK GUIDE
+═════════════════════════════════════════════════════════════════════════════
+
+WHAT'S NEW IN V2?
+
+  V1: Install SOLID hook system
+  V2: Install SOLID hook system + Deploy executive agents
+
+Now you can:
+  ✓ Deploy individual agents (/load-demis, /load-steve-jobs, etc.)
+  ✓ Deploy preset agent sets (executive-team, ai-experts)
+  ✓ Manage agent lifecycle (enable, disable, test, remove)
+  ✓ Monitor agent statistics and health
+  ✓ Create custom agents from interview data
+
+═════════════════════════════════════════════════════════════════════════════
+
+QUICK START - 3 COMMANDS
+
+1. Register skill:
+   mkdir -p ~/.hermes/skills/install-voice-bridge
+   cp /home/ubuntu/executive_agents_platform/SKILL_V2.md \
+      ~/.hermes/skills/install-voice-bridge/SKILL.md
+   cp /home/ubuntu/executive_agents_platform/skill_install_voice_bridge_v2.py \
+      ~/.hermes/skills/install-voice-bridge/skill.py
+
+2. Install voice bridge:
+   hermes skill run install-voice-bridge install
+
+3. Deploy agents:
+   hermes skill run install-voice-bridge deploy-agents --preset executive-team
+
+Done! 7 executive agents ready in WhatsApp.
+
+═════════════════════════════════════════════════════════════════════════════
+
+MAIN COMMANDS
+
+Installation:
+  hermes skill run install-voice-bridge install
+  └─ SOLID hook system + gateway integration
+
+Deploy Single Agent:
+  hermes skill run install-voice-bridge deploy-agent \
+    --agent-id demis_hassabis
+  └─ Deploy one agent with interview data + voice synthesis
+
+Deploy Agent Preset:
+  hermes skill run install-voice-bridge deploy-agents \
+    --preset executive-team
+  └─ Deploy 7 executive agents (15 min)
+
+Deploy Custom Preset:
+  hermes skill run install-voice-bridge deploy-agents \
+    --preset ai-experts
+  └─ Deploy 3 AI experts (5 min)
+
+List All Agents:
+  hermes skill run install-voice-bridge list-agents
+  └─ Show: status, voice UUID, WhatsApp command
+
+Get Agent Details:
+  hermes skill run install-voice-bridge agent-info \
+    --agent-id demis_hassabis
+  └─ Full agent configuration + statistics
+
+Test Agent:
+  hermes skill run install-voice-bridge test-agent \
+    --agent-id demis_hassabis
+  └─ Verify profile, voice, memory systems
+
+═════════════════════════════════════════════════════════════════════════════
+
+DEPLOYMENT WORKFLOW
+
+Step 1: Register Skill
+  cp files to ~/.hermes/skills/install-voice-bridge/
+
+Step 2: Install Base System
+  hermes skill run install-voice-bridge install
+  ✓ Creates hook system
+  ✓ Prepares gateway integration
+
+Step 3: Deploy Agents
+  Option A - One agent:
+    hermes skill run install-voice-bridge deploy-agent \
+      --agent-id demis_hassabis
+
+  Option B - Full team:
+    hermes skill run install-voice-bridge deploy-agents \
+      --preset executive-team
+    ✓ Deploys 7 agents with 289 questions each
+    ✓ Sets up 3 memory systems per agent
+    ✓ Registers WhatsApp commands
+    ✓ Enables voice synthesis
+
+Step 4: Verify Deployment
+  hermes skill run install-voice-bridge list-agents
+  ✓ Shows all 7 agents deployed and ready
+
+Step 5: Test Each Agent
+  hermes skill run install-voice-bridge test-agent \
+    --agent-id demis_hassabis
+  ✓ Verifies configuration, voice, memory
+
+Step 6: Use in WhatsApp
+  /load-demis               → Connected to Demis
+  [Send audio]             → Get voice response
+
+═════════════════════════════════════════════════════════════════════════════
+
+AVAILABLE AGENTS (Predefined)
+
+Demis Hassabis
+  ID: demis_hassabis
+  Title: Co-founder & CEO, Google DeepMind
+  Voice UUID: 36eb02fe (Ready)
+  Questions: 289
+  Quality: 0.92
+  WhatsApp: /load-demis
+
+Steve Jobs
+  ID: steve_jobs
+  Title: Co-founder & former CEO, Apple
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.90
+  WhatsApp: /load-steve-jobs
+
+Jony Ive
+  ID: jony_ive
+  Title: Apple design chief
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.88
+  WhatsApp: /load-jony
+
+Jeff Dean
+  ID: jeff_dean
+  Title: Google AI/systems researcher
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.89
+  WhatsApp: /load-jeff
+
+Donald Knuth
+  ID: donald_knuth
+  Title: Computer science pioneer
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.91
+  WhatsApp: /load-knuth
+
+Jordan Tigani
+  ID: jordan_tigani
+  Title: BigQuery architect
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.87
+  WhatsApp: /load-tigani
+
+Alan Turing
+  ID: alan_turing
+  Title: Computing theory pioneer
+  Voice UUID: [Configure after deployment]
+  Questions: 289
+  Quality: 0.85
+  WhatsApp: /load-turing
+
+═════════════════════════════════════════════════════════════════════════════
+
+DEPLOYMENT PRESETS
+
+Executive Team (7 agents)
+  hermes skill run install-voice-bridge deploy-agents \
+    --preset executive-team
+  
+  ✓ Demis Hassabis (AI Research)
+  ✓ Steve Jobs (Product/Design)
+  ✓ Jony Ive (Design)
+  ✓ Jeff Dean (Systems/AI)
+  ✓ Donald Knuth (Theory)
+  ✓ Jordan Tigani (Data)
+  ✓ Alan Turing (Foundations)
+  
+  Total: 2023 questions
+  Time: ~15 minutes
+
+AI Experts (3 agents)
+  hermes skill run install-voice-bridge deploy-agents \
+    --preset ai-experts
+  
+  ✓ Demis Hassabis
+  ✓ Jeff Dean
+  ✓ Alan Turing
+  
+  Total: 867 questions
+  Time: ~5 minutes
+
+═════════════════════════════════════════════════════════════════════════════
+
+WHAT GETS DEPLOYED PER AGENT
+
+Directory Structure:
+  agents/{agent_id}/
+  ├── agent_profile.yaml         (Profile + metadata)
+  ├── voice_config.yaml          (Voice synthesis config)
+  └── interview_data/            (289 Q&A responses)
+      ├── L0_raw_interview.json
+      ├── L1_segmented.json
+      ├── L2_clustered.json
+      ├── L3_synthesized.json
+      └── L4_assembled_interview.json
+
+Registration:
+  agents_registry.yaml
+  └─ Entry for agent with:
+     - Profile path
+     - Voice UUID
+     - WhatsApp command
+     - Status
+
+WhatsApp Commands:
+  /load-{agent-id}       → Connect to agent
+  /voice-disconnect      → End session
+  [Send audio]          → Get voice response
+
+Memory Systems (All 3):
+  ✓ Park et al. authenticity (289 questions)
+  ✓ Bio executive persistent (decisions + context)
+  ✓ Voice synthesis (real-time audio)
+
+═════════════════════════════════════════════════════════════════════════════
+
+EXAMPLE: Deploy Full Team in 2 Commands
+
+# 1. Install
+hermes skill run install-voice-bridge install
+
+# 2. Deploy
+hermes skill run install-voice-bridge deploy-agents --preset executive-team
+
+# Result:
+✓ Installation: ~10 seconds
+✓ Deployment: ~15 minutes (7 agents, 2023 questions)
+✓ Total: ~15.5 minutes
+
+# Then:
+hermes skill run install-voice-bridge list-agents
+
+# Shows:
+✓ demis_hassabis         /load-demis         ✅ Active
+✓ steve_jobs            /load-steve-jobs    ✅ Active
+✓ jony_ive              /load-jony          ✅ Active
+✓ jeff_dean             /load-jeff          ✅ Active
+✓ donald_knuth          /load-knuth         ✅ Active
+✓ jordan_tigani         /load-tigani        ✅ Active
+✓ alan_turing           /load-turing        ✅ Active
+
+All 7 agents ready in WhatsApp!
+
+═════════════════════════════════════════════════════════════════════════════
+
+TESTING AGENTS
+
+Test Single Agent:
+  hermes skill run install-voice-bridge test-agent \
+    --agent-id demis_hassabis
+  
+  Tests:
+  ✓ Profile loads
+  ✓ Interview data accessible
+  ✓ Memory systems initialized
+  ✓ Voice synthesis ready
+  ✓ WhatsApp command works
+
+Get Agent Info:
+  hermes skill run install-voice-bridge agent-info \
+    --agent-id demis_hassabis
+  
+  Shows:
+  ✓ Full configuration
+  ✓ Interview statistics
+  ✓ Memory system status
+  ✓ Voice parameters
+  ✓ WhatsApp commands
+
+═════════════════════════════════════════════════════════════════════════════
+
+DEPLOYMENT MODES
+
+Full Automation:
+  hermes skill run install-voice-bridge deploy-agents --preset executive-team
+  └─ Deploys all, no manual steps
+
+With Verification:
+  hermes skill run install-voice-bridge deploy-agents --preset executive-team --test
+  └─ Deploys + tests each agent
+
+Dry Run (See What Happens):
+  hermes skill run install-voice-bridge deploy-agents --preset executive-team --dry-run
+  └─ No changes, just shows what would happen
+
+With Backup:
+  hermes skill run install-voice-bridge deploy-agents --preset executive-team --backup
+  └─ Creates backups before deployment
+
+═════════════════════════════════════════════════════════════════════════════
+
+ADVANCED: CUSTOM AGENT DEPLOYMENT
+
+Deploy Custom Agent:
+  hermes skill run install-voice-bridge deploy-agent \
+    --agent-id my_expert \
+    --interview-data /path/to/interview.json \
+    --voice-uuid custom_voice_uuid
+
+Creates:
+  ✓ Agent profile from interview data
+  ✓ Voice configuration
+  ✓ Registration entry
+  ✓ WhatsApp command: /load-my-expert
+
+═════════════════════════════════════════════════════════════════════════════
+
+MANAGEMENT OPERATIONS
+
+Enable Agent:
+  hermes skill run install-voice-bridge enable-agent --agent-id demis_hassabis
+  └─ Makes available in WhatsApp
+
+Disable Agent:
+  hermes skill run install-voice-bridge disable-agent --agent-id demis_hassabis
+  └─ Removes from WhatsApp
+
+Update Agent:
+  hermes skill run install-voice-bridge update-agent \
+    --agent-id demis_hassabis \
+    --set "voice_uuid=new_uuid"
+  └─ Update configuration
+
+Remove Agent:
+  hermes skill run install-voice-bridge remove-agent --agent-id old_agent
+  └─ Delete from system
+
+═════════════════════════════════════════════════════════════════════════════
+
+MONITORING & STATISTICS
+
+Agent Stats:
+  hermes skill run install-voice-bridge agent-stats \
+    --agent-id demis_hassabis
+  
+  Shows:
+  ✓ Sessions started
+  ✓ Total conversation time
+  ✓ Avg session duration
+  ✓ Questions asked
+  ✓ Response quality score
+  ✓ Uptime percentage
+
+System Health:
+  hermes skill run install-voice-bridge system-health
+  
+  Shows:
+  ✓ Hook system status
+  ✓ Gateway connection
+  ✓ Interview database sync
+  ✓ All 3 memory systems
+  ✓ Voice synthesis ready
+  ✓ Speech transcription ready
+  ✓ Streaming ready
+  ✓ All agents operational
+
+═════════════════════════════════════════════════════════════════════════════
+
+TROUBLESHOOTING
+
+Agent Won't Load:
+  hermes skill run install-voice-bridge test-agent --agent-id demis_hassabis
+  hermes skill run install-voice-bridge agent-info --agent-id demis_hassabis
+
+Voice Issues:
+  hermes skill run install-voice-bridge check-voice --voice-uuid 36eb02fe
+
+Memory Problems:
+  hermes skill run install-voice-bridge check-memory --agent-id demis_hassabis
+
+System Issues:
+  hermes skill run install-voice-bridge system-health
+  hermes logs --follow --gateway | grep voice
+
+═════════════════════════════════════════════════════════════════════════════
+
+PERFORMANCE
+
+Installation: ~10 seconds
+Single Agent Deployment: ~2 minutes
+Full Team Deployment: ~15 minutes
+Agent Testing: ~30 seconds
+Interview Query: <100ms
+Voice Synthesis: <2 seconds
+End-to-end Response: <2.5 seconds
+
+═════════════════════════════════════════════════════════════════════════════
+
+FILES INVOLVED
+
+Skill Files:
+  SKILL_V2.md                           (Skill definition with agent deployment)
+  skill_install_voice_bridge_v2.py      (Implementation)
+
+Hook System:
+  gateway/builtin_hooks/voice_agent_hook.py
+  gateway/builtin_hooks/__init__.py
+
+Agent Storage:
+  agents/{agent_id}/agent_profile.yaml
+  agents/{agent_id}/voice_config.yaml
+  agents/{agent_id}/interview_data/...
+  agents/agents_registry.yaml
+
+Gateway:
+  gateway/run.py (+8 lines)
+
+Config:
+  ~/.hermes/.env (+4 variables)
+
+═════════════════════════════════════════════════════════════════════════════
+
+READY TO DEPLOY?
+
+Quick start (15 minutes total):
+
+1. Register skill (2 min):
+   mkdir -p ~/.hermes/skills/install-voice-bridge
+   cp files
+
+2. Install system (< 1 min):
+   hermes skill run install-voice-bridge install
+
+3. Deploy agents (15 min):
+   hermes skill run install-voice-bridge deploy-agents --preset executive-team
+
+4. Test (1 min):
+   hermes skill run install-voice-bridge list-agents
+
+5. Use (now):
+   /load-demis in WhatsApp
+
+✅ 7 executive agents ready!
+
+═════════════════════════════════════════════════════════════════════════════
+STATUS: ✅ SKILL V2 - INSTALLATION + AGENT DEPLOYMENT READY
+═════════════════════════════════════════════════════════════════════════════

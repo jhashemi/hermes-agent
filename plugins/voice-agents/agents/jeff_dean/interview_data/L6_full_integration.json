@@ -1,0 +1,208 @@
+{
+  "agent": "jeff_dean",
+  "layer": "L6",
+  "adaptive_qa_protocol": {
+    "agent_id": "jeff_dean",
+    "version": "1.0",
+    "domains": [
+      "Competition & Infrastructure",
+      "Distributed Systems",
+      "Ethics & AI",
+      "Scale Engineering",
+      "Legacy & Vision",
+      "ML Infrastructure",
+      "Technical Leadership",
+      "AI Systems Design"
+    ],
+    "question_templates": {
+      "Competition & Infrastructure": {
+        "seed_questions": [
+          "How does Google's infrastructure advantage translate to AI?",
+          "What's your response to the GPU shortage challenge?",
+          "How do you compete with specialized AI hardware?",
+          "What infrastructure innovation matters most for AI?",
+          "How do you think about custom silicon vs commodity hardware?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Distributed Systems": {
+        "seed_questions": [
+          "What was the key insight behind Google's early infrastructure?",
+          "How did MapReduce change distributed computing?",
+          "What makes Bigtable's design elegant?",
+          "How do you handle partial failure in distributed systems?",
+          "What's the most underappreciated distributed systems concept?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Ethics & AI": {
+        "seed_questions": [
+          "How should we think about AI's environmental impact?",
+          "What's Google's responsibility in AI development?",
+          "How do you balance open research with competitive advantage?",
+          "What safeguards should AI systems have?",
+          "How should the AI community handle dual-use concerns?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Scale Engineering": {
+        "seed_questions": [
+          "How do you design systems that scale 10x each year?",
+          "What's the relationship between scale and system simplicity?",
+          "How do you debug systems processing billions of requests?",
+          "What's the cost of consistency vs availability at scale?",
+          "How does Google's infrastructure differ from what people imagine?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Legacy & Vision": {
+        "seed_questions": [
+          "What computing problem would you most like to solve?",
+          "How should the next generation think about systems design?",
+          "What's the most important unsolved systems problem?",
+          "How do you want your work to be remembered?",
+          "What would you build with unlimited resources?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "ML Infrastructure": {
+        "seed_questions": [
+          "What drove the creation of TensorFlow?",
+          "How do you think about ML system design vs traditional systems?",
+          "What's the key to efficient distributed training?",
+          "How should ML infrastructure evolve for foundation models?",
+          "What's the relationship between systems thinking and ML?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "Technical Leadership": {
+        "seed_questions": [
+          "How do you manage thousands of engineers across Google?",
+          "What's your approach to technical decision-making at scale?",
+          "How do you stay technically relevant as a senior leader?",
+          "What makes an engineering organization effective?",
+          "How do you evaluate and grow technical talent?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      },
+      "AI Systems Design": {
+        "seed_questions": [
+          "How do you approach designing systems you can't fully predict?",
+          "What's the key to making AI systems reliable?",
+          "How should AI infrastructure differ from traditional cloud?",
+          "What makes Gemini's infrastructure unique?",
+          "How do you think about the compute needs of future AI?"
+        ],
+        "follow_up_patterns": [
+          "elaborate",
+          "challenge",
+          "personal_example",
+          "contrarian_view"
+        ]
+      }
+    },
+    "response_quality_threshold": 0.85,
+    "authenticity_threshold": 0.85,
+    "min_response_length": 100
+  },
+  "leadership_framework": {
+    "style": "transformational",
+    "communication_effectiveness": 1.0,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7,
+    "authenticity_basis": 1.0,
+    "quality_basis": 0.992
+  },
+  "reward_wiring": {
+    "extrinsic": {
+      "weight": 0.35,
+      "signals": [
+        "quality_score",
+        "authenticity_score",
+        "domain_coverage"
+      ]
+    },
+    "intrinsic": {
+      "weight": 0.2,
+      "signals": [
+        "coherence_score",
+        "vocabulary_richness",
+        "response_depth"
+      ]
+    },
+    "hindsight": {
+      "weight": 0.15,
+      "signals": [
+        "cross_domain_consistency",
+        "narrative_continuity"
+      ]
+    },
+    "shaped": {
+      "weight": 0.15,
+      "signals": [
+        "leadership_alignment",
+        "executive_function_match"
+      ]
+    },
+    "kpi_health": {
+      "weight": 0.15,
+      "signals": [
+        "system_health_contribution",
+        "pipeline_pass_rate"
+      ]
+    }
+  },
+  "enr6_compliance": {
+    "l0_raw": true,
+    "l1_cleaned": true,
+    "l2_enriched": true,
+    "l3_thematic": true,
+    "l4_assembled": true,
+    "l5_extensions": true,
+    "l6_integrated": true
+  },
+  "overall_scores": {
+    "quality": 0.992,
+    "authenticity": 1.0,
+    "coherence": 1.0,
+    "richness": 1.0,
+    "domain_coverage": 1.0
+  },
+  "processed_at": "2026-05-17T01:38:17.457545"
+}

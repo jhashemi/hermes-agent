@@ -38,6 +38,27 @@ class TestMoonshotModelDetection:
             "nous/moonshotai/kimi-k2.6",
             "openrouter/moonshotai/kimi-k2-thinking",
             "MOONSHOTAI/KIMI-K2.6",
+            # kimi-for-coding endpoint bare model IDs (added 2026-07-29)
+            "k3",
+            "k3-256k",
+            "kimi-for-coding",
+            "kimi-for-coding-highspeed",
+            "K3",  # case-insensitive
+            "K3-256K",
+            # platform.kimi.ai canonical K3 and K2.7 model IDs (added 2026-07-31)
+            # Source: https://platform.kimi.ai/docs/models
+            "kimi-k3",
+            "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
+            "kimi-k2.5",
+            "KIMI-K3",
+            "moonshotai/kimi-k3",
+            "moonshotai/Kimi-K3",
+            "moonshot/kimi-k3",
+            "moonshot/kimi-k2.7-code",
+            "moonshot/kimi-k2.6",
+            "openrouter/moonshotai/kimi-k3",
+            "nous/moonshotai/kimi-k3",
         ],
     )
     def test_positive_matches(self, model):
@@ -52,6 +73,8 @@ class TestMoonshotModelDetection:
             "openai/gpt-5.4",
             "google/gemini-3-flash-preview",
             "deepseek-chat",
+            "glm-5.2",
+            "k30",  # must NOT match — starts with "k3" but is a different model family
         ],
     )
     def test_negative_matches(self, model):

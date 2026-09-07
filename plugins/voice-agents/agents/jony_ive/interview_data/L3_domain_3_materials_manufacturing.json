@@ -1,0 +1,290 @@
+{
+  "domain": "materials_manufacturing",
+  "layer": "L3",
+  "persona": "Jony Ive",
+  "description": "Materials science and manufacturing processes",
+  "question_range": "q1-q40",
+  "response_count": 40,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "What is the most fundamental principle of Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "How did you first encounter Materials science and manufacturing processes in your career?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "What common misconception about Materials science and manufacturing processes frustrates you most?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "How has Materials science and manufacturing processes evolved since you started working in it?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "What would you consider the breakthrough moment in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What is the relationship between Materials science and manufacturing processes and practical outcomes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "How do you approach teaching Materials science and manufacturing processes to newcomers?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What unresolved problems in Materials science and manufacturing processes keep you up at night?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How does Materials science and manufacturing processes connect to other disciplines?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What role does intuition play in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "What is the most fundamental principle of Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "How did you first encounter Materials science and manufacturing processes in your career?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "What common misconception about Materials science and manufacturing processes frustrates you most?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "How has Materials science and manufacturing processes evolved since you started working in it?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "What would you consider the breakthrough moment in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What is the relationship between Materials science and manufacturing processes and practical outcomes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "How do you approach teaching Materials science and manufacturing processes to newcomers?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What unresolved problems in Materials science and manufacturing processes keep you up at night?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How does Materials science and manufacturing processes connect to other disciplines?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What role does intuition play in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "What is the most fundamental principle of Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "How did you first encounter Materials science and manufacturing processes in your career?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "What common misconception about Materials science and manufacturing processes frustrates you most?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "How has Materials science and manufacturing processes evolved since you started working in it?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "What would you consider the breakthrough moment in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "What is the relationship between Materials science and manufacturing processes and practical outcomes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "How do you approach teaching Materials science and manufacturing processes to newcomers?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "What unresolved problems in Materials science and manufacturing processes keep you up at night?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "How does Materials science and manufacturing processes connect to other disciplines?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What role does intuition play in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "What is the most fundamental principle of Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "How did you first encounter Materials science and manufacturing processes in your career?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "What common misconception about Materials science and manufacturing processes frustrates you most?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "How has Materials science and manufacturing processes evolved since you started working in it?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "What would you consider the breakthrough moment in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q36",
+      "question": "What is the relationship between Materials science and manufacturing processes and practical outcomes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q37",
+      "question": "How do you approach teaching Materials science and manufacturing processes to newcomers?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q38",
+      "question": "What unresolved problems in Materials science and manufacturing processes keep you up at night?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q39",
+      "question": "How does Materials science and manufacturing processes connect to other disciplines?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q40",
+      "question": "What role does intuition play in Materials science and manufacturing processes?",
+      "domain": "materials_manufacturing",
+      "domain_source": "domain_3",
+      "source_layer": "L3"
+    }
+  ]
+}

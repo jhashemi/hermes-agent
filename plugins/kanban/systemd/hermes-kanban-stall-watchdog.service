@@ -1,0 +1,24 @@
+[Unit]
+Description=Hermes kanban stall-watchdog — auto-escalate silently-unclaimable tickets (FIX-6)
+Documentation=https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban
+# The gateway hosts an equivalent in-process loop by default
+# (kanban.dispatch_in_gateway=true → gateway/kanban_watchers.py::_kanban_stall_watchdog).
+# This unit is for hosts that intentionally run without a gateway
+# (e.g. worker-only nodes) and drive the sweep from a systemd timer.
+# Running BOTH the gateway loop AND this timer is safe — the sweep is
+# idempotent (stall_escalated event guards double-escalation) — but
+# unnecessary. Prefer one or the other.
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env hermes kanban stall-sweep --all-boards
+StandardOutput=journal
+StandardError=journal
+# Bounded budget: the sweep is cheap (indexed SELECTs, small UPDATE
+# per hit). 5 minutes is generous enough for the largest boards while
+# still guaranteeing a timely SIGTERM if something goes wrong.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,40 @@
+{
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.513704+00:00"
+  },
+  "architecture": {
+    "layers": [
+      "L0",
+      "L1"
+    ],
+    "integration": "reflection_to_deterministic"
+  },
+  "biographical_anchor_mapping": {
+    "core_philosophy": "critical",
+    "professional_identity": "high",
+    "driving_motivation": "critical",
+    "worldview": "high",
+    "legacy_ambition": "medium"
+  },
+  "psychological_driver_mapping": {
+    "decision_style": "analytical",
+    "communication_style": "reflective",
+    "conflict_style": "avoiding",
+    "leadership_style": "transformative",
+    "innovation_orientation": 0.91,
+    "detail_orientation": 0.74
+  },
+  "query_routing_guide": {
+    "default": "L2",
+    "deterministic": "L1",
+    "reflective": "L0",
+    "domain_specific": "L3"
+  },
+  "consistency_guarantees": [
+    "L0 reflections inform L1 mappings",
+    "L1 correlations bound L3 responses"
+  ],
+  "implementation_notes": [
+    "Always check L0 before L3 for worldview consistency"
+  ]
+}

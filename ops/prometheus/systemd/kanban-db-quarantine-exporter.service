@@ -1,0 +1,34 @@
+[Unit]
+Description=Kanban DB Quarantine Prometheus Exporter (VFE-KANBAN-CORRUPTION-02, t_09bf9d6c)
+Documentation=file:///home/ubuntu/hermes-agent/ops/prometheus/kanban_db_quarantine_exporter.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ubuntu
+Environment="PYTHONUNBUFFERED=1"
+# PYTHONPATH includes hermes-agent so that hermes_cli.kanban_db is importable
+# from the executive_agents_framework venv (which has prometheus_client).
+Environment="PYTHONPATH=/home/ubuntu/hermes-agent"
+Environment="KANBAN_HOME=/home/ubuntu/.hermes/kanban/boards"
+# executive_agents_framework venv has both prometheus_client and can resolve
+# hermes_cli via PYTHONPATH above.
+ExecStart=/home/ubuntu/executive_agents_framework/.venv/bin/python \
+    /home/ubuntu/executive_agents_platform/ops/grafana/kanban_db_quarantine_exporter.py \
+    --port 9485 \
+    --kanban-home /home/ubuntu/.hermes/kanban/boards \
+    --sweep-interval 30 \
+    --log-level INFO
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=kanban-db-quarantine-exporter
+
+# Resource caps
+MemoryMax=128M
+CPUWeight=10
+
+[Install]
+WantedBy=default.target

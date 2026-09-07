@@ -862,6 +862,160 @@ class TestSharedBoardPaths:
 
 
 # ---------------------------------------------------------------------------
+# Spawn-time argparse guard (RCA t_276cb9df, defect 2)
+#
+# Run-186 of t_okr_market_research_assignment: the remote spawn passed the
+# multi-word "work kanban task <id>" prompt unquoted, the remote shell
+# word-split it, and hermes argparse rejected the leftovers with rc=2 —
+# the worker died ~1s after spawn and the dispatcher re-queued it onto the
+# SAME broken command forever. The guard converts that signature
+# (rc==2 within ~1s + "unrecognized arguments" in the worker log head)
+# into a typed spawn_parse_error event so the failure is loud and
+# searchable instead of a silent crash-requeue loop.
+# ---------------------------------------------------------------------------
+class TestSpawnParseErrorGuard:
+    def _task(self, tmp_path):
+        return kb.Task(
+            id="t_parse_guard",
+            title="x",
+            body=None,
+            assignee="coder",
+            status="ready",
+            priority=0,
+            created_by=None,
+            created_at=0,
+            started_at=None,
+            completed_at=None,
+            workspace_kind="scratch",
+            workspace_path=str(tmp_path / "ws"),
+            claim_lock=None,
+            claim_expires=None,
+            tenant=None,
+            branch_name=None,
+        )
+
+    def _spawn_env(self, monkeypatch, tmp_path):
+        default_home = tmp_path / ".hermes"
+        default_home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(default_home))
+        # HERMES_KANBAN_HOME overrides the .hermes ROOT used for kanban path
+        # resolution (not the kanban subdir). Pin it to the same root so the
+        # tempdir heuristic warning doesn't fire and paths stay isolated.
+        monkeypatch.setenv("HERMES_KANBAN_HOME", str(default_home))
+        monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_WORKSPACES_ROOT", raising=False)
+        monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+
+    def _fake_popen(self, monkeypatch, rc, log_path, writes):
+        """Popen stub whose child immediately exits with `rc` after writing
+        the given bytes to the (dispatcher-pre-created) log file."""
+
+        class _FakeProc:
+            pid = 4242
+
+            def poll(self):
+                return rc
+
+        def _popen(cmd, **kwargs):
+            if writes is not None:
+                log_path.write_bytes(writes)
+            return _FakeProc()
+
+        monkeypatch.setattr("subprocess.Popen", _popen)
+
+    def test_guard_emits_typed_event_on_unrecognized_arguments(
+        self, tmp_path, monkeypatch
+    ):
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        # Derive the log path from the same resolver the dispatcher uses —
+        # the test must track path-resolution reality, not guess it.
+        log_dir = kb.worker_logs_dir(board="b")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "t_parse_guard.log"
+
+        events = []
+        self._fake_popen(
+            monkeypatch, 2, log_path,
+            b"usage: hermes [-h] ...\n"
+            b"hermes: error: unrecognized arguments: kanban task t_parse_guard\n",
+        )
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind, payload)),
+        )
+        # Stub the module-level connect() context manager so the event write
+        # doesn't hit a real board DB inside the test sandbox.
+        import contextlib
+
+        @contextlib.contextmanager
+        def _fake_connect():
+            yield object()
+
+        monkeypatch.setattr(kb, "connect", _fake_connect)
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert len(events) == 1
+        tid, kind, payload = events[0]
+        assert tid == "t_parse_guard"
+        assert kind == "spawn_parse_error"
+        assert "unrecognised arguments" in payload["reason"]
+        assert "unrecognized arguments: kanban task t_parse_guard" in payload["offending_line"]
+
+    def test_guard_silent_when_child_runs_normally(self, tmp_path, monkeypatch):
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        events = []
+        self._fake_popen(monkeypatch, None, None, None)  # child still running
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind)),
+        )
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert events == []
+
+    def test_guard_silent_on_rc2_without_unrecognized_arguments(
+        self, tmp_path, monkeypatch
+    ):
+        # rc=2 for an unrelated reason must NOT produce a spawn_parse_error.
+        import gateway.session_context as sc
+
+        monkeypatch.setattr(sc, "_session_context_engaged", False)
+        sc.reset_session_vars()
+        self._spawn_env(monkeypatch, tmp_path)
+
+        log_dir = kb.worker_logs_dir(board="b")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "t_parse_guard.log"
+
+        events = []
+        self._fake_popen(monkeypatch, 2, log_path, b"some other failure\n")
+        monkeypatch.setattr(
+            kb, "_append_event",
+            lambda conn, tid, kind, payload, run_id=None: events.append((tid, kind)),
+        )
+
+        task = self._task(tmp_path)
+        kb._default_spawn(task, str(tmp_path / "ws"), board="b")
+
+        assert events == []
+
+
+# ---------------------------------------------------------------------------
 # latest_summary / latest_summaries — surface task_runs.summary handoffs
 # ---------------------------------------------------------------------------
 
@@ -1613,6 +1767,239 @@ def test_write_txn_check_reads_correct_header_fields(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _signaled_status(signum: int) -> int:
+    """Raw wait-status for a WIFSIGNALED child with the given signal number."""
+    return signum & 0x7F
+
+
+# ---------------------------------------------------------------------------
+# FIX-A: Popen retention tests
+#
+# These tests verify the fix for the Popen-retention bug where _default_spawn()
+# discarded the Popen handle, allowing Python's GC to consume the child exit
+# status through subprocess._active before reap_worker_zombies() could record
+# it into _recent_worker_exits.  Without the fix, _classify_worker_exit()
+# returned ("unknown", None) for every spawned worker — the root cause of the
+# 90% "pid N not alive" classifier failure on adr-006b-phase-2.
+# ---------------------------------------------------------------------------
+
+
+def test_popen_retention_sigkill_classified_as_signaled(
+    kanban_home, monkeypatch,
+):
+    """Worker killed by SIGKILL (rc=137 shell, Popen.returncode=-9) is
+    classified as 'signaled' with signal 9, not 'unknown'.
+
+    This is the primary regression guard for FIX-A: a Popen handle in
+    _popen_retention whose child exits with signal 9 must be swept by
+    reap_worker_zombies() and recorded into _recent_worker_exits so the
+    crash classifier returns 'killed by signal 9' instead of 'pid N not alive'.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98001
+
+    # Build a mock Popen object whose poll() reports SIGKILL (returncode = -9).
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = -9  # Python encodes SIGKILL as -9
+
+    # Seed the retention dict directly (simulates _default_spawn storing it).
+    _kb._popen_retention[pid] = mock_proc
+
+    # Ensure no stale entry from a previous test.
+    _kb._recent_worker_exits.pop(pid, None)
+
+    # reap_worker_zombies() calls _sweep_popen_retention() internally.
+    _kb.reap_worker_zombies()
+
+    # After the sweep, the entry must be gone from the retention dict.
+    assert pid not in _kb._popen_retention, (
+        "handle should be pruned after exit is recorded"
+    )
+
+    # And _classify_worker_exit must now return 'signaled' with signal 9.
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "signaled", (
+        f"expected 'signaled', got '{kind}' — Popen retention sweep not working"
+    )
+    assert code == 9, f"expected signal 9 (SIGKILL), got {code}"
+
+    # Verify this is the 'killed by signal 9' error text path used by
+    # detect_crashed_workers to stamp run.error.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="sigkill-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        # Re-seed so detect_crashed_workers can find it (reap already pruned it).
+        _kb._record_worker_exit(pid, _kb._popen_returncode_to_raw_status(-9))
+
+        kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.last_failure_error is not None
+        assert "killed by signal 9" in task.last_failure_error, (
+            f"expected 'killed by signal 9' in error, got: {task.last_failure_error!r}"
+        )
+
+
+def test_popen_retention_nonzero_exit_classified_correctly(
+    kanban_home, monkeypatch,
+):
+    """Worker that exits with rc=2 is classified as 'nonzero_exit' with code 2,
+    not 'unknown'.
+
+    Regression guard: a Popen handle with returncode=2 must be swept by
+    reap_worker_zombies() so run.error reads 'pid N exited with code 2'.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98002
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = 2  # Normal exit, code 2
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb.reap_worker_zombies()
+
+    assert pid not in _kb._popen_retention
+
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "nonzero_exit", (
+        f"expected 'nonzero_exit', got '{kind}'"
+    )
+    assert code == 2, f"expected exit code 2, got {code}"
+
+    # Verify the full path: detect_crashed_workers stamps the right error text.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="nonzero-exit-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        _kb._record_worker_exit(pid, _kb._popen_returncode_to_raw_status(2))
+
+        kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.last_failure_error is not None
+        assert "exited with code 2" in task.last_failure_error, (
+            f"expected 'exited with code 2' in error, got: {task.last_failure_error!r}"
+        )
+
+
+def test_popen_retention_rate_limited_exit_not_counted_as_failure(
+    kanban_home, monkeypatch,
+):
+    """Worker that exits with KANBAN_RATE_LIMIT_EXIT_CODE is classified as
+    'rate_limited' and does NOT increment consecutive_failures.
+
+    Regression guard: the rate-limit exit path must survive the Popen retention
+    fix unscathed — a rate-limited exit seeded via _popen_retention must be
+    swept, recorded, and classified as rate_limited so the circuit breaker
+    never trips on a quota wall.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98003
+    rl_code = _kb.KANBAN_RATE_LIMIT_EXIT_CODE
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = rl_code  # Rate-limit sentinel exit code
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb.reap_worker_zombies()
+
+    assert pid not in _kb._popen_retention
+
+    kind, code = _kb._classify_worker_exit(pid)
+    assert kind == "rate_limited", (
+        f"expected 'rate_limited', got '{kind}'"
+    )
+    assert code == rl_code
+
+    # Verify consecutive_failures is NOT incremented.
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _p: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="rate-limited-worker", assignee="a")
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        conn.execute(
+            "UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid)
+        )
+        conn.commit()
+        _kb._record_worker_exit(
+            pid, _kb._popen_returncode_to_raw_status(rl_code)
+        )
+
+        crashed = kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+
+        # rate_limited requeue must NOT appear in crashed list.
+        assert tid not in crashed, (
+            "rate-limited requeue must not count as a crash"
+        )
+        assert task.consecutive_failures == 0, (
+            f"rate-limit must not increment failures, got {task.consecutive_failures}"
+        )
+        assert task.status == "ready", (
+            f"rate-limited task should be requeued to ready, got {task.status}"
+        )
+
+
+def test_popen_retention_still_running_not_pruned():
+    """A Popen handle whose child is still running (poll() returns None) must
+    NOT be pruned from _popen_retention and must NOT create a stale entry in
+    _recent_worker_exits.
+    """
+    import hermes_cli.kanban_db as _kb
+    from unittest.mock import MagicMock
+
+    pid = 98004
+
+    mock_proc = MagicMock()
+    mock_proc.pid = pid
+    mock_proc.poll.return_value = None  # Still running
+
+    _kb._popen_retention[pid] = mock_proc
+    _kb._recent_worker_exits.pop(pid, None)
+
+    _kb._sweep_popen_retention()
+
+    # Handle must stay in the retention dict while the child is alive.
+    assert pid in _kb._popen_retention, (
+        "still-running handle must not be pruned"
+    )
+    # Must not have created a spurious exit entry.
+    assert pid not in _kb._recent_worker_exits, (
+        "still-running child must not appear in _recent_worker_exits"
+    )
+
+    # Cleanup: remove handle so it doesn't affect other tests.
+    _kb._popen_retention.pop(pid, None)
+
+
 
 
 
@@ -1647,3 +2034,205 @@ def test_bare_connect_does_not_close_on_context_exit(tmp_path):
     # Still usable after with-block exit (the leak).
     conn.execute("SELECT 1").fetchone()
     conn.close()  # explicit close to avoid leaking THIS test
+
+
+# ---------------------------------------------------------------------------
+# NFS / network-FS refuse gate — connect() must fail closed against
+# SQLite-over-network-FS corruption (incident 2026-08-18).
+# ---------------------------------------------------------------------------
+
+
+def test_kanban_allow_nfs_env_recognises_truthy_values(monkeypatch):
+    """The escape hatch accepts 1/true/yes/on (case-insensitive)."""
+    for truthy in ("1", "true", "TRUE", "yes", "Yes", "on", "ON"):
+        monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", truthy)
+        assert kb._kanban_allow_nfs_env() is True, f"expected True for {truthy!r}"
+    for falsy in ("", "0", "false", "no", "off", "unknown", "  "):
+        monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", falsy)
+        assert kb._kanban_allow_nfs_env() is False, f"expected False for {falsy!r}"
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    assert kb._kanban_allow_nfs_env() is False
+
+
+def test_guard_kanban_db_refuses_nfs_mount(tmp_path, monkeypatch):
+    """connect() must raise KanbanDbOnNetworkFsError on an NFS-mounted path."""
+    db_path = tmp_path / "kanban.db"
+    # Monkeypatch the mount-detection helper so we don't need a real NFS
+    # mount to exercise the failure path.
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p: (str(tmp_path), "nfs4"),
+    )
+    # Escape hatch must be OFF for this test.
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with pytest.raises(kb.KanbanDbOnNetworkFsError) as excinfo:
+        kb.connect(db_path=db_path)
+    err = excinfo.value
+    assert err.fstype == "nfs4"
+    assert err.mount_point == str(tmp_path)
+    assert str(db_path) in str(err)
+    assert "HERMES_KANBAN_ALLOW_NFS" in str(err)
+
+
+@pytest.mark.parametrize("fstype", ["nfs", "nfs3", "nfs4", "cifs", "smb3", "fuse", "fuseblk", "fuse.sshfs"])
+def test_guard_kanban_db_refuses_every_unsafe_fstype(tmp_path, monkeypatch, fstype):
+    """Every fstype in _KANBAN_UNSAFE_FSTYPES must be refused."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p, _fs=fstype: (str(tmp_path), _fs),
+    )
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with pytest.raises(kb.KanbanDbOnNetworkFsError):
+        kb.connect(db_path=db_path)
+
+
+@pytest.mark.parametrize("fstype", ["ext4", "xfs", "btrfs", "zfs", "tmpfs", "overlay"])
+def test_guard_kanban_db_accepts_local_fstypes(tmp_path, monkeypatch, fstype):
+    """Common local filesystems must never be refused."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p, _fs=fstype: (str(tmp_path), _fs),
+    )
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    with kb.connect(db_path=db_path) as conn:
+        conn.execute("SELECT 1").fetchone()
+    conn.close()
+
+
+def test_guard_kanban_db_escape_hatch_bypasses_refusal(tmp_path, monkeypatch):
+    """HERMES_KANBAN_ALLOW_NFS=1 must let a real open through even on NFS."""
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(
+        kb, "_resolve_mount_for_path",
+        lambda p: (str(tmp_path), "nfs4"),
+    )
+    monkeypatch.setenv("HERMES_KANBAN_ALLOW_NFS", "1")
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    # Must not raise; must return a usable connection.
+    conn = kb.connect(db_path=db_path)
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_guard_kanban_db_no_proc_mounts_is_permissive(tmp_path, monkeypatch):
+    """When /proc/mounts is unreadable (non-Linux), the gate must not fire.
+
+    We can't observe the mount, so refusing would produce false positives
+    on macOS/Windows. Fail-open on detection failure is deliberate.
+    """
+    db_path = tmp_path / "kanban.db"
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: None)
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    kb._INITIALIZED_PATHS.discard(str(db_path.resolve()))
+    conn = kb.connect(db_path=db_path)
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(
+    not Path("/proc/mounts").exists(),
+    reason="requires /proc/mounts (Linux) for real mount-table probe",
+)
+def test_resolve_mount_for_path_finds_a_local_mount_for_tmp_path(tmp_path):
+    """Sanity check the real /proc/mounts probe against a live tmp_path.
+
+    We don't assume a specific fstype (developer machines vary), but the
+    probe MUST return a matching mount and the fstype must NOT be one of
+    the network-fs we refuse — otherwise the whole gate would false-positive
+    on every developer laptop running the test suite.
+    """
+    result = kb._resolve_mount_for_path(tmp_path)
+    # Some sandboxed CI runners mask /proc — accept None as a valid answer.
+    if result is None:
+        pytest.skip("mount probe returned None on this host")
+    mount_point, fstype = result
+    assert str(tmp_path).startswith(mount_point.rstrip("/")), \
+        f"probed mount {mount_point!r} not an ancestor of tmp_path {tmp_path!r}"
+    assert fstype.lower() not in kb._KANBAN_UNSAFE_FSTYPES, \
+        f"tmp_path resolved to unsafe fstype {fstype!r}; test suite would false-positive"
+
+
+def test_resolve_mount_for_path_prefers_longest_prefix(tmp_path, monkeypatch):
+    """/proc/mounts must be scanned longest-prefix-first, matching kernel behaviour."""
+    fake_mounts = "\n".join([
+        "sysfs /sys sysfs rw 0 0",
+        "proc /proc proc rw 0 0",
+        # Parent mount is ext4 (local).
+        "/dev/root / ext4 rw 0 0",
+        # Nested NFS mount — deeper prefix must win.
+        f"nfs-server:/exports {tmp_path} nfs4 rw 0 0",
+    ]) + "\n"
+    # Monkeypatch the file read.
+    real_read_text = Path.read_text
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/proc/mounts":
+            return fake_mounts
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    result = kb._resolve_mount_for_path(tmp_path / "kanban.db")
+    assert result is not None
+    mp, fs = result
+    assert fs == "nfs4"
+    assert mp == str(tmp_path)
+
+
+def test_resolve_mount_for_path_avoids_false_prefix_match(tmp_path, monkeypatch):
+    """A mount at '/foo' must NOT match a file at '/foobar/x'.
+
+    Regression guard against the naïve ``resolved.startswith(mp)`` bug:
+    if the check doesn't add a trailing '/' to the mount point, a nested
+    directory whose name starts with the mount-point string would falsely
+    match.
+    """
+    unsafe_neighbour = tmp_path / "kanban_shared"
+    unsafe_neighbour.mkdir()
+    # Real target: tmp_path / "kanban" (a SIBLING of "kanban_shared", not
+    # a child). The gate must classify it by the parent ext4 mount, NOT
+    # by the trailing-letters-differ NFS mount.
+    target = tmp_path / "kanban" / "kanban.db"
+    target.parent.mkdir()
+
+    fake_mounts = "\n".join([
+        "/dev/root / ext4 rw 0 0",
+        f"nfs-server:/exports {unsafe_neighbour} nfs4 rw 0 0",
+    ]) + "\n"
+    real_read_text = Path.read_text
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/proc/mounts":
+            return fake_mounts
+        return real_read_text(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+    result = kb._resolve_mount_for_path(target)
+    assert result is not None
+    mp, fs = result
+    # Must fall through to the root mount, NOT the neighbouring NFS mount.
+    assert fs == "ext4"
+
+
+def test_init_db_also_refuses_nfs(tmp_path, monkeypatch):
+    """init_db() must fail closed against NFS, same as connect().
+
+    ``hermes kanban init`` and test rigs go through init_db, so it needs
+    the same guard — otherwise an operator running ``hermes kanban init``
+    against an NFS mount could set up a fresh DB in exactly the unsafe
+    location the gate on connect() is trying to prevent.
+    """
+    db_path = tmp_path / "kanban.db"
+    # First open on a healthy local mount.
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: (str(tmp_path), "ext4"))
+    conn = kb.connect(db_path=db_path)
+    conn.close()
+    # Now pretend the mount flipped to NFS.
+    monkeypatch.setattr(kb, "_resolve_mount_for_path", lambda p: (str(tmp_path), "nfs4"))
+    monkeypatch.delenv("HERMES_KANBAN_ALLOW_NFS", raising=False)
+    with pytest.raises(kb.KanbanDbOnNetworkFsError):
+        kb.init_db(db_path=db_path)

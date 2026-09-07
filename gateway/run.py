@@ -10946,7 +10946,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # we deliver it ourselves (mirroring the draining-case send above).
         try:
             from tools.approval import has_blocking_approval
-            if event.allow_gateway_control and has_blocking_approval(session_key):
+            # Operator-only: bare-word approval resolution is gated on the
+            # home/admin identity so a customer's conversational "yes"/"no"
+            # is never eaten as an approval verdict (and a customer can
+            # never approve a dangerous command).  Non-authority senders
+            # fall through to normal busy handling — their message still
+            # reaches the agent.
+            if has_blocking_approval(session_key) and self._is_plain_text_approval_authority(event.source):
                 _raw_text = (event.text or "").strip().lower()
                 _approve_words = {"approve", "yes", "ok", "okay", "confirm", "y", "👍"}
                 _deny_words = {"deny", "no", "reject", "cancel", "n", "👎"}
@@ -14324,6 +14330,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # When false, users run `hermes kanban daemon` externally or
         # simply don't use kanban; this loop becomes a no-op.
         self._spawn_supervised(self._kanban_dispatcher_watcher, "kanban_dispatcher_watcher")
+
+        # Start background kanban stall watchdog — auto-escalates
+        # silently-unclaimable tickets (parents_not_done, resource_low,
+        # dependency_wait) after 1h so operators aren't left reading
+        # task_events to find 90-min stalls. FIX-6 / t_5c8fce1b.
+        # Gated by the same `kanban.dispatch_in_gateway` flag as the
+        # dispatcher — the two loops share the singleton dispatch owner
+        # semantics, so only one gateway per host escalates.
+        # (Merged from fork main lineage 2026-09-07.)
+        self._spawn_supervised(self._kanban_stall_watchdog, "kanban_stall_watchdog")
+
+        # Start background kanban block-recheck watchdog — auto-re-evaluates
+        # tickets stuck in `blocked` (crashed workers post-gave_up, cleared
+        # resource preconditions, expired time-gates, review-stale) and
+        # applies Policy A/B/C/D actions. FIX-7B / t_d9aec252. Gated by the
+        # same `kanban.dispatch_in_gateway` flag as the dispatcher plus its
+        # own `kanban.block_recheck_enabled` operator switch (default true).
+        # (Merged from fork main lineage 2026-09-07.)
+        self._spawn_supervised(self._kanban_block_recheck, "kanban_block_recheck")
 
         # Start background reconnection watcher for platforms that failed at startup
         if self._failed_platforms:
@@ -19022,6 +19047,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "platform":
             return await self._handle_platform_command(event)
+
+        # Executive agent loading commands (/load-demis, /list-agents, /disconnect, etc.)
+        from gateway.agent_commands import is_agent_command, get_agent_command_handler
+        if is_agent_command(canonical):
+            handler = get_agent_command_handler(canonical)
+            if handler:
+                return await handler(self, event)
 
         if canonical == "stop":
             return await self._handle_stop_command(event)

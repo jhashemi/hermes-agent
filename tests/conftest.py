@@ -36,6 +36,13 @@ PROJECT_ROOT = Path(__file__).parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# wire-004: Ensure src/ sub-packages (hermes_agent, etc.) are importable.
+# The editable-install finder maps flat packages under the repo root but
+# does not cover src/ — add it explicitly so tests can import hermes_agent.
+_SRC_DIR = PROJECT_ROOT / "src"
+if str(_SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(_SRC_DIR))
+
 
 # ── Sandbox HERMES_HOME before ANY test module is imported ──────────────────
 # `hermes_cli/main.py` calls `setup_logging()` at MODULE level, which resolves
@@ -833,6 +840,29 @@ def _teardown_tui_server_sessions(mod) -> None:
         return
     for sid in list(sessions):
         mod._close_session_by_id(sid, end_reason="test_cleanup")
+
+
+@pytest.fixture(autouse=True)
+def _allow_unknown_kanban_assignee(monkeypatch):
+    """Opt every test out of the ghost-profile guard by default.
+
+    ``kanban_db.create_task`` enforces ``validate_assignee`` at the DB
+    layer (t_15f3ec29 — three ghost-assignee stalls in one week, cards
+    routed to non-existent profiles like ``orchestrator`` /
+    ``cc-deployment-expert`` silently dropped forever by the dispatcher).
+    Almost every existing test writes with short synthetic assignees
+    (``"a"``, ``"w"``, ``"shared"``, ``"tenant-x"``) that are not real
+    profiles — the guard would break the entire suite.
+
+    Setting the escape-hatch env var here means: default behavior in
+    tests is the pre-guard behavior. Tests that specifically exercise
+    the guard (see ``tests/hermes_cli/test_kanban_db_assignee_guard.py``
+    and ``tests/tools/test_kanban_tools.py::strict_assignee_env``)
+    ``monkeypatch.delenv`` this key at the start of the test to opt IN
+    to strict validation.
+    """
+    monkeypatch.setenv("HERMES_KANBAN_ALLOW_UNKNOWN_ASSIGNEE", "1")
+    yield
 
 
 @pytest.fixture(autouse=True)

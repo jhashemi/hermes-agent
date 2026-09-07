@@ -65,4 +65,12 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     # config migrate
     config_subparsers.add_parser("migrate", help="Update config with new options")
 
+    # config lint — INCIDENT-01: warn on same-account consecutive fallbacks
+    # and chains sharing the primary's account. Exits non-zero when warnings
+    # are found so CI / cron / dispatch can surface the misconfig.
+    config_subparsers.add_parser(
+        "lint",
+        help="Lint config for high-risk shapes (fallback-chain account diversity)",
+    )
+
     config_parser.set_defaults(func=cmd_config)

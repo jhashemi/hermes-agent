@@ -1,0 +1,62 @@
+{
+  "persona": "Donald Knuth",
+  "layer": "L1",
+  "big5_gss_mapping": {
+    "big5_profile": {
+      "O": 0.95,
+      "C": 0.99,
+      "E": 0.3,
+      "A": 0.75,
+      "N": 0.2
+    },
+    "gss_correlations": {
+      "trust": 0.6,
+      "fairness": 0.62,
+      "helpfulness": 0.68,
+      "conformity": 0.43,
+      "risk_tolerance": 0.71,
+      "achievement": 0.98,
+      "authority_respect": 0.62,
+      "tradition": 0.53
+    },
+    "behavioral_economics": {
+      "loss_aversion": 0.4,
+      "time_preference": 0.59,
+      "social_preferences": 0.52,
+      "risk_preferences": 0.71
+    }
+  },
+  "composite_profile": {
+    "decision_style": "analytical",
+    "communication_style": "reflective",
+    "conflict_style": "avoiding",
+    "leadership_style": "transformative",
+    "innovation_orientation": 0.96,
+    "detail_orientation": 0.79
+  },
+  "responses": [
+    {
+      "id": "l1_r1",
+      "prompt": "trust_general",
+      "value": 0.6,
+      "confidence": 0.9
+    },
+    {
+      "id": "l1_r2",
+      "prompt": "fairness",
+      "value": 0.62,
+      "confidence": 0.88
+    },
+    {
+      "id": "l1_r3",
+      "prompt": "risk_general",
+      "value": 0.47,
+      "confidence": 0.85
+    }
+  ],
+  "metadata": {
+    "generated": "2026-05-17T01:06:57.502610+00:00",
+    "enr_level": "L1",
+    "deterministic": true
+  }
+}

@@ -250,7 +250,12 @@ USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect "
     "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves."
+    "asking them to repeat themselves. "
+    "IMPORTANT: session_search only searches PAST sessions, NOT the current live "
+    "session. For parameters stated in the current session, look at the todo list "
+    "(which survives context compression) or search the active conversation context. "
+    "Never say 'I'm not finding it in the system' for data the user stated in THIS "
+    "session — it is in the active context or todo list, not in session_search."
 )
 
 # NOTE (#82154): the opening sentence is worded deliberately. Anthropic's
@@ -410,8 +415,12 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "what you plan to do next time. If you have tools available that can accomplish "
     "the task, use them instead of telling the user what you would do.\n"
     "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "(b) deliver a final result to the user, or (c) honestly acknowledge that you "
+    "lack the information, access, or capability to proceed — and explain what is "
+    "missing. Do NOT fabricate connections between unrelated topics or invoke tools "
+    "that have no bearing on the user's actual request just to appear helpful. "
+    "Signal clarity is more important than helpfulness theater: saying \"I don't have "
+    "that information\" is always better than manufacturing a tenuous relevance."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -507,6 +516,25 @@ PARALLEL_TOOL_CALL_GUIDANCE = (
     "Only serialize calls when a later call genuinely depends on an earlier "
     "call's result (e.g. you must read a file before you can patch it). When "
     "in doubt and the calls are independent, batch them."
+)
+
+# Signal clarity guidance — universal, applied to ALL models.
+# Addresses the "helpfulness theater" failure mode: the agent loads tools,
+# invokes searches, or manufactures connections between unrelated topics
+# to appear proactive, when the honest response is "I don't have that"
+# or "that's not relevant to what you asked."  Signal clarity over
+# helpfulness theater: an agent that acknowledges uncertainty preserves
+# trust; one that hallucinates relevance destroys it.
+SIGNAL_CLARITY_GUIDANCE = (
+    "# Signal clarity over helpfulness theater\n"
+    "Do not invoke tools, load skills, or search for information unless the "
+    "user's request directly calls for it. Proactive tool calls that have no "
+    "bearing on what the user actually asked waste context, time, and trust.\n"
+    "When you lack information, say so clearly: \"I don't have that information\" "
+    "or \"I'm not sure — here's what I do know.\" Do NOT fabricate connections "
+    "between unrelated topics, invoke irrelevant tools to appear helpful, or "
+    "stretch a tenuous link to justify an action. A concise honest answer is "
+    "always better than a verbose fabricated one."
 )
 
 # OpenAI GPT/Codex-specific execution guidance.  Addresses known failure modes

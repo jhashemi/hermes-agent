@@ -1,0 +1,290 @@
+{
+  "domain": "technical_leadership",
+  "layer": "L3",
+  "persona": "Jeff Dean",
+  "description": "Technical leadership at scale",
+  "question_range": "q1-q40",
+  "response_count": 40,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "How do you build high-performing teams?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q2",
+      "question": "What's your approach to hiring?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q3",
+      "question": "How do you handle underperformers?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q4",
+      "question": "What leadership lesson took you longest to learn?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q5",
+      "question": "How do you make decisions under uncertainty?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q6",
+      "question": "What's your approach to delegation?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q7",
+      "question": "How do you maintain culture as organizations scale?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q8",
+      "question": "What role does vulnerability play in leadership?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q9",
+      "question": "How do you balance competing priorities?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q10",
+      "question": "What's the hardest decision you've had to make?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q11",
+      "question": "How do you build high-performing teams?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q12",
+      "question": "What's your approach to hiring?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q13",
+      "question": "How do you handle underperformers?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q14",
+      "question": "What leadership lesson took you longest to learn?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q15",
+      "question": "How do you make decisions under uncertainty?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q16",
+      "question": "What's your approach to delegation?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q17",
+      "question": "How do you maintain culture as organizations scale?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q18",
+      "question": "What role does vulnerability play in leadership?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q19",
+      "question": "How do you balance competing priorities?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q20",
+      "question": "What's the hardest decision you've had to make?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q21",
+      "question": "How do you build high-performing teams?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q22",
+      "question": "What's your approach to hiring?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q23",
+      "question": "How do you handle underperformers?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q24",
+      "question": "What leadership lesson took you longest to learn?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q25",
+      "question": "How do you make decisions under uncertainty?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q26",
+      "question": "What's your approach to delegation?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q27",
+      "question": "How do you maintain culture as organizations scale?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q28",
+      "question": "What role does vulnerability play in leadership?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q29",
+      "question": "How do you balance competing priorities?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q30",
+      "question": "What's the hardest decision you've had to make?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q31",
+      "question": "How do you build high-performing teams?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q32",
+      "question": "What's your approach to hiring?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q33",
+      "question": "How do you handle underperformers?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q34",
+      "question": "What leadership lesson took you longest to learn?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q35",
+      "question": "How do you make decisions under uncertainty?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q36",
+      "question": "What's your approach to delegation?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q37",
+      "question": "How do you maintain culture as organizations scale?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q38",
+      "question": "What role does vulnerability play in leadership?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q39",
+      "question": "How do you balance competing priorities?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    },
+    {
+      "id": "q40",
+      "question": "What's the hardest decision you've had to make?",
+      "domain": "technical_leadership",
+      "domain_source": "domain_5",
+      "source_layer": "L3"
+    }
+  ]
+}

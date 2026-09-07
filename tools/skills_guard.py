@@ -761,6 +761,16 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
 
     Returns:
         List of findings (deduplicated per pattern per line)
+
+    Notes:
+        Prose files (.md, .txt, .rst) get one-step severity downgrade on all
+        pattern matches (critical→high, high→medium, medium→low). Rationale:
+        matched text in documentation is *describing* a pattern (e.g. "Fix:
+        pip install nats-py"), not executing it. Live executable file types
+        (.py, .sh, .bash, etc.) keep original severity because their content
+        actually runs when the skill loads. Fenced code blocks inside .md
+        also get downgraded — copy-paste is a manual human step, not automatic
+        execution.
     """
     if not rel_path:
         rel_path = file_path.name
@@ -772,6 +782,20 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
         content = file_path.read_text(encoding='utf-8')
     except (UnicodeDecodeError, OSError):
         return []
+
+    # Prose files → one-step severity downgrade on regex-pattern findings.
+    # SKILL.md is markdown by convention regardless of suffix; treat it as prose.
+    _PROSE_SUFFIXES = {'.md', '.txt', '.rst'}
+    is_prose = (
+        file_path.suffix.lower() in _PROSE_SUFFIXES
+        or file_path.name == "SKILL.md"
+    )
+    _DOWNGRADE = {
+        "critical": "high",
+        "high": "medium",
+        "medium": "low",
+        "low": "low",  # already lowest
+    }
 
     findings = []
     lines = content.split('\n')
@@ -795,7 +819,7 @@ def scan_file(file_path: Path, rel_path: str = "") -> List[Finding]:
                     matched_text = matched_text[:117] + "..."
                 findings.append(Finding(
                     pattern_id=pid,
-                    severity=severity,
+                    severity=effective_severity,
                     category=category,
                     file=rel_path,
                     line=i,

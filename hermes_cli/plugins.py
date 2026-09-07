@@ -386,6 +386,26 @@ VALID_HOOKS: Set[str] = {
     #   alias_used: the exact token the user typed (str), args_raw: str,
     #   session_key: str | None (gateway), platform: str | None (gateway).
     "pre_command",
+    # Kanban pre-completion veto hook (VFE-COMPLETE-01 hard-gate seam).
+    # Fires in the WORKER (or CLI) process INSIDE ``complete_task`` BEFORE
+    # the write txn that would flip the task to done. Unlike the observer
+    # ``kanban_task_*`` hooks above, callbacks here MAY return a dict to
+    # veto the completion:
+    #
+    #   {"veto": True, "reason": "<human-readable explanation>"}
+    #
+    # When any registered callback returns a veto dict, ``complete_task``
+    # raises ``CompletionEvidenceRejected`` before mutating task state and
+    # emits a ``completion_blocked_evidence`` audit event on the task
+    # (mirroring the existing ``completion_blocked_hallucination`` pattern).
+    # Callbacks that return ``None`` or any non-veto value are treated as
+    # abstentions. A callback that raises is logged and treated as abstain
+    # (fail-open) so a buggy policy plugin cannot wedge every completion.
+    #
+    # This is the ONLY kanban hook whose return value influences flow —
+    # all others are observer-only. Kept separate from
+    # ``kanban_task_completed`` so the observer/veto split stays legible.
+    #
     # Kwargs: task_id: str, board: str | None, assignee: str | None,
     #   summary: str | None, result: str | None, metadata: dict | None,
     #   profile_name: str.
@@ -4565,13 +4585,18 @@ class PluginManager:
                 continue
 
             # Everything else (standalone, user-installed backends,
-            # entry-point plugins) is opt-in via plugins.enabled.
+            # entry-point plugins) is opt-in via plugins.enabled — UNLESS
+            # the manifest declares ``default_state: enabled``, in which
+            # case the polarity flips: the plugin loads unless the operator
+            # explicitly names it in ``plugins.disabled`` (handled above).
             # Accept both the path-derived key and the legacy bare name
             # so existing configs keep working.
-            is_enabled = (
+            is_enabled_via_allowlist = (
                 enabled is not None
                 and (lookup_key in enabled or manifest.name in enabled)
             )
+            is_enabled_by_default = manifest.default_state == "enabled"
+            is_enabled = is_enabled_via_allowlist or is_enabled_by_default
             if not is_enabled:
                 loaded = LoadedPlugin(manifest=manifest, enabled=False)
                 loaded.error = (
@@ -4897,6 +4922,18 @@ class PluginManager:
                     key, raw_kind, ", ".join(sorted(_VALID_PLUGIN_KINDS)),
                 )
                 kind = "standalone"
+
+            raw_default_state = data.get("default_state", "disabled")
+            if not isinstance(raw_default_state, str):
+                raw_default_state = "disabled"
+            default_state = raw_default_state.strip().lower()
+            if default_state not in ("enabled", "disabled"):
+                logger.warning(
+                    "Plugin %s: unknown default_state '%s' (valid: enabled, disabled); "
+                    "treating as 'disabled'",
+                    key, raw_default_state,
+                )
+                default_state = "disabled"
 
             # Auto-coerce user-installed memory providers to kind="exclusive"
             # so they're routed to plugins/memory discovery instead of being
@@ -5708,6 +5745,28 @@ class PluginManager:
         # monolithic compatibility contract (#64176).
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
+        # Optional defense-in-depth: if the caller reached us before
+        # ``discover_and_load`` has run in this process (e.g. a fresh CLI
+        # subprocess that skipped the normal startup path but is now
+        # dispatching a kanban tool), trigger discovery lazily so
+        # registered plugins can still respond.  Opt-in via env var
+        # because eager mid-invoke discovery mutates registrations in
+        # ways that break tests which drive the manager directly with
+        # a hand-crafted registry.  Set
+        # ``HERMES_ENABLE_LAZY_HOOK_DISCOVERY=1`` to enable in production
+        # workers that skip the CLI's normal startup path.
+        if (
+            not self._discovered
+            and env_var_enabled("HERMES_ENABLE_LAZY_HOOK_DISCOVERY")
+        ):
+            try:
+                self.discover_and_load(force=False)
+            except Exception as exc:
+                logger.debug(
+                    "lazy discovery on invoke_hook(%s) failed: %s",
+                    hook_name, exc,
+                )
         callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         timeout = _resolve_hook_callback_timeout()
@@ -6184,6 +6243,7 @@ class PluginManager:
                     "description": loaded.manifest.description,
                     "source": loaded.manifest.source,
                     "enabled": loaded.enabled,
+                    "default_state": loaded.manifest.default_state,
                     "tools": len(loaded.tools_registered),
                     "hooks": len(loaded.hooks_registered),
                     "middleware": len(loaded.middleware_registered),

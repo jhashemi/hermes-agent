@@ -5,6 +5,7 @@ from __future__ import annotations
 import atexit
 import asyncio
 import contextvars
+import functools
 import importlib
 import inspect
 import logging

@@ -1,0 +1,122 @@
+{
+  "agent": "jordan_tigani",
+  "layer": "L5",
+  "executive_function": {
+    "decision_making_style": "analytical_intuitive",
+    "risk_tolerance": "moderate_high",
+    "strategic_thinking_depth": 1.0,
+    "adaptability_index": 0.738
+  },
+  "leadership_profile": {
+    "style": "transformational",
+    "communication_effectiveness": 0.872,
+    "vision_articulation": 1.0,
+    "team_building_orientation": 0.75,
+    "conflict_resolution": 0.7
+  },
+  "adaptive_domains": [
+    {
+      "domain": "Real-World System Design",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Legacy & Vision",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "BigQuery Deep Dives",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Industry & Future",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Technology Philosophy",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Data Infrastructure",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Competitive Landscape & Innovation",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Query Optimization",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Query Optimization & Performance",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Real-World System Design at Scale",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "API Design & Developer Advocacy",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Team Leadership & Scale",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Leadership, Vision & Legacy",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Data Infrastructure & BigQuery",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Democratizing Data Access",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Mentorship & Team Building",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Democratizing Data",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Personal Philosophy & Wisdom",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Data Culture & Organizational Impact",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Technical Challenges & Solutions",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Building High-Performance Teams",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "Competition & Industry",
+      "mastery_level": 0.785
+    },
+    {
+      "domain": "API Design & Developer Experience",
+      "mastery_level": 0.785
+    }
+  ],
+  "enrichment_metadata": {
+    "source_layers": [
+      "L0",
+      "L1",
+      "L2",
+      "L3",
+      "L4"
+    ],
+    "processing_chain": "l0_raw\u2192l1_clean\u2192l2_enrich\u2192l3_thematic\u2192l4_assemble\u2192l5_extend",
+    "processed_at": "2026-05-19T04:04:58.120902"
+  }
+}

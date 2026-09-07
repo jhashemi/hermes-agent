@@ -483,18 +483,33 @@ def load_hermes_dotenv(
     - callers that only maintain the installation can set
       ``load_external_secrets=False`` to avoid loading optional secret-manager
       dependencies into the process that replaces that same environment.
+
+    - `$HOME/.env.voice_twins` is loaded as a third tier (no-override) so
+      voice-twin credentials (LIVEKIT_*, RESEMBLE_*, DEEPGRAM_*) defined in
+      that file fill missing values without clobbering the canonical .env.
+      This keeps the voice-twins setup the SSOT for those creds while letting
+      ADR-013 (LiveKit room rendezvous) and the gateway pick them up
+      transparently.
     """
     loaded: list[Path] = []
 
     home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
     user_env = home_path / ".env"
     project_env_path = Path(project_env) if project_env else None
+    # Voice-twins env lives at $HOME/.env.voice_twins.  Resolve relative to
+    # hermes_home's parent so tests passing hermes_home=tmp_path/hermes
+    # auto-isolate to tmp_path/.env.voice_twins (which won't exist in test
+    # fixtures), preventing the real ~/.env.voice_twins from leaking into
+    # test environments.
+    voice_twins_env = home_path.parent / ".env.voice_twins"
 
     # Normalize safe formatting and remove invalid NUL bytes before parsing.
     if user_env.exists():
         _sanitize_env_file_if_needed(user_env)
     if project_env_path and project_env_path.exists():
         _sanitize_env_file_if_needed(project_env_path)
+    if voice_twins_env.exists():
+        _sanitize_env_file_if_needed(voice_twins_env)
 
     if user_env.exists():
         _load_dotenv_with_fallback(user_env, override=True)
@@ -537,6 +552,12 @@ def load_hermes_dotenv(
     if load_external_secrets and not _early_recovery._should_skip_external_secret_sources():
         _apply_external_secret_sources(home_path)
     _apply_managed_env()
+    # Voice-twins env tier: never override, only fill missing keys.  Keeps
+    # the canonical ~/.hermes/.env authoritative while sharing creds with
+    # the voice-twins runtime.
+    if voice_twins_env.exists():
+        _load_dotenv_with_fallback(voice_twins_env, override=False)
+        loaded.append(voice_twins_env)
 
     # config.yaml is the documented source of truth for terminal.* settings,
     # but the dotenv loads above run with override=True — so a stale

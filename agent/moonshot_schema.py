@@ -251,6 +251,22 @@ def is_moonshot_model(model: str | None) -> bool:
     Detection by model name covers Nous / OpenRouter / other aggregators that
     route to Moonshot's inference, where the base URL is the aggregator's, not
     ``api.moonshot.ai``.
+
+    Also matches the bare ``k3`` and ``k3-256k`` model IDs exposed by the
+    ``kimi-for-coding`` provider (api.kimi.com/coding/v1). These are the K3
+    reasoning model on the coding-optimized endpoint — they do NOT start with
+    ``kimi-`` and contain no ``moonshot`` substring, so they need an explicit
+    check here so tool-schema sanitization applies on the coding route too.
+
+    K3 API contract notes (platform.kimi.ai, 2026-07-16):
+    - ``kimi-k3`` always reasons at ``reasoning_effort: "max"`` — the model
+      has no non-reasoning mode.
+    - Sampling overrides (``temperature``, ``top_p``, ``n``,
+      ``presence_penalty``, ``frequency_penalty``) are **fixed by the provider**
+      and must NOT be sent — the API rejects them.  The kimi-for-coding endpoint
+      (``k3``, ``k3-256k``) already had this constraint; ``kimi-k3`` inherits it.
+    - ``kimi-k2.7-code`` and ``kimi-k2.7-code-highspeed`` also always reason but
+      accept both ``thinking`` and ``reasoning_effort`` fields being omitted.
     """
     if not model:
         return False
@@ -262,6 +278,11 @@ def is_moonshot_model(model: str | None) -> bool:
     # Kimi Coding Plan serves K3 under the bare slug ``k3`` (plus dated /
     # suffixed variants like ``k3.1`` or ``k3-turbo``).
     if tail == "k3" or tail.startswith(("k3.", "k3-")):
+        return True
+    # kimi-for-coding endpoint bare model IDs (k3, k3-256k, kimi-for-coding[-highspeed])
+    if tail in ("k3", "k3-256k") or tail.startswith("k3-"):
+        return True
+    if tail.startswith("kimi-for-coding"):
         return True
     # Vendor-prefixed forms commonly used on aggregators
     if "moonshot" in bare or "/kimi" in bare or bare.startswith("kimi"):

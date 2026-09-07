@@ -1,0 +1,322 @@
+{
+  "agent": "donald_knuth",
+  "layer": "L3",
+  "domain_count": 8,
+  "domains": {
+    "Algorithmic Foundations": {
+      "name": "Algorithmic Foundations",
+      "questions": [
+        {
+          "question": "What makes an algorithm beautiful?",
+          "response_length": 207,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you approach analyzing algorithm complexity?",
+          "response_length": 227,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the most elegant algorithm ever discovered?",
+          "response_length": 209,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How has the field of algorithm analysis changed since TAOCP?",
+          "response_length": 208,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What algorithmic problem keeps you up at night?",
+          "response_length": 251,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1102,
+      "question_count": 5
+    },
+    "The Art of Programming": {
+      "name": "The Art of Programming",
+      "questions": [
+        {
+          "question": "Why 'Art' in the title of your life's work?",
+          "response_length": 191,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you balance mathematical rigor with practical programming?",
+          "response_length": 200,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes code beautiful vs merely correct?",
+          "response_length": 206,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How has your definition of 'art' in programming evolved?",
+          "response_length": 204,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What chapter of TAOCP was hardest to write?",
+          "response_length": 211,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1012,
+      "question_count": 5
+    },
+    "Typesetting & Design": {
+      "name": "Typesetting & Design",
+      "questions": [
+        {
+          "question": "What drove you to create TeX?",
+          "response_length": 191,
+          "quality_score": 0.955,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How does typesetting relate to programming?",
+          "response_length": 186,
+          "quality_score": 0.93,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the connection between visual design and algorithm design?",
+          "response_length": 239,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "Why was literate programming important to you?",
+          "response_length": 246,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did creating TeX change your thinking?",
+          "response_length": 266,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.977,
+      "avg_authenticity": 1.0,
+      "total_words": 1128,
+      "question_count": 5
+    },
+    "Formal Methods": {
+      "name": "Formal Methods",
+      "questions": [
+        {
+          "question": "What role should formal proofs play in programming?",
+          "response_length": 236,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you verify your own algorithms?",
+          "response_length": 253,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's the limit of formal verification?",
+          "response_length": 230,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you handle the gap between theory and practice?",
+          "response_length": 234,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your view on type theory vs testing?",
+          "response_length": 239,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 1.0,
+      "avg_authenticity": 1.0,
+      "total_words": 1192,
+      "question_count": 5
+    },
+    "CS Education": {
+      "name": "CS Education",
+      "questions": [
+        {
+          "question": "How should computer science be taught?",
+          "response_length": 174,
+          "quality_score": 0.92,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's wrong with how programming is taught today?",
+          "response_length": 221,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What book should every CS student read?",
+          "response_length": 180,
+          "quality_score": 0.9500000000000001,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How has CS education changed since you started teaching?",
+          "response_length": 222,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What advice do you give to PhD students?",
+          "response_length": 285,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.974,
+      "avg_authenticity": 1.0,
+      "total_words": 1082,
+      "question_count": 5
+    },
+    "Ethics & Scholarship": {
+      "name": "Ethics & Scholarship",
+      "questions": [
+        {
+          "question": "What's the responsibility of a computer scientist?",
+          "response_length": 178,
+          "quality_score": 0.89,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you decide what to work on?",
+          "response_length": 269,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your stance on software patents?",
+          "response_length": 279,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How should we handle the social impact of algorithms?",
+          "response_length": 281,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What ethical obligations come with mathematical knowledge?",
+          "response_length": 358,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.978,
+      "avg_authenticity": 1.0,
+      "total_words": 1365,
+      "question_count": 5
+    },
+    "Open Source & Community": {
+      "name": "Open Source & Community",
+      "questions": [
+        {
+          "question": "What's your philosophy on making work freely available?",
+          "response_length": 172,
+          "quality_score": 0.86,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How did the TeX community evolve?",
+          "response_length": 184,
+          "quality_score": 0.9700000000000001,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes a healthy open-source ecosystem?",
+          "response_length": 225,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "Why did you insist on freezing TeX's design?",
+          "response_length": 224,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What's your view on commercial vs academic software?",
+          "response_length": 279,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.966,
+      "avg_authenticity": 1.0,
+      "total_words": 1084,
+      "question_count": 5
+    },
+    "Legacy & Vision": {
+      "name": "Legacy & Vision",
+      "questions": [
+        {
+          "question": "What's the most important unsolved problem in CS?",
+          "response_length": 173,
+          "quality_score": 0.915,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "How do you want TAOCP to be remembered?",
+          "response_length": 207,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What would you tell a young Donald Knuth?",
+          "response_length": 246,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "What makes a life's work worthwhile?",
+          "response_length": 271,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        },
+        {
+          "question": "If you could solve one more problem, what would it be?",
+          "response_length": 232,
+          "quality_score": 1.0,
+          "authenticity_score": 1.0
+        }
+      ],
+      "avg_quality": 0.983,
+      "avg_authenticity": 1.0,
+      "total_words": 1129,
+      "question_count": 5
+    }
+  },
+  "overall_quality": 0.985,
+  "overall_authenticity": 1.0,
+  "processed_at": "2026-05-17T01:38:17.436462"
+}

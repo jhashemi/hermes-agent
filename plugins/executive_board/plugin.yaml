@@ -1,0 +1,153 @@
+name: executive-board
+label: Executive Board
+kind: command
+version: 1.0.0
+description: >
+  Executive board command surface for initiating multi-agent boardroom sessions
+  via Telegram, orchestrating voice ingress/egress via LiveKit, and persisting
+  board decisions to OKR accountability databases. Supports orion/helios/atlas
+  voice agents on hermes2 only; voice OFF on hermes1.
+author: NousResearch
+
+requires_env: []
+
+optional_env:
+  - name: EXECUTIVE_BOARD_LIVEKI_WORKERS
+    description: "LiveKit worker pool name (e.g. hermes2-pool)"
+    prompt: "LiveKit worker pool"
+    password: false
+    default: "hermes2-pool"
+
+  - name: EXECUTIVE_BOARD_RESEMBLE_API_KEY
+    description: "Resemble AI API key for TTS (if not in ~.hermes/config.yaml)"
+    prompt: "Resemble API key"
+    password: true
+
+config_schema:
+  type: object
+  properties:
+    enabled:
+      type: boolean
+      default: true
+      description: "Enable/disable executive board plugin"
+
+    voice_agents:
+      type: array
+      items:
+        type: string
+        enum: ["orion", "helios", "atlas"]
+      default: ["orion"]
+      description: "Roster of board voice agents (max 3)"
+
+    hermes1_voice_disabled:
+      type: boolean
+      default: true
+      description: "Always disable voice agents on hermes1; route to hermes2 only"
+
+    liveki_workers:
+      type: string
+      default: "hermes2-pool"
+      description: "LiveKit worker pool for voice sessions"
+
+    tts_provider:
+      type: string
+      enum: ["resemble"]
+      default: "resemble"
+      description: "Text-to-speech provider (Resemble only)"
+
+    session_timeout_seconds:
+      type: integer
+      default: 900
+      minimum: 60
+      maximum: 3600
+      description: "Session inactivity timeout (seconds)"
+
+    max_session_age_hours:
+      type: integer
+      default: 4
+      minimum: 1
+      maximum: 24
+      description: "Maximum session lifetime before forced archive"
+
+    polling_interval_seconds:
+      type: integer
+      default: 5
+      minimum: 1
+      maximum: 30
+      description: "Poll interval for /board poll command"
+
+    decision_buffer_size:
+      type: integer
+      default: 50
+      minimum: 10
+      maximum: 500
+      description: "In-memory decision buffer before spill to async queue"
+
+    enable_auto_remediate:
+      type: boolean
+      default: false
+      description: "Phase 1: auto_remediate OFF. Phase 2+ may enable."
+
+    accounts:
+      type: array
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            description: "Account identifier (e.g. steve_jobs_board)"
+          admin_telegram_id:
+            type: string
+            description: "Admin Telegram user ID (gated /board config access)"
+          archive_webhook:
+            type: string
+            description: "Optional webhook URL for board archive notifications"
+      default: []
+      description: "Named accounts with admin credentials"
+
+  required: []
+
+commands:
+  - name: board
+    subcommands:
+      - name: start
+        description: "Initiate a new boardroom session"
+        args:
+          - name: topic
+            type: string
+            required: true
+            description: "Discussion topic (max 100 chars)"
+
+      - name: join
+        description: "Join an active boardroom session"
+        args:
+          - name: session_id
+            type: string
+            required: true
+            description: "Session UUID"
+          - name: mode
+            type: string
+            required: false
+            enum: ["voice", "text"]
+            default: "voice"
+            description: "Join mode (voice or text)"
+
+      - name: poll
+        description: "Query board session status and decision summary"
+        args:
+          - name: session_id
+            type: string
+            required: true
+            description: "Session UUID"
+
+      - name: archive
+        description: "Archive a session and finalize decision snapshot"
+        args:
+          - name: session_id
+            type: string
+            required: true
+            description: "Session UUID"
+
+      - name: config
+        description: "Display current plugin configuration (admin only)"
+        args: []

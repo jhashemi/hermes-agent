@@ -1,0 +1,180 @@
+{
+  "persona": "Demis Hassabis",
+  "layer": "L1",
+  "responses": [
+    {
+      "question_id": "q1",
+      "question_text": "Do you trust most people?",
+      "response_value": 3,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q2",
+      "question_text": "Do you trust your neighbors?",
+      "response_value": 3,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q3",
+      "question_text": "Do you trust your family members?",
+      "response_value": 5,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q4",
+      "question_text": "Do you trust your work colleagues?",
+      "response_value": 4,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q5",
+      "question_text": "Do you trust major institutions?",
+      "response_value": 3,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q10",
+      "question_text": "Do you think most people would try to be fair?",
+      "response_value": 4,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q11",
+      "question_text": "Do you think people take advantage of others?",
+      "response_value": 3,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q12",
+      "question_text": "How important is fairness in your work?",
+      "response_value": 5,
+      "big5_component": "C"
+    },
+    {
+      "question_id": "q13",
+      "question_text": "Do you care about equal opportunities?",
+      "response_value": 5,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q14",
+      "question_text": "Should resources be distributed fairly?",
+      "response_value": 5,
+      "big5_component": "A"
+    },
+    {
+      "question_id": "q15",
+      "question_text": "Is integrity important in decision-making?",
+      "response_value": 5,
+      "big5_component": "C"
+    },
+    {
+      "question_id": "q20",
+      "question_text": "How satisfied are you with your life?",
+      "response_value": 5,
+      "big5_component": "N"
+    },
+    {
+      "question_id": "q21",
+      "question_text": "Do you have purpose in your work?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q22",
+      "question_text": "Do you feel fulfilled by your accomplishments?",
+      "response_value": 5,
+      "big5_component": "C"
+    },
+    {
+      "question_id": "q23",
+      "question_text": "Are you engaged in meaningful projects?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q24",
+      "question_text": "Do you find intellectual challenge satisfying?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q25",
+      "question_text": "How important is continuous learning to you?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q30",
+      "question_text": "Do you enjoy working with diverse perspectives?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q31",
+      "question_text": "Do you prefer structured or exploratory work?",
+      "response_value": 4,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q32",
+      "question_text": "Are you comfortable with ambiguity?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q33",
+      "question_text": "Do you seek novel approaches to problems?",
+      "response_value": 5,
+      "big5_component": "O"
+    },
+    {
+      "question_id": "q34",
+      "question_text": "How organized do you keep your work?",
+      "response_value": 5,
+      "big5_component": "C"
+    },
+    {
+      "question_id": "q35",
+      "question_text": "Do you follow through on commitments?",
+      "response_value": 5,
+      "big5_component": "C"
+    },
+    {
+      "question_id": "q40",
+      "question_text": "Do you enjoy social gatherings and networking?",
+      "response_value": 3,
+      "big5_component": "E"
+    },
+    {
+      "question_id": "q41",
+      "question_text": "Are you energized by presenting ideas to groups?",
+      "response_value": 4,
+      "big5_component": "E"
+    },
+    {
+      "question_id": "q42",
+      "question_text": "Do you seek leadership roles?",
+      "response_value": 4,
+      "big5_component": "E"
+    },
+    {
+      "question_id": "q43",
+      "question_text": "Are you comfortable being the center of attention?",
+      "response_value": 3,
+      "big5_component": "E"
+    },
+    {
+      "question_id": "q44",
+      "question_text": "Do you prefer one-on-one or group interactions?",
+      "response_value": 2,
+      "big5_component": "E"
+    },
+    {
+      "question_id": "q50",
+      "question_text": "Do you feel anxious about uncertain outcomes?",
+      "response_value": 2,
+      "big5_component": "N"
+    }
+  ]
+}

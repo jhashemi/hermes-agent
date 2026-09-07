@@ -18,6 +18,8 @@ KANBAN_METHODS = [
     "_kanban_unsub",
     "_kanban_rewind",
     "_deliver_kanban_artifacts",
+    "_kanban_stall_watchdog",
+    "_kanban_block_recheck",
 ]
 
 

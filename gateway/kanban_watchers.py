@@ -1479,6 +1479,88 @@ class GatewayKanbanWatchersMixin:
                         max_in_progress_per_profile,
                     )
 
+        # Read kanban.memory_backpressure_gb — memory backpressure gate
+        # (t_ce9a36ca / FIX-B). When set, the dispatcher skips spawning
+        # for this tick when ``psutil.virtual_memory().available`` is
+        # below this many GB. Prevents the fork-bomb → ENOMEM spiral
+        # that showed up as "pid N not alive" crashes with zero heart-
+        # beats on hermes2 during the 2026-08-16/18 morning bursts.
+        # ``None`` / missing / <=0 → gate disabled (backward-compatible
+        # with pre-fix installs).
+        raw_mem_gb = kanban_cfg.get("memory_backpressure_gb", None)
+        memory_backpressure_gb = None
+        if raw_mem_gb is not None:
+            try:
+                memory_backpressure_gb = float(raw_mem_gb)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "kanban dispatcher: invalid kanban.memory_backpressure_gb=%r; "
+                    "ignoring (gate disabled)",
+                    raw_mem_gb,
+                )
+                memory_backpressure_gb = None
+            else:
+                if memory_backpressure_gb <= 0:
+                    logger.warning(
+                        "kanban dispatcher: kanban.memory_backpressure_gb=%r "
+                        "is <=0; ignoring (gate disabled)",
+                        raw_mem_gb,
+                    )
+                    memory_backpressure_gb = None
+                else:
+                    logger.info(
+                        "kanban dispatcher: memory_backpressure_gb=%.2f "
+                        "(deferring spawns when host available RAM falls below "
+                        "this threshold)",
+                        memory_backpressure_gb,
+                    )
+
+        # ── Cluster dispatch routing ───────────────────────────────────
+        # Create a node router that consults the LLM cluster dispatcher
+        # for cross-node task routing (hermes1/hermes2). Gated by
+        # ``kanban.cluster_dispatch`` (default: False). When disabled or
+        # the LLM dispatcher is unavailable, returns ``local_node_router``
+        # which always routes to the local node (None).
+        cluster_routers: dict[str, "NodeRouter"] = {}
+        try:
+            from gateway.cluster_dispatch import create_cluster_node_router, local_node_router
+            _cluster_dispatch_enabled = bool(kanban_cfg.get("cluster_dispatch", False))
+            if _cluster_dispatch_enabled:
+                logger.info("kanban dispatcher: cluster dispatch enabled in config")
+            else:
+                logger.debug("kanban dispatcher: cluster dispatch disabled (local-only)")
+        except Exception as exc:
+            logger.warning(
+                "kanban dispatcher: cluster_dispatch module import failed (%s); "
+                "all tasks will spawn locally", exc,
+            )
+            _cluster_dispatch_enabled = False
+
+        # Scope-lint: warn on active boards outside the effective cluster
+        # dispatch scope (e.g. board with active tickets not on the whitelist
+        # when cluster_dispatch=true). Emitted once at startup — routine
+        # ticks don't repeat this so the log stays legible.
+        try:
+            from gateway.cluster_dispatch import log_out_of_scope_boards_at_startup
+            log_out_of_scope_boards_at_startup()
+        except Exception as exc:
+            logger.debug("kanban dispatcher: scope-lint init failed (%s)", exc)
+
+        def _get_cluster_router(slug: str):
+            """Return (and cache) a per-board cluster node router."""
+            if not _cluster_dispatch_enabled:
+                return None
+            if slug not in cluster_routers:
+                try:
+                    cluster_routers[slug] = create_cluster_node_router(board=slug)
+                except Exception as exc:
+                    logger.warning(
+                        "kanban dispatcher: failed to create cluster router for "
+                        "board %s (%s); using local-only", slug, exc,
+                    )
+                    cluster_routers[slug] = local_node_router
+            return cluster_routers[slug]
+
         # Initial delay so the gateway finishes wiring adapters before the
         # dispatcher spawns workers (those workers may hit gateway notify
         # subscriptions etc.). Matches the notifier watcher's delay.
@@ -1563,6 +1645,19 @@ class GatewayKanbanWatchersMixin:
                 # re-ran the migration on a second connection, racing
                 # the first. See the matching comment in
                 # `_kanban_notifier_watcher` and issue #21378.
+                # Cluster dispatch: get the per-board node router and
+                # refresh its LLM routing table for this tick. The router
+                # is advisory — dispatch_once re-validates every pick
+                # against deterministic hard gates before claiming.
+                _router = _get_cluster_router(slug)
+                if _router is not None and hasattr(_router, "refresh"):
+                    try:
+                        _router.refresh()
+                    except Exception as exc:
+                        logger.warning(
+                            "kanban dispatcher: cluster router refresh failed "
+                            "for board %s (%s); routing locally", slug, exc,
+                        )
                 return _kb.dispatch_once(
                     conn,
                     board=slug,
@@ -1573,6 +1668,8 @@ class GatewayKanbanWatchersMixin:
                     default_assignee=default_assignee,
                     max_in_progress_per_profile=max_in_progress_per_profile,
                     reconcile_orphans=reconcile_orphans,
+                    memory_backpressure_gb=memory_backpressure_gb,
+                    node_router=_router,
                 )
             except sqlite3.DatabaseError as exc:
                 if _is_corrupt_board_db_error(exc):
@@ -1847,3 +1944,259 @@ class GatewayKanbanWatchersMixin:
                 slept += 1.0
 
         self._release_kanban_dispatcher_lock()
+
+    async def _kanban_stall_watchdog(self) -> None:
+        """Auto-escalate silently-unclaimable tickets (FIX-6 / t_5c8fce1b).
+
+        Runs every ``kanban.stall_watchdog_interval_seconds`` (default 900 =
+        15 min) against every board on disk. For each ticket in ``todo`` or
+        ``ready`` that is older than ``kanban.stall_watchdog_min_age_s``
+        (default 3600) and has a ``claim_rejected`` or ``dependency_wait``
+        event within ``kanban.stall_watchdog_recent_window_s`` (default 3600),
+        the sweep flips it to ``blocked`` / ``needs_input`` and emits a
+        ``stall_escalated`` event.
+
+        Same gate as the notifier / dispatcher: only runs when
+        ``kanban.dispatch_in_gateway`` is true (i.e. this gateway is the
+        board's dispatch owner). Piggybacking on the singleton lock held by
+        ``_kanban_dispatcher_watcher`` ensures we don't get two gateways
+        racing on the same board's escalation events. When
+        ``dispatch_in_gateway`` is disabled the loop exits and operators run
+        ``hermes kanban stall-sweep`` from a cron / systemd timer instead.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban stall watchdog: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get(
+            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
+        ).strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info(
+                "kanban stall watchdog: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
+            )
+            return
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning(
+                "kanban stall watchdog: cannot load config (%s); disabled", exc
+            )
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban stall watchdog: disabled via kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        # An operator can turn the watchdog off independently of the
+        # dispatcher — same shape as the other kanban.* toggles.
+        if not kanban_cfg.get("stall_watchdog_enabled", True):
+            logger.info(
+                "kanban stall watchdog: disabled via kanban.stall_watchdog_enabled=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_stall_watchdog as _sw
+        except Exception as exc:
+            logger.warning(
+                "kanban stall watchdog: import failed (%s); disabled", exc,
+            )
+            return
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(kanban_cfg.get(key, default) or default)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "kanban stall watchdog: invalid %s=%r, using default %d",
+                    key, kanban_cfg.get(key), default,
+                )
+                return default
+
+        interval = float(
+            _cfg_int(
+                "stall_watchdog_interval_seconds", _sw.DEFAULT_SWEEP_INTERVAL_S
+            )
+        )
+        min_age_s = _cfg_int("stall_watchdog_min_age_s", _sw.DEFAULT_MIN_AGE_S)
+        window_s = _cfg_int(
+            "stall_watchdog_recent_window_s", _sw.DEFAULT_RECENT_WINDOW_S
+        )
+
+        logger.info(
+            "kanban stall watchdog: enabled — interval=%.0fs min_age=%ds window=%ds",
+            interval, min_age_s, window_s,
+        )
+
+        # Stagger the first tick so we don't collide with the dispatcher's
+        # very first pass. Also gives the gateway time to finish adapter
+        # wiring — same courtesy as the notifier watcher.
+        await asyncio.sleep(30)
+
+        while self._running:
+            try:
+                results = await asyncio.to_thread(
+                    _sw.sweep_all_boards,
+                    min_age_s=min_age_s,
+                    recent_window_s=window_s,
+                )
+                total_esc = sum(r.escalated_count for r in results.values())
+                total_err = sum(r.errors for r in results.values())
+                if total_esc or total_err:
+                    logger.info(
+                        "kanban stall watchdog: tick — escalated=%d errors=%d boards=%d",
+                        total_esc, total_err, len(results),
+                    )
+                else:
+                    logger.debug(
+                        "kanban stall watchdog: tick — no stalls (boards=%d)",
+                        len(results),
+                    )
+            except Exception:  # noqa: BLE001 - watchdog must survive all failures
+                logger.exception("kanban stall watchdog: tick failed")
+
+            # Slice the sleep so shutdown is snappy.
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
+
+
+    async def _kanban_block_recheck(self) -> None:
+        """Auto-re-evaluate ``blocked`` tickets (FIX-7B / t_d9aec252).
+
+        Runs every ``kanban.block_recheck_interval_seconds`` (default 900 =
+        15 min) against every board on disk. For each ticket in ``blocked``,
+        classifies against Policies A..D (see
+        :mod:`hermes_cli.kanban_block_recheck` docstring) and either
+        auto-unblocks, escalates for operator attention, or leaves alone.
+
+        Gated by ``kanban.dispatch_in_gateway`` (same singleton-owner
+        contract as the dispatcher & stall watchdog — only one gateway
+        per host applies auto-actions) and by ``kanban.block_recheck_enabled``
+        (default True) so operators can disable independently.
+
+        Mirrors :meth:`_kanban_stall_watchdog` in structure — same
+        pre-flight gates, same "sleep-in-slices" shutdown pattern, same
+        ``asyncio.to_thread`` off-loading of the sync sweep function.
+        """
+        try:
+            from hermes_cli.config import load_config as _load_config
+        except Exception:
+            logger.warning("kanban block-recheck: config loader unavailable; disabled")
+            return
+        env_override = os.environ.get(
+            "HERMES_KANBAN_DISPATCH_IN_GATEWAY", ""
+        ).strip().lower()
+        if env_override in {"0", "false", "no", "off"}:
+            logger.info(
+                "kanban block-recheck: disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY env"
+            )
+            return
+        try:
+            cfg = _load_config()
+        except Exception as exc:
+            logger.warning(
+                "kanban block-recheck: cannot load config (%s); disabled", exc
+            )
+            return
+        kanban_cfg = cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
+        if not kanban_cfg.get("dispatch_in_gateway", True):
+            logger.info(
+                "kanban block-recheck: disabled via kanban.dispatch_in_gateway=false"
+            )
+            return
+
+        # Operator kill-switch — independent of the dispatcher gate so a
+        # sysadmin can freeze the blocked lane while leaving dispatch running.
+        if not kanban_cfg.get("block_recheck_enabled", True):
+            logger.info(
+                "kanban block-recheck: disabled via kanban.block_recheck_enabled=false"
+            )
+            return
+
+        try:
+            from hermes_cli import kanban_block_recheck as _br
+        except Exception as exc:
+            logger.warning(
+                "kanban block-recheck: import failed (%s); disabled", exc,
+            )
+            return
+
+        def _cfg_int(key: str, default: int) -> int:
+            try:
+                return int(kanban_cfg.get(key, default) or default)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "kanban block-recheck: invalid %s=%r, using default %d",
+                    key, kanban_cfg.get(key), default,
+                )
+                return default
+
+        interval = float(
+            _cfg_int(
+                "block_recheck_interval_seconds", _br.DEFAULT_SWEEP_INTERVAL_S
+            )
+        )
+        cooldown_s = _cfg_int(
+            "block_recheck_gave_up_cooldown_s", _br.DEFAULT_GAVE_UP_COOLDOWN_S
+        )
+        max_cycles = _cfg_int(
+            "block_recheck_gave_up_max_cycles", _br.DEFAULT_GAVE_UP_MAX_CYCLES
+        )
+        review_stale_s = _cfg_int(
+            "block_recheck_review_stale_s", _br.DEFAULT_REVIEW_STALE_S
+        )
+
+        logger.info(
+            "kanban block-recheck: enabled — interval=%.0fs cooldown=%ds "
+            "max_cycles=%d review_stale=%ds",
+            interval, cooldown_s, max_cycles, review_stale_s,
+        )
+
+        # Stagger the first tick so we don't collide with the dispatcher's
+        # first pass or the stall-watchdog's stagger (30s) — 45s offset
+        # keeps the three loops out of phase.
+        await asyncio.sleep(45)
+
+        while self._running:
+            try:
+                results = await asyncio.to_thread(
+                    _br.sweep_all_boards,
+                    gave_up_cooldown_s=cooldown_s,
+                    gave_up_max_cycles=max_cycles,
+                    review_stale_s=review_stale_s,
+                )
+                total_acted = sum(r.acted_count for r in results.values())
+                total_unblock = sum(r.unblocked_count for r in results.values())
+                total_esc = sum(r.escalated_count for r in results.values())
+                total_err = sum(r.errors for r in results.values())
+                # DoD item 3 — one summary log line per sweep. Info level
+                # when actions applied so operators can grep journalctl;
+                # debug otherwise to avoid log spam on quiet boards.
+                if total_acted or total_err:
+                    logger.info(
+                        "block-recheck sweep: applied %d actions across %d "
+                        "boards (unblocked=%d escalated=%d errors=%d)",
+                        total_acted, len(results),
+                        total_unblock, total_esc, total_err,
+                    )
+                else:
+                    logger.debug(
+                        "block-recheck sweep: no actions (boards=%d)",
+                        len(results),
+                    )
+            except Exception:  # noqa: BLE001 - watchdog must survive all failures
+                logger.exception("kanban block-recheck: tick failed")
+
+            # Slice the sleep so shutdown is snappy — mirror the pattern
+            # used by the stall watchdog and dispatcher.
+            slept = 0.0
+            while slept < interval and self._running:
+                await asyncio.sleep(min(1.0, interval - slept))
+                slept += 1.0
+

@@ -1928,6 +1928,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".ts": "text/plain",
     ".py": "text/plain",
     ".sh": "text/plain",
+    ".skill": "application/vnd.hermes.skill",
 }
 
 
@@ -2917,6 +2918,9 @@ _RETRYABLE_ERROR_PATTERNS = (
     "network",
     "broken pipe",
     "remotedisconnected",
+    "serverdisconnected",
+    "server disconnected",
+    "clientconnectionerror",
     "eoferror",
 )
 

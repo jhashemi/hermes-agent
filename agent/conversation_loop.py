@@ -3842,6 +3842,17 @@ def run_conversation(
                             f"requesting continuation",
                             force=True,
                         )
+                    elif getattr(response, "_stop_misreport_promoted", False):
+                        # Not a real output-cap hit: the provider misreported a
+                        # natural stop as "stop" mid-prose and the GLM heuristic
+                        # promoted it to "length". Say so — "model hit max
+                        # output tokens" would be false here.
+                        agent._vprint(
+                            f"{agent.log_prefix}⚠️  Provider reported a natural "
+                            f"stop on an apparently mid-sentence response — "
+                            f"requesting continuation",
+                            force=True,
+                        )
                     else:
                         agent._vprint(
                             f"{agent.log_prefix}⚠️  Response truncated "
