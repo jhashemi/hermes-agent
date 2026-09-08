@@ -12795,6 +12795,41 @@ def _set_worker_node(
         )
 
 
+def set_worker_pid(
+    conn: sqlite3.Connection, task_id: str, pid: int
+) -> None:
+    """Public, seam-firing entry point for the spawn write (t_bd59bf1a).
+
+    The dispatch loops call the private :func:`_set_worker_pid`, which
+    (correctly) does not know about the observer seam. Until this wrapper
+    existed, no ``kanban_write_op`` fire carried the spawn write, so the
+    vfe-kanban-dual-write plugin never mirrored ``spawned`` events into
+    ``kanban.duckdb`` — they only landed via the ~5-min parity heal.
+    The wrapper keeps :func:`_set_worker_pid` as the single SQLite write
+    path (event ids minted inside its txn are picked up by the seam's
+    pending-id accumulator) and then fires the seam with enough context
+    to replay the write against the mirror: the pid (as ``result`` for
+    id-passthrough shaping parity with other ops), the bound run id, and
+    the freshly-minted ``spawned`` event ids. Fully best-effort: a seam
+    failure must never break the dispatch loop.
+    """
+    _set_worker_pid(conn, task_id, int(pid))
+    try:
+        _fire_kanban_write_op(
+            conn,
+            "set_worker_pid",
+            task_id,
+            result=int(pid),
+            pid=int(pid),
+            run_id=_current_run_id(conn, task_id),
+        )
+    except Exception:  # pragma: no cover — observer-only, fail-open
+        _log.debug(
+            "kanban set_worker_pid: seam fire failed for %s",
+            task_id, exc_info=True,
+        )
+
+
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
     """Reset the unified consecutive-failures counter.
 
@@ -14038,7 +14073,12 @@ def _dispatch_once_locked(
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
             if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+                # t_bd59bf1a (mirror defect 1): use the seam-firing public
+                # wrapper — the bare ``_set_worker_pid`` never fired
+                # ``kanban_write_op``, so ``spawned`` events were invisible
+                # to the DuckDB mirror plugin and only landed via the ~5min
+                # parity heal.
+                set_worker_pid(conn, claimed.id, int(pid))
                 # Persist which node the worker actually landed on so
                 # the reap loops on OTHER nodes don't run ``_pid_alive``
                 # against a remote pid (which would false-crash the
@@ -14209,7 +14249,7 @@ def _dispatch_once_locked(
             except (TypeError, ValueError):
                 pid = _spawn(claimed, str(workspace))
             if pid:
-                _set_worker_pid(conn, claimed.id, int(pid))
+                set_worker_pid(conn, claimed.id, int(pid))
                 # Mirror the ready-dispatch path: persist worker_node
                 # if the review agent was routed to a remote node so
                 # this host's reap loops don't false-crash it.
