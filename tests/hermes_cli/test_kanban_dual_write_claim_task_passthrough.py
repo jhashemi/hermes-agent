@@ -258,6 +258,15 @@ def dual_board(tmp_path, monkeypatch):
     dw._ADAPTER = None
     dw.install(kb)
     yield db_path
+    # Uninstall: restore the pristine kernel functions. Without this the
+    # wrapped (shim) write ops leak into sys.modules and trip the
+    # test_kanban_mirror_parity_reg.no-shim assertion whenever that test
+    # runs after this fixture in the same pytest session (t_d70258e5:
+    # 1 failed / 35 passed under test-ordering randomization).
+    for outer_name, _adapter_name, _id_kw in dw._WRITE_OPS:
+        fn = getattr(kb, outer_name, None)
+        if fn is not None and getattr(fn, "__kanban_dual_write_wrapped__", False):
+            setattr(kb, outer_name, fn.__wrapped__)
     dw._LOAD_ATTEMPTED = False
     dw._FACADE = None
     dw._ADAPTER = None
