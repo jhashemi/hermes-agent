@@ -1223,6 +1223,13 @@ def _set_status_direct(
             )
     for pid, claim_lock in terminations:
         kanban_db._terminate_reclaimed_worker(pid, claim_lock)
+    # t_d70258e5 AC1: this drag-drop write bypasses every structured verb,
+    # so it must emit an explicit ``kanban_write_op`` seam fire of its own
+    # (op name matches this function; the event row already landed above).
+    kanban_db._fire_kanban_write_op(
+        conn, "_set_status_direct", task_id,
+        result=True, new_status=effective_status, requested_status=new_status,
+    )
     # If we re-opened something, children may have gone stale.
     if effective_status in {"done", "ready", "review"}:
         kanban_db.recompute_ready(conn)
