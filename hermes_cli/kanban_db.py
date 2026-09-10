@@ -13453,24 +13453,6 @@ def dispatch_once(
             memory_backpressure_gb=memory_backpressure_gb,
             node_router=node_router,
         )
-        result = _dispatch_once_locked(
-            conn,
-            spawn_fn=spawn_fn,
-            ttl_seconds=ttl_seconds,
-            dry_run=dry_run,
-            max_spawn=max_spawn,
-            max_in_progress=max_in_progress,
-            failure_limit=failure_limit,
-            stale_timeout_seconds=stale_timeout_seconds,
-            board=board,
-            default_assignee=default_assignee,
-            max_in_progress_per_profile=max_in_progress_per_profile,
-            reconcile_orphans=reconcile_orphans,
-            memory_backpressure_gb=memory_backpressure_gb,
-            node_router=node_router,
-        )
-        _fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
-        return result
     with _dispatch_tick_lock(db_path) as held:
         if not held:
             result = DispatchResult(skipped_locked=True)
@@ -13493,6 +13475,11 @@ def dispatch_once(
                 # dropped it here (the lock-acquired path the gateway uses),
                 # silently disabling the memory backpressure gate.
                 memory_backpressure_gb=memory_backpressure_gb,
+                # FIX-C passthrough restored 2026-09-10 (t_RCA): same merge
+                # dropped node_router on this path — router and the HRV node
+                # gate were silently bypassed on every gateway-dispatched
+                # tick (test_dispatch_rejects_red_memory_node regression).
+                node_router=node_router,
             )
             # Still under the dispatch lock: run the periodic PASSIVE WAL
             # checkpoint (see _maybe_checkpoint_wal; the -wal file size is
