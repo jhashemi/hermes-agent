@@ -13693,7 +13693,7 @@ def _dispatch_once_locked(
     review_rows = []
     if review_dispatch_enabled():
         review_rows = conn.execute(
-            "SELECT id, assignee FROM tasks "
+            "SELECT id, assignee, peer_review_assignee FROM tasks "
             "WHERE status = 'review' AND claim_lock IS NULL "
             "ORDER BY priority DESC, created_at ASC"
         ).fetchall()
@@ -14160,7 +14160,12 @@ def _dispatch_once_locked(
         # back to ``assignee`` for the legacy sdlc-review path (no
         # peer_review_assignee set) so existing PR-review workflows keep
         # working unchanged.
-        review_assignee = (row["peer_review_assignee"] or "").strip() or None
+        # t_RCA 2026-09-10: the SELECT above must include peer_review_assignee;
+        # keys()-guard keeps legacy rows (pre-migration DBs) from IndexError-ing
+        # the whole dispatch tick whenever any card sits in 'review'.
+        review_assignee = (
+            (row["peer_review_assignee"] if "peer_review_assignee" in row.keys() else "") or ""
+        ).strip() or None
         is_peer_review = review_assignee is not None
         if review_assignee is None:
             review_assignee = row["assignee"]
